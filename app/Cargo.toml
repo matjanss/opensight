@@ -14,3 +14,6 @@ uuid = "1.29.2"
 # doesn't need the libdbus-1-dev system package (the running D-Bus daemon is still used).
 [target.'cfg(target_os = "linux")'.dependencies]
 libdbus-sys = { version = "0.2", features = ["vendored"] }
+# The pairing agent (src/agent.rs). Same versions btleplug already uses.
+dbus = "0.9"
+dbus-tokio = "0.7"

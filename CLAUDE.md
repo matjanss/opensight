@@ -28,7 +28,9 @@ app could misread new firmware or the reverse.
   requests, which `loop()` picks up with `bleTake*()`. Don't touch pins, NVS or app state
   from a callback.
 - Security: every characteristic needs an encrypted, MITM-authenticated link (passkey 1234,
-  bonding). Unbonded centrals are disconnected unless pairing mode is on.
+  bonding). Unbonded centrals are disconnected unless pairing mode is on. A pairing without
+  the passkey (no MITM) is rejected and its bond deleted at once: NimBLE would otherwise
+  delete it later anyway, when the central re-pairs on the same link.
 - `BOOT_PIN` is defined by the Arduino core; ours is `BOOT_BTN_PIN`.
 
 ## App
@@ -36,5 +38,12 @@ app could misread new firmware or the reverse.
 - `ble.rs`: a background thread with a tokio runtime owns btleplug. The UI sends `Command`s
   and receives `Event`s over channels; each event requests a repaint. Keep btleplug calls
   out of the UI thread.
+- `agent.rs` (Linux): a BlueZ pairing agent on its own D-Bus connection. The app calls
+  `Device1.Pair` itself so BlueZ asks this agent, which answers the passkey only for the
+  sensor being paired. Desktops run no agent unless their Bluetooth settings are open.
+  `Pair` must come **before** connecting: on a link that is already up, BlueZ pairs with the
+  system-wide "no input" capability, so without the passkey (no MITM). Connecting to a
+  sensor in pairing mode deletes BlueZ's old keys first (stale bonds). The sensor list
+  shows BlueZ's real pairing state; unpaired sensors can only be paired in pairing mode.
 - `main.rs`: egui UI. The remembered sensor ID and theme are saved with eframe's storage.
   Grayscale styling, IBM Plex Sans embedded from `assets/fonts/`.

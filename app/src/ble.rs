@@ -16,12 +16,15 @@ use eframe::egui;
 use futures::{Stream, StreamExt};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::agent::PairingAgent;
 use crate::protocol::{self as proto, AdvInfo};
 
 /// A sensor that isn't heard from for this long drops off the "nearby" list.
 const SENSOR_STALE_AFTER: Duration = Duration::from_secs(15);
 /// Connecting includes the OS pairing prompt, so leave the user time to type the PIN.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+/// How often to look for the sensor again after deleting an old pairing.
+const REDISCOVER_POLL: Duration = Duration::from_millis(250);
 
 pub enum Command {
     Connect(String),
@@ -36,6 +39,8 @@ pub struct SensorInfo {
     pub name: String,
     pub adv: Option<AdvInfo>,
     pub rssi: Option<i16>,
+    /// Whether this computer is paired with it. None where the OS doesn't tell (not Linux).
+    pub paired: Option<bool>,
 }
 
 pub enum Event {
@@ -98,6 +103,9 @@ impl EventSink {
 
 type Notifications = Pin<Box<dyn Stream<Item = ValueNotification> + Send>>;
 
+/// An open connection plus the values read while opening it: name, LED, heartbeat.
+type Opened = (Connection, Notifications, String, bool, Option<u32>);
+
 struct Connection {
     peripheral: Peripheral,
     led: Characteristic,
@@ -123,6 +131,17 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
         .await
         .map_err(|e| format!("Could not start scanning: {e}"))?;
 
+    // Without the agent, pairing falls back to the OS prompt (if the desktop has one).
+    let agent = match PairingAgent::register().await {
+        Ok(a) => Some(a),
+        Err(e) => {
+            events.send(Event::Error(format!(
+                "{e}. Pair the sensor in your system's Bluetooth settings instead."
+            )));
+            None
+        }
+    };
+
     let mut sensors: BTreeMap<String, (PeripheralId, SensorInfo, Instant)> = BTreeMap::new();
     let mut conn: Option<Connection> = None;
     let mut notifications: Option<Notifications> = None;
@@ -143,7 +162,7 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                 | CentralEvent::ManufacturerDataAdvertisement { id, .. }
                 | CentralEvent::ServicesAdvertisement { id, .. }
                 | CentralEvent::RssiUpdate { id, .. }
-                    if refresh_sensor(&adapter, &id, &mut sensors).await => {
+                    if refresh_sensor(&adapter, &id, agent.as_ref(), &mut sensors).await => {
                         events.send(Event::Sensors(sensor_list(&sensors)));
                     }
                 _ => {}
@@ -152,7 +171,19 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
             _ = prune.tick() => {
                 let before = sensors.len();
                 sensors.retain(|_, (_, _, seen)| seen.elapsed() < SENSOR_STALE_AFTER);
-                if sensors.len() != before {
+                let mut changed = sensors.len() != before;
+                // Pairing changes without an advertisement change (the app pairs, or the
+                // user removes the sensor in the system settings), so poll it here.
+                if let Some(agent) = &agent {
+                    for (pid, info, _) in sensors.values_mut() {
+                        let paired = agent.is_paired(&bluez_path(pid)).await;
+                        if paired.is_some() && paired != info.paired {
+                            info.paired = paired;
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
                     events.send(Event::Sensors(sensor_list(&sensors)));
                 }
             }
@@ -166,26 +197,23 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                         continue;
                     };
                     events.send(Event::Connecting { name: info.name.clone() });
-                    let peripheral = match adapter.peripheral(pid).await {
-                        Ok(p) => p,
-                        Err(e) => {
-                            events.send(Event::Disconnected { reason: Some(e.to_string()) });
-                            continue;
-                        }
-                    };
-                    match tokio::time::timeout(CONNECT_TIMEOUT, open(&peripheral)).await {
+                    let pid = pid.clone();
+                    let pairing_mode = info.adv.is_some_and(|a| a.pairing);
+                    let attempt = connect(&adapter, &pid, agent.as_ref(), pairing_mode);
+                    let result = tokio::time::timeout(CONNECT_TIMEOUT, attempt).await;
+                    if let Ok(Err(e)) = &result { eprintln!("ble: connect failed: {e}"); }
+                    match result {
                         Ok(Ok((c, stream, name, led, heartbeat))) => {
                             events.send(Event::Connected { id, name, led, heartbeat });
                             conn = Some(c);
                             notifications = Some(stream);
                         }
-                        result => {
-                            let reason = match result {
-                                Ok(Err(e)) => e,
-                                _ => "Timed out while connecting.".into(),
-                            };
-                            let _ = peripheral.disconnect().await;
-                            events.send(Event::Disconnected { reason: Some(reason) });
+                        Ok(Err(reason)) => events.send(Event::Disconnected { reason: Some(reason) }),
+                        Err(_) => {
+                            if let Ok(p) = adapter.peripheral(&pid).await {
+                                let _ = p.disconnect().await;
+                            }
+                            events.send(Event::Disconnected { reason: Some("Timed out while connecting.".into()) });
                         }
                     }
                 }
@@ -241,10 +269,18 @@ async fn next_notification(stream: &mut Option<Notifications>) -> Option<ValueNo
     }
 }
 
+/// BlueZ's D-Bus object path for a peripheral. Meaningless on other OSes, where the agent
+/// ignores it.
+fn bluez_path(pid: &PeripheralId) -> String {
+    format!("/org/bluez/{pid}")
+}
+
 /// Re-reads a peripheral's advertised data. Returns true if the sensor list changed.
+/// The pairing state is looked up once, for new sensors; the prune tick keeps it current.
 async fn refresh_sensor(
     adapter: &Adapter,
     id: &PeripheralId,
+    agent: Option<&PairingAgent>,
     sensors: &mut BTreeMap<String, (PeripheralId, SensorInfo, Instant)>,
 ) -> bool {
     let Ok(p) = adapter.peripheral(id).await else {
@@ -258,16 +294,22 @@ async fn refresh_sensor(
     if !props.services.contains(&proto::SERVICE_UUID) && adv.is_none() {
         return false;
     }
+    let key = id.to_string();
+    let paired = match (sensors.get(&key), agent) {
+        (Some((_, old, _)), _) => old.paired,
+        (None, Some(agent)) => agent.is_paired(&bluez_path(id)).await,
+        (None, None) => None,
+    };
     let info = SensorInfo {
-        id: id.to_string(),
+        id: key.clone(),
         name: props
             .local_name
             .or(props.advertisement_name)
             .unwrap_or_else(|| "Unnamed sensor".into()),
         adv,
         rssi: props.rssi,
+        paired,
     };
-    let key = info.id.clone();
     let changed = sensors
         .get(&key)
         .is_none_or(|(_, old, _)| old.name != info.name || old.adv != info.adv || old.rssi != info.rssi);
@@ -279,13 +321,53 @@ fn sensor_list(sensors: &BTreeMap<String, (PeripheralId, SensorInfo, Instant)>) 
     sensors.values().map(|(_, info, _)| info.clone()).collect()
 }
 
-/// Connects, checks the protocol version, reads the current values and subscribes.
-/// The first read needs an encrypted link, so this is where the OS pairing prompt
-/// appears if this computer and the sensor are not bonded yet.
-async fn open(p: &Peripheral) -> Result<(Connection, Notifications, String, bool, Option<u32>), String> {
+/// Connects to a sensor, pairing first if needed. Disconnects again if anything fails.
+///
+/// A sensor in pairing mode is always paired afresh: if this computer still has keys from
+/// an earlier pairing that the sensor has since lost (reflashed, erased), the old keys
+/// would be offered, rejected, and nothing would ask for the PIN.
+async fn connect(
+    adapter: &Adapter,
+    pid: &PeripheralId,
+    agent: Option<&PairingAgent>,
+    pairing_mode: bool,
+) -> Result<Opened, String> {
+    let path = bluez_path(pid);
+    if pairing_mode
+        && let Some(agent) = agent
+        && agent.is_paired(&path).await == Some(true)
+    {
+        agent.forget(&path).await?;
+        // Removing the keys also removes BlueZ's device entry; wait for the next advertisement.
+        while adapter.peripheral(pid).await.is_err() {
+            tokio::time::sleep(REDISCOVER_POLL).await;
+        }
+    }
+    let p = adapter.peripheral(pid).await.map_err(|e| e.to_string())?;
+    let result = open(&p, agent, &path).await;
+    if result.is_err() {
+        let _ = p.disconnect().await;
+    }
+    result
+}
+
+/// Connects, pairs if needed, checks the protocol version, reads the current values and
+/// subscribes. Without our agent (other OSes), the first read needs an encrypted link, so
+/// that is where the OS pairing prompt appears if the two aren't bonded yet.
+async fn open(p: &Peripheral, agent: Option<&PairingAgent>, path: &str) -> Result<Opened, String> {
     let refused = "The sensor refused the connection. If it isn't paired with this computer yet, \
                    hold BOOT for 2 s until the LED blinks, then press Pair.";
 
+    // Pair before connecting: BlueZ then connects itself and pairs with our agent's
+    // capability (passkey entry). On a link that is already up it would use the system-wide
+    // capability instead, which is "no input" without a default agent: that pairs without
+    // the passkey (no MITM), and the sensor's characteristics refuse such a link.
+    if let Some(agent) = agent {
+        agent
+            .pair(path)
+            .await
+            .map_err(|e| format!("{refused} (Pairing: {e})"))?;
+    }
     p.connect().await.map_err(|e| format!("Could not connect: {e}"))?;
     p.discover_services().await.map_err(|_| refused.to_string())?;
 

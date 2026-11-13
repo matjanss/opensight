@@ -74,7 +74,8 @@ Full UUIDs:
 - Every characteristic requires an **encrypted, authenticated (MITM) link**. Reading or
   subscribing on a link that is not yet secured makes the operating system start pairing.
 - Pairing uses **passkey entry with the fixed passkey `1234`**: the sensor has no display,
-  the user types `1234` into the operating system's pairing prompt. Both sides **bond**,
+  the user types `1234` into the operating system's pairing prompt. On Linux the app
+  registers its own BlueZ pairing agent and enters the passkey itself. Both sides **bond**,
   so later connections are encrypted without asking again.
 - **Pairing mode**: holding BOOT for 2 s opens a 60 s pairing window (the LED blinks fast).
   It closes when a pairing succeeds or the time runs out.

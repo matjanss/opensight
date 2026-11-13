@@ -1125,6 +1125,8 @@ name = "esp-sensor-app"
 version = "0.1.0"
 dependencies = [
  "btleplug",
+ "dbus",
+ "dbus-tokio",
  "eframe",
  "futures",
  "libdbus-sys",

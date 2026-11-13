@@ -55,8 +55,8 @@ static void updateAdvertising() {
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
     bool bonded = NimBLEDevice::isBonded(info.getIdAddress());
-    Serial.printf("BLE: connect from %s (%s)\n", info.getIdAddress().toString().c_str(),
-                  bonded ? "bonded" : "not bonded");
+    Serial.printf("BLE: connect from %s (%s, %d bond(s) stored)\n", info.getIdAddress().toString().c_str(),
+                  bonded ? "bonded" : "not bonded", NimBLEDevice::getNumBonds());
     if (!bonded && !pairingMode) {
       // Strangers only get in during pairing mode. Advertising restarts on disconnect.
       Serial.println("BLE: not bonded and not in pairing mode, disconnecting");
@@ -76,7 +76,17 @@ class ServerCallbacks : public NimBLEServerCallbacks {
       server->disconnect(info);
       return;
     }
-    Serial.printf("BLE: link secured (bonded: %s)\n", info.isBonded() ? "yes" : "no");
+    Serial.printf("BLE: link secured (bonded: %s, passkey/MITM: %s)\n", info.isBonded() ? "yes" : "no",
+                  info.isAuthenticated() ? "yes" : "no");
+    if (!info.isAuthenticated()) {
+      // Paired without the passkey ("Just Works"). Every characteristic needs MITM, so such
+      // a bond is useless, and the central's next attempt would make NimBLE replace it
+      // halfway. Drop it now. (NimBLE's own store, so safe from its task.)
+      Serial.println("BLE: paired without the passkey, rejecting");
+      NimBLEDevice::deleteBond(info.getIdAddress());
+      server->disconnect(info);
+      return;
+    }
     if (info.isBonded() && !peerWasBonded) newBond = true;
   }
 

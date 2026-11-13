@@ -1,6 +1,7 @@
 // Hide the console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent;
 mod ble;
 mod protocol;
 
@@ -151,13 +152,25 @@ impl SensorApp {
         }
     }
 
-    /// Reconnects to the remembered sensor when it shows up.
+    /// Whether this computer is paired with the sensor. Where the OS doesn't say,
+    /// the sensor we connected to last is assumed to be.
+    fn is_paired(&self, s: &SensorInfo) -> bool {
+        s.paired
+            .unwrap_or(self.remembered.as_deref() == Some(s.id.as_str()))
+    }
+
+    /// Reconnects to the remembered sensor when it shows up, if it is paired. Not while
+    /// it is in pairing mode: the user may be pairing it with another computer.
     fn auto_connect(&mut self) {
         if !matches!(self.link, Link::Idle) || !self.auto_connect || self.fatal.is_some() {
             return;
         }
         let Some(id) = self.remembered.clone() else { return };
-        if Instant::now() >= self.auto_retry_at && self.sensors.iter().any(|s| s.id == id) {
+        let ready = self
+            .sensors
+            .iter()
+            .any(|s| s.id == id && self.is_paired(s) && !s.adv.is_some_and(|a| a.pairing));
+        if Instant::now() >= self.auto_retry_at && ready {
             let message = self.message.take();
             self.connect(&id);
             self.message = message; // keep showing why the last attempt failed
@@ -392,7 +405,7 @@ impl SensorApp {
                 if i > 0 {
                     ui.separator();
                 }
-                let remembered = self.remembered.as_deref() == Some(s.id.as_str());
+                let paired = self.is_paired(s);
                 let pairing = s.adv.is_some_and(|a| a.pairing);
                 let supported = s.adv.is_none_or(|a| a.version == protocol::PROTOCOL_VERSION);
 
@@ -404,8 +417,10 @@ impl SensorApp {
                     ));
                 } else if pairing {
                     detail.push("ready to pair".to_owned());
-                } else if remembered {
+                } else if paired {
                     detail.push("paired".to_owned());
+                } else {
+                    detail.push("not paired".to_owned());
                 }
                 if let Some(rssi) = s.rssi {
                     detail.push(format!("{rssi} dBm"));
@@ -418,8 +433,15 @@ impl SensorApp {
                         ui.label(RichText::new(capitalize(&detail.join(" · "))).small().weak());
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let label = if pairing && !remembered { "Pair" } else { "Connect" };
-                        if ui.add_enabled(supported, egui::Button::new(label)).clicked() {
+                        // In pairing mode the app pairs afresh, even if it was paired before.
+                        let label = if pairing { "Pair" } else { "Connect" };
+                        let button = ui
+                            .add_enabled(supported && (pairing || paired), egui::Button::new(label))
+                            .on_disabled_hover_text(
+                                "Not paired with this computer. Hold BOOT on the sensor for 2 s \
+                                 to put it in pairing mode.",
+                            );
+                        if button.clicked() {
                             connect_to = Some(s.id.clone());
                         }
                     });
