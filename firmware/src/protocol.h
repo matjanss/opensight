@@ -15,7 +15,7 @@ const char* const PIN_UUID       = "5631f105-5314-4f02-b637-0654ff6d409d";   // 
 const uint16_t MANUFACTURER_ID = 0xFFFF;     // reserved for testing
 const uint8_t  ADV_FLAG_PAIRING = 0x01;      // manufacturer data byte 1, bit 0
 
-const uint32_t DEFAULT_PASSKEY = 1234;       // shown and typed as "001234"
+const uint32_t DEFAULT_PASSKEY = 0;          // shown and typed as "000000"
 const uint32_t PASSKEY_MAX = 999999;         // 6 digits
 const int NAME_MAX_LEN = 20;
 const char* const NAME_PREFIX = "ESPSensor-";

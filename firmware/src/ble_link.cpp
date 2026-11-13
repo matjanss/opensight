@@ -214,10 +214,9 @@ bool bleIsConnected() { return server->getConnectedCount() > 0; }
 
 void bleServicesChanged() { server->sendServiceChangedIndication(); }
 
-void bleSetPasskey(uint32_t pin) {
-  passkey = pin;
-  NimBLEDevice::setSecurityPasskey(pin);
-}
+// NimBLE's own static passkey stays at its default (123456): only then does NimBLE ask
+// onPassKeyDisplay(), which hands out this PIN and notes that a pairing happened.
+void bleSetPasskey(uint32_t pin) { passkey = pin; }
 
 int bleDeleteOtherBonds() {
   bool keep = server->getConnectedCount() > 0;

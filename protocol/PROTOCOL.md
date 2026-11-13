@@ -82,7 +82,7 @@ Full UUIDs:
 - Every characteristic requires an **encrypted, authenticated (MITM) link**. Reading or
   subscribing on a link that is not yet secured makes the operating system start pairing.
 - Pairing uses **passkey entry**: the sensor has no display, the user types its PIN into
-  the computer. The PIN is 6 digits, **default `001234`**, and can be changed over BLE
+  the computer. The PIN is 6 digits, **default `000000`**, and can be changed over BLE
   (PIN characteristic). On Linux the app registers its own BlueZ pairing agent and asks
   for the PIN in its own window; elsewhere the operating system asks. Both sides **bond**,
   so later connections are encrypted without asking again.
@@ -93,7 +93,7 @@ Full UUIDs:
 - The sensor keeps up to 3 bonds (NimBLE default). If a bonded computer has deleted its
   keys and pairs again, the sensor replaces the old bond.
 - A pairing that didn't use the passkey (no MITM) is rejected, and its bond deleted.
-- **Forgotten PIN**: holding BOOT for 10 s resets the PIN to `001234`, deletes all bonds
+- **Forgotten PIN**: holding BOOT for 10 s resets the PIN to `000000`, deletes all bonds
   (disconnecting the app) and opens pairing mode.
 
 ## Buttons and LED on the sensor
@@ -102,7 +102,7 @@ Full UUIDs:
 |-------------------------|-----------------------------------------------|
 | BOOT short press (< 2 s)| Toggle the LED                                |
 | BOOT held 2 s           | Enter pairing mode for 60 s                   |
-| BOOT held 10 s          | Reset the PIN to `001234`, delete all bonds, enter pairing mode |
+| BOOT held 10 s          | Reset the PIN to `000000`, delete all bonds, enter pairing mode |
 | LED blinking fast       | Pairing mode (the LED state is restored after) |
 | LED on for 1.5 s, then blinking | The PIN reset was done                |
 

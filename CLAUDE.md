@@ -28,7 +28,7 @@ app could misread new firmware or the reverse.
   requests, which `loop()` picks up with `bleTake*()`. Don't touch pins, NVS or app state
   from a callback.
 - Security: every characteristic needs an encrypted, MITM-authenticated link (passkey =
-  the PIN, 6 digits, default 001234, NVS key `"pin"`; bonding). Unbonded centrals are
+  the PIN, 6 digits, default 000000, NVS key `"pin"`; bonding). Unbonded centrals are
   disconnected unless pairing mode is on. A pairing without the passkey (no MITM) is
   rejected and its bond deleted at once: NimBLE would otherwise delete it later anyway,
   when the central re-pairs on the same link. Writing a new PIN

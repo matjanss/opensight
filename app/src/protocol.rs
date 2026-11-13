@@ -16,8 +16,8 @@ pub const PIN_UUID: Uuid = uuid!("5631f105-5314-4f02-b637-0654ff6d409d");
 pub const MANUFACTURER_ID: u16 = 0xFFFF;
 pub const ADV_FLAG_PAIRING: u8 = 0x01;
 
-/// The pairing PIN of a new (or reset) sensor, shown as "001234".
-pub const DEFAULT_PASSKEY: u32 = 1234;
+/// The pairing PIN of a new (or reset) sensor, shown as "000000".
+pub const DEFAULT_PASSKEY: u32 = 0;
 pub const PASSKEY_MAX: u32 = 999_999;
 pub const PIN_DIGITS: usize = 6;
 pub const NAME_MAX_LEN: usize = 20;
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn pin_example() {
         assert_eq!(encode_pin(123_456), [0x40, 0xE2, 0x01, 0x00]);
-        assert_eq!(format_pin(DEFAULT_PASSKEY), "001234");
+        assert_eq!(format_pin(DEFAULT_PASSKEY), "000000");
     }
 
     #[test]
