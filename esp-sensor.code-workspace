@@ -1,0 +1,19 @@
+{
+  "folders": [
+    { "name": "firmware", "path": "firmware" },
+    { "name": "app", "path": "app" },
+    { "name": "repo", "path": "." }
+  ],
+  "settings": {
+    "files.exclude": { "firmware": true, "app": true },
+    "rust-analyzer.linkedProjects": ["/home/matti/dev/esp-app-test/app/Cargo.toml"],
+    "clangd.path": "/home/matti/.platformio/packages/tool-clangd-esp/bin/clangd",
+    "clangd.arguments": [
+      "--query-driver=/home/matti/.platformio/packages/toolchain-*/bin/*,/home/matti/.platformio/packages/tool-*/bin/*",
+      "--compile-commands-dir=/home/matti/dev/esp-app-test/firmware/.cache/clangd"
+    ]
+  },
+  "extensions": {
+    "recommendations": ["pioarduino.pioarduino-ide", "rust-lang.rust-analyzer"]
+  }
+}

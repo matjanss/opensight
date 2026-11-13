@@ -1,0 +1,16 @@
+[package]
+name = "esp-sensor-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+btleplug = "0.13.5"
+eframe = { version = "0.37", features = ["persistence"] }
+futures = "0.3.34"
+tokio = { version = "1.54.1", features = ["rt", "macros", "sync", "time"] }
+uuid = "1.29.2"
+
+# btleplug talks to BlueZ over D-Bus. "vendored" builds libdbus from source, so building
+# doesn't need the libdbus-1-dev system package (the running D-Bus daemon is still used).
+[target.'cfg(target_os = "linux")'.dependencies]
+libdbus-sys = { version = "0.2", features = ["vendored"] }
