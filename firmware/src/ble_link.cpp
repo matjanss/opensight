@@ -10,8 +10,12 @@ static NimBLECharacteristic* nameChr;
 static std::string           advName;
 
 static volatile bool pairingMode = false;
-static volatile bool peerWasBonded = false;   // the connected central was bonded when it connected
+// Set when NimBLE asks for the passkey, which only happens during an actual pairing (not when
+// a bonded central reconnects). A re-pairing replaces an existing bond, so "was the central
+// bonded when it connected" can't tell the two apart.
+static volatile bool passkeyUsed = false;
 static volatile bool newBond = false;
+static volatile uint32_t passkey = DEFAULT_PASSKEY;   // read by NimBLE's task during pairing
 
 // Writes from the app, handed from the NimBLE task to the main loop.
 static portMUX_TYPE writeMux = portMUX_INITIALIZER_UNLOCKED;
@@ -21,6 +25,9 @@ static bool    ledPending = false;
 static char    nameBuf[32];                   // larger than NAME_MAX_LEN so too-long writes are seen
 static size_t  nameLen;
 static bool    namePending = false;
+static uint8_t pinBuf[8];                     // larger than 4 so wrong lengths are seen
+static size_t  pinLen;
+static bool    pinPending = false;
 
 // Read/notify/write all need an encrypted link made with the passkey (MITM), see "Security".
 static const uint32_t READ_SECURE  = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::READ_AUTHEN;
@@ -63,7 +70,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
       s->disconnect(info);
       return;
     }
-    peerWasBonded = bonded;
+    passkeyUsed = false;
   }
 
   void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int reason) override {
@@ -87,11 +94,15 @@ class ServerCallbacks : public NimBLEServerCallbacks {
       server->disconnect(info);
       return;
     }
-    if (info.isBonded() && !peerWasBonded) newBond = true;
+    if (info.isBonded() && passkeyUsed) newBond = true;   // ends pairing mode
+    passkeyUsed = false;
   }
 
-  // We have no display: the passkey is fixed, and the user types it on the computer.
-  uint32_t onPassKeyDisplay() override { return PASSKEY; }
+  // We have no display: the passkey is the stored PIN, and the user types it on the computer.
+  uint32_t onPassKeyDisplay() override {
+    passkeyUsed = true;
+    return passkey;
+  }
 };
 
 class LedCallbacks : public NimBLECharacteristicCallbacks {
@@ -116,18 +127,34 @@ class NameCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+class PinCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
+    const NimBLEAttValue& v = c->getValue();
+    portENTER_CRITICAL(&writeMux);
+    pinLen = v.size() < sizeof pinBuf ? v.size() : sizeof pinBuf;
+    memcpy(pinBuf, v.data(), pinLen);
+    pinPending = true;
+    portEXIT_CRITICAL(&writeMux);
+    c->setValue((uint32_t)0);   // don't keep the PIN in the attribute table
+  }
+};
+
+// Changes whenever this file (which defines the GATT layout) is rebuilt.
+const char* const GATT_BUILD_ID = __DATE__ " " __TIME__;
+
 static ServerCallbacks serverCallbacks;
 static LedCallbacks    ledCallbacks;
 static NameCallbacks   nameCallbacks;
+static PinCallbacks    pinCallbacks;
 
-void bleBegin(const char* name, bool ledOn) {
+void bleBegin(const char* name, bool ledOn, uint32_t pin) {
   advName = name;
   NimBLEDevice::init(name);
 
   // Bond, require MITM protection and use LE Secure Connections. "Display only" makes the
   // computer ask the user for the passkey that we "display" (return from onPassKeyDisplay).
   NimBLEDevice::setSecurityAuth(true, true, true);
-  NimBLEDevice::setSecurityPasskey(PASSKEY);
+  bleSetPasskey(pin);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
 
   server = NimBLEDevice::createServer();
@@ -149,6 +176,10 @@ void bleBegin(const char* name, bool ledOn) {
 
   NimBLECharacteristic* versionChr = svc->createCharacteristic(VERSION_UUID, READ_SECURE);
   versionChr->setValue(PROTOCOL_VERSION);
+
+  // Write only: the PIN can be changed but never read back.
+  NimBLECharacteristic* pinChr = svc->createCharacteristic(PIN_UUID, WRITE_SECURE);
+  pinChr->setCallbacks(&pinCallbacks);
 
   updateAdvertising();
 }
@@ -181,6 +212,30 @@ void bleSetPairingMode(bool on) {
 
 bool bleIsConnected() { return server->getConnectedCount() > 0; }
 
+void bleServicesChanged() { server->sendServiceChangedIndication(); }
+
+void bleSetPasskey(uint32_t pin) {
+  passkey = pin;
+  NimBLEDevice::setSecurityPasskey(pin);
+}
+
+int bleDeleteOtherBonds() {
+  bool keep = server->getConnectedCount() > 0;
+  NimBLEAddress peer = keep ? server->getPeerInfo(0).getIdAddress() : NimBLEAddress();
+  int deleted = 0;
+  for (int i = NimBLEDevice::getNumBonds() - 1; i >= 0; i--) {   // backwards: deleting shifts
+    NimBLEAddress a = NimBLEDevice::getBondedAddress(i);
+    if (keep && a == peer) continue;
+    if (NimBLEDevice::deleteBond(a)) deleted++;
+  }
+  return deleted;
+}
+
+void bleDeleteAllBonds() {
+  if (server->getConnectedCount() > 0) server->disconnect(server->getPeerInfo(0));
+  NimBLEDevice::deleteAllBonds();
+}
+
 bool bleTakeLedWrite(uint8_t* value, size_t* len) {
   bool got = false;
   portENTER_CRITICAL(&writeMux);
@@ -201,6 +256,19 @@ bool bleTakeNameWrite(char* buf, size_t bufSize, size_t* len) {
     *len = nameLen < bufSize ? nameLen : bufSize;
     memcpy(buf, nameBuf, *len);
     namePending = false;
+    got = true;
+  }
+  portEXIT_CRITICAL(&writeMux);
+  return got;
+}
+
+bool bleTakePinWrite(uint8_t* value, size_t* len) {
+  bool got = false;
+  portENTER_CRITICAL(&writeMux);
+  if (pinPending) {
+    memcpy(value, pinBuf, pinLen);
+    *len = pinLen;
+    pinPending = false;
     got = true;
   }
   portEXIT_CRITICAL(&writeMux);

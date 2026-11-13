@@ -14,6 +14,7 @@ use eframe::egui::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use agent::PasskeyReply;
 use ble::{Command, Event, SensorInfo};
 
 const CONTENT_MAX_WIDTH: f32 = 460.0;
@@ -43,6 +44,13 @@ fn main() -> eframe::Result {
     )
 }
 
+/// The PIN popup while pairing: BlueZ waits for `reply`.
+struct PasskeyPrompt {
+    reply: PasskeyReply,
+    input: String,
+    focus: bool,
+}
+
 enum Link {
     Idle,
     Connecting { name: String },
@@ -60,6 +68,11 @@ struct SensorApp {
     led: bool,
     sensor_name: String,
     name_input: String,
+    pin_supported: bool,
+    pin_input: String,
+    /// The user pressed "Change…" and has to confirm (it unpairs other computers).
+    pin_confirm: bool,
+    passkey_prompt: Option<PasskeyPrompt>,
 
     /// The sensor this app connected to last; reconnected automatically when seen.
     remembered: Option<String>,
@@ -70,6 +83,7 @@ struct SensorApp {
     message: Option<String>,
     fatal: Option<String>,
     dark_mode: bool,
+    settings_open: bool,
 }
 
 impl SensorApp {
@@ -86,6 +100,10 @@ impl SensorApp {
             led: false,
             sensor_name: String::new(),
             name_input: String::new(),
+            pin_supported: false,
+            pin_input: String::new(),
+            pin_confirm: false,
+            passkey_prompt: None,
             remembered: storage
                 .and_then(|s| s.get_string(KEY_REMEMBERED))
                 .filter(|s| !s.is_empty()),
@@ -96,6 +114,7 @@ impl SensorApp {
             dark_mode: storage
                 .and_then(|s| s.get_string(KEY_DARK))
                 .is_none_or(|v| v == "true"),
+            settings_open: false,
         }
     }
 
@@ -121,7 +140,12 @@ impl SensorApp {
                     name,
                     led,
                     heartbeat,
+                    pin_supported,
                 } => {
+                    self.passkey_prompt = None;
+                    self.pin_supported = pin_supported;
+                    self.pin_input.clear();
+                    self.pin_confirm = false;
                     self.remembered = Some(id.clone());
                     self.link = Link::Connected { id };
                     self.name_input = name.clone();
@@ -132,6 +156,7 @@ impl SensorApp {
                     self.message = None;
                 }
                 Event::Disconnected { reason } => {
+                    self.passkey_prompt = None;
                     self.link = Link::Idle;
                     self.heartbeat = None;
                     self.heartbeat_at = None;
@@ -147,6 +172,21 @@ impl SensorApp {
                     self.name_input = name.clone();
                     self.sensor_name = name;
                 }
+                Event::PinChanged => {
+                    self.pin_input.clear();
+                    self.message = Some(
+                        "PIN changed. Other computers that were paired have to pair again with the new PIN."
+                            .into(),
+                    );
+                }
+                Event::PasskeyRequest(reply) => {
+                    self.passkey_prompt = Some(PasskeyPrompt {
+                        reply,
+                        input: String::new(),
+                        focus: true,
+                    });
+                }
+                Event::PasskeyCancelled => self.passkey_prompt = None,
                 Event::Error(e) => self.message = Some(e),
             }
         }
@@ -196,20 +236,51 @@ impl eframe::App for SensorApp {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 centered_column(ui, |ui| {
                     ui.add_space(20.0);
-                    self.header(ui);
+                    title(ui, "ESP Sensor", "BLE test app");
                     ui.add_space(14.0);
-                    self.body(ui);
+                    self.main_body(ui);
                     ui.add_space(16.0);
                 });
             });
         });
 
+        let ctx = ui.ctx().clone();
+        if self.settings_open {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("settings"),
+                egui::ViewportBuilder::default()
+                    .with_title("ESP Sensor · Settings")
+                    .with_inner_size([460.0, 640.0])
+                    .with_min_inner_size([360.0, 420.0]),
+                |ui, _| {
+                    if ui.input(|i| i.viewport().close_requested()) {
+                        self.settings_open = false;
+                    }
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            centered_column(ui, |ui| {
+                                ui.add_space(20.0);
+                                title(ui, "Settings", "Appearance and the connected sensor");
+                                ui.add_space(14.0);
+                                self.settings_body(ui);
+                                ui.add_space(16.0);
+                            });
+                        });
+                    });
+                    // Pairing is started from here, so the PIN prompt belongs here too.
+                    self.passkey_modal(ui.ctx());
+                },
+            );
+        } else {
+            self.passkey_modal(&ctx);
+        }
+
         if self.dark_mode != was_dark {
-            ui.ctx().set_theme(theme_pref(self.dark_mode));
+            ctx.set_theme(theme_pref(self.dark_mode));
         }
         // Keeps "updated 3 s ago" ticking; BLE events repaint on their own.
         if matches!(self.link, Link::Connected { .. }) {
-            ui.ctx().request_repaint_after(Duration::from_secs(1));
+            ctx.request_repaint_after(Duration::from_secs(1));
         }
     }
 
@@ -232,6 +303,12 @@ impl SensorApp {
             ui.label(RichText::new(dot).strong());
             ui.label(text);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let gear = ui
+                    .add(egui::Button::new(RichText::new("⚙").size(18.0)).frame(false))
+                    .on_hover_text("Settings");
+                if gear.clicked() {
+                    self.open_settings(ui.ctx());
+                }
                 ui.label(
                     RichText::new(format!("Protocol v{}", protocol::PROTOCOL_VERSION))
                         .small()
@@ -241,20 +318,30 @@ impl SensorApp {
         });
     }
 
-    fn header(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(RichText::new("ESP Sensor").heading().strong());
-                ui.label(RichText::new("BLE test app").weak());
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                segmented(ui, &mut self.dark_mode, [(false, "Light"), (true, "Dark")]);
-            });
-        });
+    /// Opens the settings window, or brings it to the front if it is already open.
+    fn open_settings(&mut self, ctx: &egui::Context) {
+        if self.settings_open {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::from_hash_of("settings"),
+                egui::ViewportCommand::Focus,
+            );
+        }
+        self.settings_open = true;
     }
 
-    fn body(&mut self, ui: &mut Ui) {
+    /// Shows the last message, in the settings window while it's open (that's where the
+    /// user acts), otherwise in the main window.
+    fn message_notice(&mut self, ui: &mut Ui, in_settings: bool) {
+        if in_settings == self.settings_open
+            && let Some(msg) = self.message.clone()
+            && notice(ui, &msg)
+        {
+            self.message = None;
+        }
+    }
+
+    /// Main window: what the sensor reports, nothing to configure.
+    fn main_body(&mut self, ui: &mut Ui) {
         if let Some(e) = &self.fatal {
             card(ui, "Bluetooth unavailable", |ui| {
                 ui.label(e);
@@ -262,50 +349,94 @@ impl SensorApp {
             });
             return;
         }
-
-        if let Some(msg) = self.message.clone()
-            && notice(ui, &msg)
-        {
-            self.message = None;
+        self.message_notice(ui, false);
+        match &self.link {
+            Link::Connected { .. } => {
+                self.heartbeat_card(ui);
+                self.led_card(ui);
+            }
+            Link::Connecting { name } => connecting_card(ui, name),
+            Link::Idle => self.no_sensor_card(ui),
         }
+    }
 
+    /// Main window without a connection: points to the settings window, where sensors are paired.
+    fn no_sensor_card(&mut self, ui: &mut Ui) {
+        let remembered = self
+            .remembered
+            .as_deref()
+            .and_then(|id| self.sensors.iter().find(|s| s.id == id));
+        if let Some(s) = remembered
+            && self.auto_connect
+            && self.is_paired(s)
+        {
+            let name = s.name.clone();
+            card(ui, "No sensor connected", |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("Reconnecting to {name}…"));
+                });
+            });
+            return;
+        }
+        let text = if self.remembered.is_none() {
+            "No sensor is paired with this app yet. Pair one in Settings."
+        } else if !self.auto_connect {
+            "Disconnected. To connect again, or to pair another sensor, open Settings."
+        } else {
+            "Your sensor isn't in range. Check that it's powered, or pair another sensor in Settings."
+        };
+        let mut open = false;
+        card(ui, "No sensor connected", |ui| {
+            ui.add(egui::Label::new(text).wrap());
+            open = ui.button("⚙  Open settings").clicked();
+        });
+        if open {
+            self.open_settings(ui.ctx());
+        }
+    }
+
+    /// Settings window: appearance, and everything about the sensor and its connection.
+    fn settings_body(&mut self, ui: &mut Ui) {
+        self.message_notice(ui, true);
+        card(ui, "Appearance", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Dark mode");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    toggle_switch(ui, &mut self.dark_mode);
+                });
+            });
+        });
+        if let Some(e) = &self.fatal {
+            card(ui, "Bluetooth unavailable", |ui| {
+                ui.label(e);
+            });
+            return;
+        }
         match &self.link {
             Link::Connected { id } => {
                 let id = id.clone();
-                self.heartbeat_card(ui);
-                self.led_card(ui);
                 self.name_card(ui);
-                ui.horizontal(|ui| {
-                    if ui.button("Disconnect").clicked() {
-                        self.auto_connect = false;
-                        self.send(Command::Disconnect);
-                    }
-                    let forget = ui
-                        .add(egui::Button::new("Forget sensor").frame(false))
-                        .on_hover_text("Disconnect and stop reconnecting to this sensor automatically.");
-                    if forget.clicked() && self.remembered.as_deref() == Some(id.as_str()) {
-                        self.remembered = None;
-                        self.auto_connect = false;
-                        self.send(Command::Disconnect);
-                    }
-                });
-            }
-            Link::Connecting { name } => {
-                let name = name.clone();
-                card(ui, "Connecting", |ui| {
+                self.pin_card(ui);
+                card(ui, "Connection", |ui| {
+                    ui.label(format!("Connected to {}.", self.sensor_name));
                     ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(format!("Connecting to {name}…"));
+                        if ui.button("Disconnect").clicked() {
+                            self.auto_connect = false;
+                            self.send(Command::Disconnect);
+                        }
+                        let forget = ui
+                            .add(egui::Button::new("Forget sensor").frame(false))
+                            .on_hover_text("Disconnect and stop reconnecting to this sensor automatically.");
+                        if forget.clicked() && self.remembered.as_deref() == Some(id.as_str()) {
+                            self.remembered = None;
+                            self.auto_connect = false;
+                            self.send(Command::Disconnect);
+                        }
                     });
-                    ui.label(
-                        RichText::new(format!(
-                            "If your computer asks for a PIN or passkey, enter {}.",
-                            protocol::PASSKEY
-                        ))
-                        .weak(),
-                    );
                 });
             }
+            Link::Connecting { name } => connecting_card(ui, name),
             Link::Idle => {
                 self.sensors_card(ui);
                 pairing_help_card(ui);
@@ -391,6 +522,118 @@ impl SensorApp {
         });
     }
 
+    fn pin_card(&mut self, ui: &mut Ui) {
+        card(ui, "Pairing PIN", |ui| {
+            if !self.pin_supported {
+                ui.label(RichText::new("This sensor's firmware can't change its PIN.").weak());
+                return;
+            }
+            self.pin_input.retain(|c| c.is_ascii_digit());
+            let checked = protocol::validate_pin(&self.pin_input);
+            if let (true, Ok(pin)) = (self.pin_confirm, &checked) {
+                ui.add(
+                    egui::Label::new(format!(
+                        "Change the PIN to {}? Every other computer paired with this sensor is \
+                         unpaired and has to pair again with the new PIN.",
+                        protocol::format_pin(*pin)
+                    ))
+                    .wrap(),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Change PIN").clicked() {
+                        self.send(Command::SetPin(*pin));
+                        self.pin_confirm = false;
+                    }
+                    if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                        self.pin_confirm = false;
+                    }
+                });
+                return;
+            }
+            self.pin_confirm = false;
+            ui.horizontal(|ui| {
+                let button_w = 92.0;
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.pin_input)
+                        .hint_text("New 6-digit PIN")
+                        .char_limit(protocol::PIN_DIGITS)
+                        .margin(egui::vec2(10.0, 7.0))
+                        .desired_width(ui.available_width() - button_w - ui.spacing().item_spacing.x),
+                );
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let button = ui.add_enabled(
+                    checked.is_ok(),
+                    egui::Button::new("Change…").min_size(egui::vec2(button_w, 0.0)),
+                );
+                self.pin_confirm = (button.clicked() || enter) && checked.is_ok();
+            });
+            let hint = match &checked {
+                Err(e) if !self.pin_input.is_empty() => e.clone(),
+                _ => "Needed to pair a computer. Changing it unpairs all other computers.".into(),
+            };
+            ui.label(RichText::new(hint).small().weak());
+        });
+    }
+
+    /// The PIN popup, while BlueZ waits for the passkey of the sensor being paired.
+    fn passkey_modal(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &mut self.passkey_prompt else {
+            return;
+        };
+        let name = match &self.link {
+            Link::Connecting { name } => name.clone(),
+            _ => "the sensor".into(),
+        };
+        let mut answer = None;
+        let modal = egui::Modal::new(egui::Id::unique("passkey")).show(ctx, |ui| {
+            ui.set_width(320.0);
+            ui.label(RichText::new("Enter PIN").size(20.0).strong());
+            ui.add(egui::Label::new(format!("Pairing with {name}. Type the sensor's 6-digit PIN.")).wrap());
+            prompt.input.retain(|c| c.is_ascii_digit());
+            let checked = protocol::validate_pin(&prompt.input);
+            let edit = ui.add(
+                egui::TextEdit::singleline(&mut prompt.input)
+                    .hint_text(protocol::format_pin(0))
+                    .char_limit(protocol::PIN_DIGITS)
+                    .font(FontId::new(24.0, FontFamily::Proportional))
+                    .margin(egui::vec2(10.0, 7.0))
+                    .desired_width(f32::INFINITY),
+            );
+            if std::mem::take(&mut prompt.focus) {
+                edit.request_focus();
+            }
+            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.label(
+                RichText::new(format!(
+                    "{} unless it was changed. Enter it within 30 seconds.",
+                    protocol::format_pin(protocol::DEFAULT_PASSKEY)
+                ))
+                .small()
+                .weak(),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let pair = ui.add_enabled(checked.is_ok(), egui::Button::new("Pair"));
+                if let Ok(pin) = checked
+                    && (pair.clicked() || enter)
+                {
+                    answer = Some(Some(pin));
+                }
+                if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                    answer = Some(None);
+                }
+            });
+        });
+        if modal.should_close() && answer.is_none() {
+            answer = Some(None); // Esc or a click outside
+        }
+        if let Some(pin) = answer
+            && let Some(prompt) = self.passkey_prompt.take()
+        {
+            prompt.reply.send(pin);
+        }
+    }
+
     fn sensors_card(&mut self, ui: &mut Ui) {
         let mut connect_to = None;
         card(ui, "Sensors nearby", |ui| {
@@ -454,12 +697,40 @@ impl SensorApp {
     }
 }
 
+fn title(ui: &mut Ui, title: &str, subtitle: &str) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(RichText::new(title).heading().strong());
+        ui.label(RichText::new(subtitle).weak());
+    });
+}
+
+fn connecting_card(ui: &mut Ui, name: &str) {
+    card(ui, "Connecting", |ui| {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(format!("Connecting to {name}…"));
+        });
+        ui.label(
+            RichText::new(format!(
+                "If asked for a PIN, enter the sensor's PIN ({} unless it was changed).",
+                protocol::format_pin(protocol::DEFAULT_PASSKEY)
+            ))
+            .weak(),
+        );
+    });
+}
+
 fn pairing_help_card(ui: &mut Ui) {
     card(ui, "Pairing a new sensor", |ui| {
         let steps = [
             "Hold BOOT on the sensor for 2 seconds, until the blue LED blinks fast.".to_owned(),
             "Press Pair next to the sensor above (within 60 seconds).".to_owned(),
-            format!("When your computer asks for a PIN, enter {}.", protocol::PASSKEY),
+            format!(
+                "Enter the sensor's PIN ({} unless it was changed). Forgot it? Holding BOOT \
+                 for 10 s resets it and unpairs all computers.",
+                protocol::format_pin(protocol::DEFAULT_PASSKEY)
+            ),
         ];
         for (i, step) in steps.iter().enumerate() {
             ui.horizontal_top(|ui| {
@@ -622,20 +893,34 @@ fn notice(ui: &mut Ui, text: &str) -> bool {
         .inner
 }
 
-fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: [(T, &str); 2]) {
-    let v = ui.visuals();
-    egui::Frame::new()
-        .fill(v.extreme_bg_color)
-        .stroke(v.window_stroke)
-        .corner_radius(10)
-        .inner_margin(3)
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.spacing_mut().button_padding = egui::vec2(12.0, 4.0);
-            ui.spacing_mut().interact_size.y = 26.0;
-            // The header lays this out right to left; add in reverse so it reads left to right.
-            for (opt, label) in options.into_iter().rev() {
-                ui.selectable_value(value, opt, label);
-            }
-        });
+/// An on/off switch. Grayscale like the rest: a dark track with a light knob when on.
+fn toggle_switch(ui: &mut Ui, on: &mut bool) -> egui::Response {
+    let size = egui::vec2(44.0, 24.0);
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, ui.is_enabled(), *on, ""));
+    if ui.is_rect_visible(rect) {
+        let t = ui.ctx().animate_bool(response.id, *on);
+        let v = ui.visuals();
+        let radius = rect.height() / 2.0;
+        let (track, knob) = if *on {
+            (v.strong_text_color(), v.window_fill)
+        } else {
+            (v.widgets.inactive.bg_fill, v.strong_text_color())
+        };
+        let stroke = if response.hovered() {
+            v.widgets.hovered.bg_stroke
+        } else {
+            v.window_stroke
+        };
+        ui.painter()
+            .rect(rect, radius, track, stroke, egui::StrokeKind::Inside);
+        let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
+        ui.painter()
+            .circle_filled(egui::pos2(x, rect.center().y), radius - 4.0, knob);
+    }
+    response
 }

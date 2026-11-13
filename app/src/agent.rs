@@ -1,10 +1,33 @@
 //! Pairing on Linux. BlueZ asks a "pairing agent" for the passkey; desktops only run one
 //! while their Bluetooth settings are open, so without our own agent pairing just fails.
 //! The app registers an agent and starts pairing itself (`Device1.Pair`), so BlueZ asks
-//! this agent, which answers with the fixed passkey for the sensor being paired, and
-//! rejects everything else. It does not become the system's default agent.
+//! this agent. The agent hands the request to the UI, which asks the user for the PIN,
+//! and only answers for the sensor being paired. It does not become the system's default
+//! agent.
 //!
 //! Other operating systems show their own pairing prompt: there [`PairingAgent`] does nothing.
+
+use tokio::sync::oneshot;
+
+/// What the agent tells the UI.
+pub enum AgentEvent {
+    /// BlueZ needs the sensor's PIN. Answer through the [`PasskeyReply`].
+    PasskeyRequest(PasskeyReply),
+    /// BlueZ gave up on the request (timeout, or the sensor disconnected).
+    Cancelled,
+}
+
+/// The pending answer to a passkey request. Dropping it cancels the pairing.
+pub struct PasskeyReply(oneshot::Sender<Option<u32>>);
+
+impl PasskeyReply {
+    /// `None` means the user cancelled.
+    pub fn send(self, pin: Option<u32>) {
+        let _ = self.0.send(pin); // the request is already over: nothing to answer
+    }
+}
+
+pub type Notify = Box<dyn Fn(AgentEvent) + Send + Sync>;
 
 #[cfg(target_os = "linux")]
 pub use linux::PairingAgent;
@@ -14,7 +37,7 @@ pub struct PairingAgent;
 
 #[cfg(not(target_os = "linux"))]
 impl PairingAgent {
-    pub async fn register() -> Result<Self, String> {
+    pub async fn register(_notify: Notify) -> Result<Self, String> {
         Ok(Self)
     }
     pub async fn is_paired(&self, _device: &str) -> Option<bool> {
@@ -30,7 +53,7 @@ impl PairingAgent {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Weak};
     use std::time::Duration;
 
     use dbus::channel::{MatchingReceiver, Sender};
@@ -38,15 +61,16 @@ mod linux {
     use dbus::nonblock::stdintf::org_freedesktop_dbus::Properties;
     use dbus::nonblock::{Proxy, SyncConnection};
     use dbus::{Message, Path};
+    use tokio::sync::oneshot;
 
-    use crate::protocol;
+    use super::{AgentEvent, Notify, PasskeyReply};
 
     const AGENT_PATH: &str = "/org/espsensor/agent";
-    /// Passkey entry: the sensor "displays" the passkey, we type it in.
+    /// Passkey entry: the sensor "displays" the passkey, the user types it in.
     const CAPABILITY: &str = "KeyboardOnly";
     const CALL_TIMEOUT: Duration = Duration::from_secs(5);
-    /// Pairing itself takes a second or two; this only stops a hung BlueZ call.
-    const PAIR_TIMEOUT: Duration = Duration::from_secs(30);
+    /// Includes the user typing the PIN. BlueZ itself gives up after 30 s (the BLE limit).
+    const PAIR_TIMEOUT: Duration = Duration::from_secs(60);
 
     pub struct PairingAgent {
         conn: Arc<SyncConnection>,
@@ -55,8 +79,9 @@ mod linux {
     }
 
     impl PairingAgent {
-        /// Connects to the system bus and registers the agent with BlueZ.
-        pub async fn register() -> Result<Self, String> {
+        /// Connects to the system bus and registers the agent with BlueZ. `notify` is
+        /// called (from the BLE thread) when the user has to enter the PIN.
+        pub async fn register(notify: Notify) -> Result<Self, String> {
             let (resource, conn) =
                 dbus_tokio::connection::new_system_sync().map_err(|e| format!("D-Bus: {e}"))?;
             tokio::spawn(async move {
@@ -65,10 +90,14 @@ mod linux {
 
             let target: Arc<Mutex<Option<String>>> = Arc::default();
             let t = target.clone();
+            // Weak: the handler is owned by the connection, so a strong ref would be a cycle.
+            let weak = Arc::downgrade(&conn);
             conn.start_receive(
                 MatchRule::new_method_call().with_path(AGENT_PATH),
                 Box::new(move |msg, conn| {
-                    let _ = conn.send(answer(&msg, &t));
+                    if let Some(reply) = handle(msg, &t, &notify, &weak) {
+                        let _ = conn.send(reply);
+                    }
                     true
                 }),
             );
@@ -108,7 +137,7 @@ mod linux {
                 .map_err(|e| format!("Could not remove the old pairing: {e}"))
         }
 
-        /// Pairs and bonds with the device, answering the passkey request ourselves.
+        /// Pairs and bonds with the device; the user enters the PIN when BlueZ asks.
         /// Does nothing if BlueZ already has keys for it.
         pub async fn pair(&self, device: &str) -> Result<(), String> {
             if self.is_paired(device).await == Some(true) {
@@ -120,33 +149,54 @@ mod linux {
                 .method_call::<(), _, _, _>("org.bluez.Device1", "Pair", ())
                 .await;
             *self.target.lock().unwrap() = None;
-            match result {
-                Ok(()) => Ok(()),
-                Err(e) if e.name() == Some("org.bluez.Error.AlreadyExists") => Ok(()),
-                Err(e) => Err(e.message().unwrap_or("unknown error").to_owned()),
-            }
+            let Err(e) = result else { return Ok(()) };
+            Err(match e.name().unwrap_or("") {
+                "org.bluez.Error.AlreadyExists" => return Ok(()),
+                "org.bluez.Error.AuthenticationCanceled" => "Pairing was cancelled.".to_owned(),
+                "org.bluez.Error.AuthenticationFailed" | "org.bluez.Error.AuthenticationRejected" => {
+                    "Pairing failed. Was the PIN right?".to_owned()
+                }
+                "org.bluez.Error.AuthenticationTimeout" => "Pairing timed out.".to_owned(),
+                _ => format!("Pairing failed: {}", e.message().unwrap_or("unknown error")),
+            })
         }
     }
 
-    /// Replies to a call from BlueZ on the agent object (org.bluez.Agent1).
-    fn answer(msg: &Message, target: &Mutex<Option<String>>) -> Message {
+    /// Handles a call from BlueZ on the agent object (org.bluez.Agent1). Returns the reply,
+    /// or None if it is sent later (the passkey, once the user has typed it).
+    fn handle(
+        msg: Message,
+        target: &Mutex<Option<String>>,
+        notify: &Notify,
+        conn: &Weak<SyncConnection>,
+    ) -> Option<Message> {
         let device = msg.get1::<Path>().map(|p| p.to_string());
         let ours = device.is_some() && *target.lock().unwrap() == device;
-        let reject = || {
-            msg.error(
+        let member = msg.member().map(|m| m.to_string()); // owned: `msg` may move below
+        match member.as_deref() {
+            Some("RequestPasskey") if ours => {
+                let conn = conn.upgrade()?;
+                let (tx, rx) = oneshot::channel();
+                notify(AgentEvent::PasskeyRequest(PasskeyReply(tx)));
+                tokio::spawn(async move {
+                    let reply = match rx.await {
+                        Ok(Some(pin)) => msg.method_return().append1(pin),
+                        _ => msg.error(&"org.bluez.Error.Canceled".into(), c"Cancelled by the user"),
+                    };
+                    let _ = conn.send(reply);
+                });
+                None
+            }
+            Some("Cancel") => {
+                notify(AgentEvent::Cancelled);
+                Some(msg.method_return())
+            }
+            // Nothing to show, and nothing to clean up: return without an error.
+            Some("Release" | "DisplayPasskey" | "DisplayPinCode") => Some(msg.method_return()),
+            _ => Some(msg.error(
                 &"org.bluez.Error.Rejected".into(),
                 c"Not an ESP Sensor being paired",
-            )
-        };
-        match msg.member().as_deref() {
-            Some("RequestPasskey") if ours => match protocol::PASSKEY.parse::<u32>() {
-                Ok(passkey) => msg.method_return().append1(passkey),
-                Err(_) => reject(),
-            },
-            Some("RequestPinCode") if ours => msg.method_return().append1(protocol::PASSKEY),
-            // Nothing to show, and nothing to clean up: return without an error.
-            Some("Release" | "Cancel" | "DisplayPasskey" | "DisplayPinCode") => msg.method_return(),
-            _ => reject(),
+            )),
         }
     }
 }

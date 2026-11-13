@@ -11,11 +11,15 @@ pub const HEARTBEAT_UUID: Uuid = uuid!("5631f101-5314-4f02-b637-0654ff6d409d");
 pub const LED_UUID: Uuid = uuid!("5631f102-5314-4f02-b637-0654ff6d409d");
 pub const NAME_UUID: Uuid = uuid!("5631f103-5314-4f02-b637-0654ff6d409d");
 pub const VERSION_UUID: Uuid = uuid!("5631f104-5314-4f02-b637-0654ff6d409d");
+pub const PIN_UUID: Uuid = uuid!("5631f105-5314-4f02-b637-0654ff6d409d");
 
 pub const MANUFACTURER_ID: u16 = 0xFFFF;
 pub const ADV_FLAG_PAIRING: u8 = 0x01;
 
-pub const PASSKEY: &str = "1234";
+/// The pairing PIN of a new (or reset) sensor, shown as "001234".
+pub const DEFAULT_PASSKEY: u32 = 1234;
+pub const PASSKEY_MAX: u32 = 999_999;
+pub const PIN_DIGITS: usize = 6;
 pub const NAME_MAX_LEN: usize = 20;
 
 /// Heartbeat: `u32` little-endian, milliseconds since the sensor booted.
@@ -63,6 +67,26 @@ pub fn validate_name(input: &str) -> Result<String, String> {
         return Err(format!("At most {NAME_MAX_LEN} characters ({} now).", name.len()));
     }
     Ok(name.to_owned())
+}
+
+/// A PIN as the user sees and types it: always 6 digits, with leading zeros.
+pub fn format_pin(pin: u32) -> String {
+    format!("{pin:0PIN_DIGITS$}")
+}
+
+/// The user's PIN input: exactly 6 digits (spaces around it are ignored).
+pub fn validate_pin(input: &str) -> Result<u32, String> {
+    let pin = input.trim();
+    if pin.len() != PIN_DIGITS || !pin.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("The PIN is exactly {PIN_DIGITS} digits."));
+    }
+    pin.parse().map_err(|_| "Not a number.".to_owned())
+}
+
+/// PIN characteristic: `u32` little-endian, 0–999 999.
+pub fn encode_pin(pin: u32) -> [u8; 4] {
+    debug_assert!(pin <= PASSKEY_MAX);
+    pin.to_le_bytes()
 }
 
 /// What the sensor puts in its advertisement's manufacturer data.
@@ -122,6 +146,22 @@ mod tests {
         assert_eq!(decode_led(&encode_led(true)), Some(true));
         assert_eq!(decode_led(&encode_led(false)), Some(false));
         assert_eq!(decode_led(&[2]), None);
+    }
+
+    #[test]
+    fn pin_example() {
+        assert_eq!(encode_pin(123_456), [0x40, 0xE2, 0x01, 0x00]);
+        assert_eq!(format_pin(DEFAULT_PASSKEY), "001234");
+    }
+
+    #[test]
+    fn pin_rules() {
+        assert_eq!(validate_pin("001234"), Ok(1234));
+        assert_eq!(validate_pin(" 999999 "), Ok(PASSKEY_MAX));
+        assert!(validate_pin("1234").is_err()); // too short: 4 digits are not 001234
+        assert!(validate_pin("1234567").is_err());
+        assert!(validate_pin("12a456").is_err());
+        assert!(validate_pin("+12345").is_err());
     }
 
     #[test]

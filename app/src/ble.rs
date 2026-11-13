@@ -16,13 +16,13 @@ use eframe::egui;
 use futures::{Stream, StreamExt};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::agent::PairingAgent;
+use crate::agent::{AgentEvent, PairingAgent, PasskeyReply};
 use crate::protocol::{self as proto, AdvInfo};
 
 /// A sensor that isn't heard from for this long drops off the "nearby" list.
 const SENSOR_STALE_AFTER: Duration = Duration::from_secs(15);
-/// Connecting includes the OS pairing prompt, so leave the user time to type the PIN.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Connecting includes the pairing prompt, so leave the user time to type the PIN.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 /// How often to look for the sensor again after deleting an old pairing.
 const REDISCOVER_POLL: Duration = Duration::from_millis(250);
 
@@ -31,6 +31,8 @@ pub enum Command {
     Disconnect,
     SetLed(bool),
     SetName(String),
+    /// Changes the sensor's pairing PIN (0–999 999). Unpairs all other computers.
+    SetPin(u32),
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +57,8 @@ pub enum Event {
         name: String,
         led: bool,
         heartbeat: Option<u32>,
+        /// False for firmware without the PIN characteristic.
+        pin_supported: bool,
     },
     /// `reason` is None when the user asked for the disconnect.
     Disconnected {
@@ -63,6 +67,12 @@ pub enum Event {
     Heartbeat(u32),
     Led(bool),
     Name(String),
+    /// The sensor accepted a new PIN.
+    PinChanged,
+    /// Pairing needs the sensor's PIN: ask the user, answer through the reply (Linux).
+    PasskeyRequest(PasskeyReply),
+    /// The pairing gave up before the user answered: close the PIN prompt.
+    PasskeyCancelled,
     /// A command failed, but the connection is still up.
     Error(String),
 }
@@ -89,6 +99,7 @@ pub fn spawn(ctx: egui::Context) -> (UnboundedSender<Command>, mpsc::Receiver<Ev
     (cmd_tx, ev_rx)
 }
 
+#[derive(Clone)]
 struct EventSink {
     tx: mpsc::Sender<Event>,
     ctx: egui::Context,
@@ -110,6 +121,8 @@ struct Connection {
     peripheral: Peripheral,
     led: Characteristic,
     name: Characteristic,
+    /// None on firmware from before the PIN characteristic.
+    pin: Option<Characteristic>,
 }
 
 async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Result<(), String> {
@@ -132,7 +145,14 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
         .map_err(|e| format!("Could not start scanning: {e}"))?;
 
     // Without the agent, pairing falls back to the OS prompt (if the desktop has one).
-    let agent = match PairingAgent::register().await {
+    let sink = events.clone();
+    let notify = Box::new(move |ev| {
+        sink.send(match ev {
+            AgentEvent::PasskeyRequest(reply) => Event::PasskeyRequest(reply),
+            AgentEvent::Cancelled => Event::PasskeyCancelled,
+        })
+    });
+    let agent = match PairingAgent::register(notify).await {
         Ok(a) => Some(a),
         Err(e) => {
             events.send(Event::Error(format!(
@@ -204,7 +224,8 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                     if let Ok(Err(e)) = &result { eprintln!("ble: connect failed: {e}"); }
                     match result {
                         Ok(Ok((c, stream, name, led, heartbeat))) => {
-                            events.send(Event::Connected { id, name, led, heartbeat });
+                            let pin_supported = c.pin.is_some();
+                            events.send(Event::Connected { id, name, led, heartbeat, pin_supported });
                             conn = Some(c);
                             notifications = Some(stream);
                         }
@@ -235,6 +256,14 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                         && let Err(e) = c.peripheral.write(&c.name, name.as_bytes(), WriteType::WithResponse).await {
                             events.send(Event::Error(format!("Could not rename the sensor: {e}")));
                         }
+                }
+                Some(Command::SetPin(pin)) => {
+                    if let Some(c) = &conn && let Some(chr) = &c.pin {
+                        match c.peripheral.write(chr, &proto::encode_pin(pin), WriteType::WithResponse).await {
+                            Ok(()) => events.send(Event::PinChanged),
+                            Err(e) => events.send(Event::Error(format!("Could not change the PIN: {e}"))),
+                        }
+                    }
                 }
             },
 
@@ -366,7 +395,7 @@ async fn open(p: &Peripheral, agent: Option<&PairingAgent>, path: &str) -> Resul
         agent
             .pair(path)
             .await
-            .map_err(|e| format!("{refused} (Pairing: {e})"))?;
+            .map_err(|e| format!("{e} While the sensor's LED still blinks, press Pair to try again."))?;
     }
     p.connect().await.map_err(|e| format!("Could not connect: {e}"))?;
     p.discover_services().await.map_err(|_| refused.to_string())?;
@@ -383,6 +412,7 @@ async fn open(p: &Peripheral, agent: Option<&PairingAgent>, path: &str) -> Resul
         find(proto::LED_UUID)?,
         find(proto::NAME_UUID)?,
     );
+    let pin = chars.iter().find(|c| c.uuid == proto::PIN_UUID).cloned();
 
     let read_err = |e: btleplug::Error| {
         format!(
@@ -413,6 +443,7 @@ async fn open(p: &Peripheral, agent: Option<&PairingAgent>, path: &str) -> Resul
             peripheral: p.clone(),
             led,
             name,
+            pin,
         },
         stream,
         name_value,
