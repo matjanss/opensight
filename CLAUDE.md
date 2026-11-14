@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-ESP Sensor: an ESP32 BLE peripheral (`firmware/`) and a Rust desktop app (`app/`) that
+OpenSights: an ESP32 BLE peripheral (`firmware/`) and a Rust desktop app (`app/`) that
 talk over the protocol in `protocol/PROTOCOL.md`. The prototype of an electronic target
 system; where it is heading is described in `FUTURE_ARCHITECTURE.md`.
 

@@ -11,4 +11,4 @@ firmware/compile_commands.json
 **/.vscode/launch.json
 **/.vscode/ipch
 # VS Code workspace file: the pioarduino extension writes machine-specific paths into it
-esp-sensor.code-workspace
+opensights.code-workspace

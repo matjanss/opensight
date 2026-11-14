@@ -448,7 +448,7 @@ async fn open(
     let chars = p.characteristics();
     let find = |uuid| {
         chars.iter().find(|c| c.uuid == uuid).cloned().ok_or_else(|| {
-            "This device doesn't look like an ESP Sensor (characteristic missing).".to_string()
+            "This device doesn't look like an OpenSights sensor (characteristic missing).".to_string()
         })
     };
     let (version, heartbeat, led, name) = (

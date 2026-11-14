@@ -1,5 +1,5 @@
 [package]
-name = "esp-sensor-app"
+name = "opensights-app"
 version = "0.1.0"
 edition = "2024"
 

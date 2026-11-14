@@ -1,4 +1,4 @@
-// ESP Sensor - the BLE GATT server (see protocol/PROTOCOL.md).
+// OpenSights - the BLE GATT server (see protocol/PROTOCOL.md).
 #include "ble_link.h"
 #include "protocol.h"
 #include <NimBLEDevice.h>

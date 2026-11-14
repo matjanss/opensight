@@ -62,32 +62,32 @@ jobs:
         run: |
           cargo build --release --locked
           mkdir -p ../dist
-          tar -czf ../dist/esp-sensor-app-$VERSION-linux-x86_64.tar.gz \
-            -C target/release esp-sensor-app
+          tar -czf ../dist/opensights-app-$VERSION-linux-x86_64.tar.gz \
+            -C target/release opensights-app
 
       - name: Build and package (Windows)
         if: runner.os == 'Windows'
         run: |
           cargo build --release --locked
           mkdir -p ../dist
-          7z a ../dist/esp-sensor-app-$VERSION-windows-x86_64.zip ./target/release/esp-sensor-app.exe
+          7z a ../dist/opensights-app-$VERSION-windows-x86_64.zip ./target/release/opensights-app.exe
 
       - name: Build and package (macOS, Apple Silicon + Intel)
         if: runner.os == 'macOS'
         run: |
           cargo build --release --locked --target aarch64-apple-darwin
           cargo build --release --locked --target x86_64-apple-darwin
-          app="ESP Sensor.app"
+          app="OpenSights.app"
           mkdir -p "$app/Contents/MacOS"
-          lipo -create -output "$app/Contents/MacOS/esp-sensor-app" \
-            target/aarch64-apple-darwin/release/esp-sensor-app \
-            target/x86_64-apple-darwin/release/esp-sensor-app
+          lipo -create -output "$app/Contents/MacOS/opensights-app" \
+            target/aarch64-apple-darwin/release/opensights-app \
+            target/x86_64-apple-darwin/release/opensights-app
           sed "s/VERSION/${VERSION#v}/g" macos/Info.plist > "$app/Contents/Info.plist"
           # Ad-hoc signature (no Apple developer account): seals Info.plist, which macOS
           # needs to ask for the Bluetooth permission.
           codesign --force --deep --sign - "$app"
           mkdir -p ../dist
-          ditto -c -k --keepParent "$app" ../dist/esp-sensor-app-$VERSION-macos-universal.zip
+          ditto -c -k --keepParent "$app" ../dist/opensights-app-$VERSION-macos-universal.zip
 
       - uses: actions/upload-artifact@v4
         with:
@@ -122,9 +122,9 @@ jobs:
           b=firmware/.pio/build/nodemcu-32s
           mkdir -p dist
           # Complete image, flashed at 0x0 (esptool or a web flasher).
-          cp $b/firmware.factory.bin dist/esp-sensor-firmware-$VERSION-nodemcu-32s-full.bin
+          cp $b/firmware.factory.bin dist/opensights-firmware-$VERSION-nodemcu-32s-full.bin
           # Application only, at 0x10000: an update over an earlier flash.
-          cp $b/firmware.bin dist/esp-sensor-firmware-$VERSION-nodemcu-32s-app.bin
+          cp $b/firmware.bin dist/opensights-firmware-$VERSION-nodemcu-32s-app.bin
 
       - uses: actions/upload-artifact@v4
         with:
@@ -151,9 +151,9 @@ jobs:
           generate_release_notes: true
           body: |
             **App** (unsigned, see the notes per system in the README):
-            - Linux: `esp-sensor-app-…-linux-x86_64.tar.gz`
-            - Windows 11: `esp-sensor-app-…-windows-x86_64.zip`
-            - macOS (Apple Silicon and Intel): `esp-sensor-app-…-macos-universal.zip`
+            - Linux: `opensights-app-…-linux-x86_64.tar.gz`
+            - Windows 11: `opensights-app-…-windows-x86_64.zip`
+            - macOS (Apple Silicon and Intel): `opensights-app-…-macos-universal.zip`
 
             **Firmware** (NodeMCU-32S):
             - `…-full.bin`: complete image, flash at `0x0`

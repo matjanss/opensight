@@ -1,4 +1,4 @@
-// ESP Sensor - BLE protocol constants. Mirrors protocol/PROTOCOL.md and app/src/protocol.rs:
+// OpenSights - BLE protocol constants. Mirrors protocol/PROTOCOL.md and app/src/protocol.rs:
 // change all three together.
 #pragma once
 #include <stddef.h>
@@ -25,4 +25,4 @@ const int NAME_MAX_LEN = 20;
 const size_t SHOT_LEN = 20;
 // Shot request (app → sensor): boot u32, next seq u32.
 const size_t SHOT_REQUEST_LEN = 8;
-const char* const NAME_PREFIX = "ESPSensor-";
+const char* const NAME_PREFIX = "OpenSights-";

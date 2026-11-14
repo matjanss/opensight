@@ -5,13 +5,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>ESP Sensor</string>
+    <string>OpenSights</string>
     <key>CFBundleDisplayName</key>
-    <string>ESP Sensor</string>
+    <string>OpenSights</string>
     <key>CFBundleIdentifier</key>
     <string>io.github.matjanss.opensight</string>
     <key>CFBundleExecutable</key>
-    <string>esp-sensor-app</string>
+    <string>opensights-app</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -23,6 +23,6 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>ESP Sensor connects to your targets over Bluetooth to show your shots.</string>
+    <string>OpenSights connects to your targets over Bluetooth to show your shots.</string>
 </dict>
 </plist>

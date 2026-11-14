@@ -242,7 +242,7 @@ mod tests {
         assert!(validate_name("abcdefghijklmnopqrstu").is_err()); // 21
         assert!(validate_name("abcdefghijklmnopqrst").is_ok()); // 20
         assert!(validate_name("Küche").is_err());
-        assert_eq!(decode_name(b"ESPSensor-a1f"), Some("ESPSensor-a1f".into()));
+        assert_eq!(decode_name(b"OpenSights-a1f"), Some("OpenSights-a1f".into()));
         assert_eq!(decode_name(b" padded "), Some(" padded ".into()));
         assert_eq!(decode_name(b""), None);
         assert_eq!(decode_name("Küche".as_bytes()), None);

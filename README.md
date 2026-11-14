@@ -1,4 +1,4 @@
-# ESP Sensor
+# OpenSights
 
 An ESP32 (NodeMCU-32S) that talks Bluetooth LE to a desktop app written in Rust.
 
@@ -6,7 +6,7 @@ An ESP32 (NodeMCU-32S) that talks Bluetooth LE to a desktop app written in Rust.
 - **app/** — Rust/egui desktop app (Linux, macOS, Windows)
 - **protocol/PROTOCOL.md** — the BLE protocol both sides implement
 
-Open `esp-sensor.code-workspace` in VS Code: PlatformIO picks up `firmware/` and
+Open `opensights.code-workspace` in VS Code: PlatformIO picks up `firmware/` and
 rust-analyzer picks up `app/`.
 
 ## What it does
@@ -19,7 +19,7 @@ rust-analyzer picks up `app/`.
   ones the app missed.
 - Settings also show the heartbeat (the sensor's `millis()`, every 2 s) and switch the
   blue LED.
-- The sensor has a name (`ESPSensor-xyz` at first) that you can change from the app.
+- The sensor has a name (`OpenSights-xyz` at first) that you can change from the app.
 - The app remembers the sensor and reconnects to it automatically.
 - Pairing needs the sensor's 6-digit PIN (`000000` at first), which you can change from
   the app. Forgot it? Hold BOOT for 10 s: the PIN is reset and all computers are unpaired.
@@ -40,18 +40,18 @@ After pairing once, the app connects by itself whenever the sensor is in range.
 Every version tag (`v0.1.0`, …) builds a GitHub Release with the app for Linux, Windows
 and macOS and the firmware. The binaries aren't signed, so each system warns once:
 
-- **Linux** (x86_64): unpack, then `./esp-sensor-app`.
-- **Windows 11**: unzip and start `esp-sensor-app.exe`. SmartScreen says "Windows
+- **Linux** (x86_64): unpack, then `./opensights-app`.
+- **Windows 11**: unzip and start `opensights-app.exe`. SmartScreen says "Windows
   protected your PC": click **More info → Run anyway**.
-- **macOS** (Apple Silicon and Intel): unzip and move **ESP Sensor.app** to Applications.
+- **macOS** (Apple Silicon and Intel): unzip and move **OpenSights.app** to Applications.
   The first start is blocked. Open **System Settings → Privacy & Security** and click
-  **Open Anyway**, or run `xattr -dr com.apple.quarantine "/Applications/ESP Sensor.app"`.
+  **Open Anyway**, or run `xattr -dr com.apple.quarantine "/Applications/OpenSights.app"`.
   macOS then asks for Bluetooth access.
 - **Firmware** (`pip install esptool`):
-  - New board: `esptool.py --chip esp32 write_flash 0x0 esp-sensor-firmware-…-full.bin`.
+  - New board: `esptool.py --chip esp32 write_flash 0x0 opensights-firmware-…-full.bin`.
     This also erases the stored name, PIN and pairings.
   - Update, keeping name, PIN and pairings:
-    `esptool.py --chip esp32 write_flash 0x10000 esp-sensor-firmware-…-app.bin`.
+    `esptool.py --chip esp32 write_flash 0x10000 opensights-firmware-…-app.bin`.
 
 To make a release: `git tag v0.1.0 && git push origin v0.1.0`.
 

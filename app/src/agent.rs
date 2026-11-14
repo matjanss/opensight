@@ -67,7 +67,7 @@ mod linux {
 
     use super::{AgentEvent, Notify, PasskeyReply};
 
-    const AGENT_PATH: &str = "/org/espsensor/agent";
+    const AGENT_PATH: &str = "/org/opensights/agent";
     /// Passkey entry: the sensor "displays" the passkey, the user types it in.
     const CAPABILITY: &str = "KeyboardOnly";
     const CALL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -197,7 +197,7 @@ mod linux {
             Some("Release" | "DisplayPasskey" | "DisplayPinCode") => Some(msg.method_return()),
             _ => Some(msg.error(
                 &"org.bluez.Error.Rejected".into(),
-                c"Not an ESP Sensor being paired",
+                c"Not an OpenSights sensor being paired",
             )),
         }
     }

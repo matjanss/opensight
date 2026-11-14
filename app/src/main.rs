@@ -37,11 +37,11 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([900.0, 640.0])
             .with_min_inner_size([360.0, 420.0])
-            .with_title("ESP Sensor"),
+            .with_title("OpenSights"),
         ..Default::default()
     };
     eframe::run_native(
-        "esp-sensor-app",
+        "opensights-app",
         options,
         Box::new(|cc| {
             install_fonts(&cc.egui_ctx);
@@ -278,7 +278,7 @@ impl eframe::App for SensorApp {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 centered_column(ui, |ui| {
                     ui.add_space(20.0);
-                    title(ui, "ESP Sensor", "Electronic target prototype");
+                    title(ui, "OpenSights", "Electronic target prototype");
                     ui.add_space(14.0);
                     self.main_body(ui);
                     ui.add_space(16.0);
@@ -291,7 +291,7 @@ impl eframe::App for SensorApp {
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("settings"),
                 egui::ViewportBuilder::default()
-                    .with_title("ESP Sensor · Settings")
+                    .with_title("OpenSights · Settings")
                     .with_inner_size([460.0, 640.0])
                     .with_min_inner_size([360.0, 420.0]),
                 |ui, _| {

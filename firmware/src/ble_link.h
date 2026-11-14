@@ -1,4 +1,4 @@
-// ESP Sensor - the BLE GATT server (see protocol/PROTOCOL.md).
+// OpenSights - the BLE GATT server (see protocol/PROTOCOL.md).
 //
 // NimBLE calls its callbacks from its own task. Those only record requests; the main loop
 // collects them with the bleTake*() functions and applies them, so all state changes,

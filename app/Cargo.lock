@@ -1142,23 +1142,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
-name = "esp-sensor-app"
-version = "0.1.0"
-dependencies = [
- "btleplug",
- "dbus",
- "dbus-tokio",
- "eframe",
- "futures",
- "libdbus-sys",
- "resvg",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "euclid"
 version = "0.22.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2543,6 +2526,23 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "opensights-app"
+version = "0.1.0"
+dependencies = [
+ "btleplug",
+ "dbus",
+ "dbus-tokio",
+ "eframe",
+ "futures",
+ "libdbus-sys",
+ "resvg",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
 
 [[package]]
 name = "orbclient"

@@ -1,4 +1,4 @@
-// ESP Sensor - test firmware for the desktop app (NodeMCU-32S).
+// OpenSights - test firmware for the desktop app (NodeMCU-32S).
 //
 // - BLE peripheral, protocol in protocol/PROTOCOL.md
 // - Heartbeat (millis()) every 2 s
@@ -42,7 +42,7 @@ static bool isValidName(const char* s, size_t len) {
   return true;
 }
 
-// The stored name, or on first boot "ESPSensor-xyz" with 3 random hex digits.
+// The stored name, or on first boot "OpenSights-xyz" with 3 random hex digits.
 static void loadName() {
   String stored = prefs.getString("name", "");
   if (isValidName(stored.c_str(), stored.length())) {
@@ -211,7 +211,7 @@ void setup() {
   bootId = esp_random() | 1;   // never 0, which the app sends when it has no shots yet
   prefs.begin("sensor");
   loadName();
-  Serial.printf("\nESP Sensor \"%s\", protocol v%d\n", sensorName, PROTOCOL_VERSION);
+  Serial.printf("\nOpenSights \"%s\", protocol v%d\n", sensorName, PROTOCOL_VERSION);
 
   bleBegin(sensorName, ledOn, loadPin());
   if (prefs.getString("gatt", "") != GATT_BUILD_ID) {

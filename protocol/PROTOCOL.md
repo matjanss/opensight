@@ -1,4 +1,4 @@
-# ESP Sensor BLE protocol, version 1
+# OpenSights BLE protocol, version 1
 
 The single source of truth for the link between the firmware (`firmware/`) and the
 desktop app (`app/`). A change here must be made on both sides in the same commit,
@@ -146,5 +146,5 @@ Example: the app has shot 3 of boot `0x12345678` → `78 56 34 12 04 00 00 00`.
 
 ## Default name
 
-On first boot the sensor names itself `ESPSensor-xyz`, where `xyz` is 3 random lowercase
+On first boot the sensor names itself `OpenSights-xyz`, where `xyz` is 3 random lowercase
 hex digits, and stores that name. Renaming over BLE replaces it.

@@ -1,4 +1,4 @@
-// ESP Sensor - pins and timings of this board (NodeMCU-32S).
+// OpenSights - pins and timings of this board (NodeMCU-32S).
 #pragma once
 #include <Arduino.h>
 
