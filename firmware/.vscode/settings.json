@@ -1,7 +1,9 @@
 {
-    "clangd.path": "/home/matti/.platformio/packages/tool-clangd-esp/bin/clangd",
+    // Portable across machines (macOS, Linux): the globs match the PlatformIO toolchain
+    // wherever ~/.platformio lives. The compile database comes from .clangd; create it once
+    // per machine with `pio run -t compiledb`.
     "clangd.arguments": [
-        "--query-driver=/home/matti/.platformio/packages/toolchain-*/bin/*,/home/matti/.platformio/packages/tool-*/bin/*",
-        "--compile-commands-dir=/home/matti/dev/esp-app-test/firmware/.cache/clangd"
+        "--query-driver=**/.platformio/packages/toolchain-*/bin/*",
+        "--background-index=false"
     ]
 }

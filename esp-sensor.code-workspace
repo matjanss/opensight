@@ -4,16 +4,16 @@
     { "name": "app", "path": "app" },
     { "name": "repo", "path": "." }
   ],
+  // No machine-specific paths here: clangd settings live in firmware/.vscode/settings.json,
+  // and rust-analyzer finds app/Cargo.toml by itself.
   "settings": {
-    "files.exclude": { "firmware": true, "app": true },
-    "rust-analyzer.linkedProjects": ["/home/matti/dev/esp-app-test/app/Cargo.toml"],
-    "clangd.path": "/home/matti/.platformio/packages/tool-clangd-esp/bin/clangd",
-    "clangd.arguments": [
-      "--query-driver=/home/matti/.platformio/packages/toolchain-*/bin/*,/home/matti/.platformio/packages/tool-*/bin/*",
-      "--compile-commands-dir=/home/matti/dev/esp-app-test/firmware/.cache/clangd"
-    ]
+    "files.exclude": { "firmware": true, "app": true }
   },
   "extensions": {
-    "recommendations": ["pioarduino.pioarduino-ide", "rust-lang.rust-analyzer"]
+    "recommendations": [
+      "pioarduino.pioarduino-ide",
+      "llvm-vs-code-extensions.vscode-clangd",
+      "rust-lang.rust-analyzer"
+    ]
   }
 }

@@ -1,7 +1,8 @@
 {
     "recommendations": [
         "Jason2866.esp-decoder",
-        "pioarduino.pioarduino-ide"
+        "pioarduino.pioarduino-ide",
+        "llvm-vs-code-extensions.vscode-clangd"
     ],
     "unwantedRecommendations": [
         "ms-vscode.cpptools-extension-pack"
