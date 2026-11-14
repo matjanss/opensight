@@ -10,6 +10,8 @@
 use tokio::sync::oneshot;
 
 /// What the agent tells the UI.
+// Only the Linux agent constructs these; on other systems the agent does nothing.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub enum AgentEvent {
     /// BlueZ needs the sensor's PIN. Answer through the [`PasskeyReply`].
     PasskeyRequest(PasskeyReply),

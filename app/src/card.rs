@@ -76,7 +76,11 @@ pub fn air_pistol() -> Card {
 impl Card {
     pub fn load(json: &str, svg: &str) -> Result<Card, String> {
         let meta: Meta = serde_json::from_str(json).map_err(|e| format!("Card JSON: {e}"))?;
-        let mut rings: Vec<(u8, f32)> = meta.rings.iter().map(|r| (r.value, r.diameter_mm / 2.0)).collect();
+        let mut rings: Vec<(u8, f32)> = meta
+            .rings
+            .iter()
+            .map(|r| (r.value, r.diameter_mm / 2.0))
+            .collect();
         rings.sort_by_key(|r| std::cmp::Reverse(r.0));
         let ok = !rings.is_empty()
             && rings.windows(2).all(|w| w[0].0 == w[1].0 + 1 && w[0].1 < w[1].1)
@@ -121,7 +125,11 @@ impl Card {
         let edge = x_mm.hypot(y_mm) - self.pellet_diameter_mm / 2.0; // hole edge nearest the centre
         let inner_ten = self.inner_ten_r.is_some_and(|r| edge <= r);
         let Some(i) = self.rings.iter().position(|&(_, r)| edge <= r) else {
-            return Score { ring: 0, tenths: 0, inner_ten: false };
+            return Score {
+                ring: 0,
+                tenths: 0,
+                inner_ten: false,
+            };
         };
         let (ring, outer) = self.rings[i];
         let inner = match i {
@@ -134,7 +142,11 @@ impl Card {
         } else {
             ring as u16 * 10
         };
-        Score { ring, tenths, inner_ten }
+        Score {
+            ring,
+            tenths,
+            inner_ten,
+        }
     }
 
     /// Renders the card `width` pixels wide.
@@ -143,7 +155,11 @@ impl Card {
         let scale = width as f32 / size.width();
         let height = (size.height() * scale).ceil() as u32;
         let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
-        resvg::render(&self.svg, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+        resvg::render(
+            &self.svg,
+            tiny_skia::Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
         Some(ColorImage::from_rgba_premultiplied(
             [width as usize, height as usize],
             pixmap.data(),
@@ -187,7 +203,14 @@ mod tests {
 
     #[test]
     fn centre_is_10_9_and_inner_ten() {
-        assert_eq!(s(0.0, 0.0), Score { ring: 10, tenths: 109, inner_ten: true });
+        assert_eq!(
+            s(0.0, 0.0),
+            Score {
+                ring: 10,
+                tenths: 109,
+                inner_ten: true
+            }
+        );
     }
 
     #[test]
@@ -196,7 +219,14 @@ mod tests {
         assert_eq!(s(0.0, 8.05).tenths, 99); // just outside: 9.9
         assert_eq!(s(16.0, 0.0).tenths, 90); // just touches ring 9
         assert_eq!(s(0.0, -80.0).tenths, 10); // ring 1 (77.75 + 2.25)
-        assert_eq!(s(80.1, 0.0), Score { ring: 0, tenths: 0, inner_ten: false });
+        assert_eq!(
+            s(80.1, 0.0),
+            Score {
+                ring: 0,
+                tenths: 0,
+                inner_ten: false
+            }
+        );
     }
 
     #[test]

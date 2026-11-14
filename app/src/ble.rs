@@ -489,9 +489,13 @@ async fn open(
             .await
             .map_err(|e| format!("Could not subscribe to shots: {e}"))?;
         let (boot, next) = last_shot.map_or((0, 0), |(boot, seq)| (boot, seq + 1));
-        p.write(shot, &proto::encode_shot_request(boot, next), WriteType::WithResponse)
-            .await
-            .map_err(|e| format!("Could not ask for missed shots: {e}"))?;
+        p.write(
+            shot,
+            &proto::encode_shot_request(boot, next),
+            WriteType::WithResponse,
+        )
+        .await
+        .map_err(|e| format!("Could not ask for missed shots: {e}"))?;
     }
 
     Ok(Opened {
