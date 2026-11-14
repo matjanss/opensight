@@ -26,12 +26,34 @@ rust-analyzer picks up `app/`.
 
 ## Getting started
 
+From source:
+
 1. Flash the firmware: `pio run -d firmware -t upload`
 2. Start the app: `cd app && cargo run`
 3. Pair: hold **BOOT** for 2 s until the LED blinks fast, press **Pair** in the app, and
    enter the PIN (**000000**) when asked.
 
 After pairing once, the app connects by itself whenever the sensor is in range.
+
+## Downloads
+
+Every version tag (`v0.1.0`, …) builds a GitHub Release with the app for Linux, Windows
+and macOS and the firmware. The binaries aren't signed, so each system warns once:
+
+- **Linux** (x86_64): unpack, then `./esp-sensor-app`.
+- **Windows 11**: unzip and start `esp-sensor-app.exe`. SmartScreen says "Windows
+  protected your PC": click **More info → Run anyway**.
+- **macOS** (Apple Silicon and Intel): unzip and move **ESP Sensor.app** to Applications.
+  The first start is blocked. Open **System Settings → Privacy & Security** and click
+  **Open Anyway**, or run `xattr -dr com.apple.quarantine "/Applications/ESP Sensor.app"`.
+  macOS then asks for Bluetooth access.
+- **Firmware** (`pip install esptool`):
+  - New board: `esptool.py --chip esp32 write_flash 0x0 esp-sensor-firmware-…-full.bin`.
+    This also erases the stored name, PIN and pairings.
+  - Update, keeping name, PIN and pairings:
+    `esptool.py --chip esp32 write_flash 0x10000 esp-sensor-firmware-…-app.bin`.
+
+To make a release: `git tag v0.1.0 && git push origin v0.1.0`.
 
 ## Notes per platform
 
