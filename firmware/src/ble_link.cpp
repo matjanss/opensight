@@ -7,6 +7,7 @@ static NimBLEServer*         server;
 static NimBLECharacteristic* heartbeatChr;
 static NimBLECharacteristic* ledChr;
 static NimBLECharacteristic* nameChr;
+static NimBLECharacteristic* shotChr;
 static std::string           advName;
 
 static volatile bool pairingMode = false;
@@ -28,6 +29,17 @@ static bool    namePending = false;
 static uint8_t pinBuf[8];                     // larger than 4 so wrong lengths are seen
 static size_t  pinLen;
 static bool    pinPending = false;
+static uint8_t shotReqBuf[12];                // larger than SHOT_REQUEST_LEN so wrong lengths are seen
+static size_t  shotReqLen;
+static bool    shotReqPending = false;
+
+// Shot indications. The state moves from PENDING to CONFIRMED/FAILED in NimBLE's task and
+// back to IDLE in the main loop, so each side only ever changes it from its own states.
+enum : uint8_t { TX_IDLE, TX_PENDING, TX_CONFIRMED, TX_FAILED };
+static volatile uint8_t  shotTx = TX_IDLE;
+static volatile bool     shotSubscribed = false;
+static volatile bool     shotSubscribeEvent = false;
+static volatile uint16_t shotConn = BLE_HS_CONN_HANDLE_NONE;
 
 // Read/notify/write all need an encrypted link made with the passkey (MITM), see "Security".
 static const uint32_t READ_SECURE  = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::READ_AUTHEN;
@@ -75,6 +87,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
   void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int reason) override {
     Serial.printf("BLE: disconnected (reason 0x%x)\n", reason);
+    shotSubscribed = false;
+    if (shotTx == TX_PENDING) shotTx = TX_FAILED;
   }
 
   void onAuthenticationComplete(NimBLEConnInfo& info) override {
@@ -139,6 +153,31 @@ class PinCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+class ShotCallbacks : public NimBLECharacteristicCallbacks {
+  // A request to resend buffered shots.
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
+    const NimBLEAttValue& v = c->getValue();
+    portENTER_CRITICAL(&writeMux);
+    shotReqLen = v.size() < sizeof shotReqBuf ? v.size() : sizeof shotReqBuf;
+    memcpy(shotReqBuf, v.data(), shotReqLen);
+    shotReqPending = true;
+    portEXIT_CRITICAL(&writeMux);
+  }
+
+  // Only a secured link gets shots: indications don't check the link's security themselves.
+  void onSubscribe(NimBLECharacteristic*, NimBLEConnInfo& info, uint16_t subValue) override {
+    bool on = (subValue & 0x0002) && info.isAuthenticated();
+    shotConn = info.getConnHandle();
+    shotSubscribed = on;
+    if (on) shotSubscribeEvent = true;
+  }
+
+  // BLE_HS_EDONE: the app confirmed the indication. Anything else: it was not delivered.
+  void onStatus(NimBLECharacteristic*, NimBLEConnInfo&, int code) override {
+    if (shotTx == TX_PENDING) shotTx = code == BLE_HS_EDONE ? TX_CONFIRMED : TX_FAILED;
+  }
+};
+
 // Changes whenever this file (which defines the GATT layout) is rebuilt.
 const char* const GATT_BUILD_ID = __DATE__ " " __TIME__;
 
@@ -146,6 +185,7 @@ static ServerCallbacks serverCallbacks;
 static LedCallbacks    ledCallbacks;
 static NameCallbacks   nameCallbacks;
 static PinCallbacks    pinCallbacks;
+static ShotCallbacks   shotCallbacks;
 
 void bleBegin(const char* name, bool ledOn, uint32_t pin) {
   advName = name;
@@ -180,6 +220,10 @@ void bleBegin(const char* name, bool ledOn, uint32_t pin) {
   // Write only: the PIN can be changed but never read back.
   NimBLECharacteristic* pinChr = svc->createCharacteristic(PIN_UUID, WRITE_SECURE);
   pinChr->setCallbacks(&pinCallbacks);
+
+  // Shots are indicated (the app confirms each one); writes ask for buffered shots again.
+  shotChr = svc->createCharacteristic(SHOT_UUID, WRITE_SECURE | NIMBLE_PROPERTY::INDICATE);
+  shotChr->setCallbacks(&shotCallbacks);
 
   updateAdvertising();
 }
@@ -268,6 +312,42 @@ bool bleTakePinWrite(uint8_t* value, size_t* len) {
     memcpy(value, pinBuf, pinLen);
     *len = pinLen;
     pinPending = false;
+    got = true;
+  }
+  portEXIT_CRITICAL(&writeMux);
+  return got;
+}
+
+bool bleShotReady() { return shotSubscribed && shotTx == TX_IDLE; }
+
+bool bleSendShot(const uint8_t* value, size_t len) {
+  if (!bleShotReady()) return false;
+  shotTx = TX_PENDING;   // before sending: the confirmation can arrive at once
+  if (shotChr->indicate(value, len, shotConn)) return true;
+  shotTx = TX_IDLE;
+  return false;
+}
+
+int bleTakeShotResult() {
+  uint8_t s = shotTx;
+  if (s != TX_CONFIRMED && s != TX_FAILED) return 0;
+  shotTx = TX_IDLE;
+  return s == TX_CONFIRMED ? 1 : -1;
+}
+
+bool bleTakeShotSubscribed() {
+  if (!shotSubscribeEvent) return false;
+  shotSubscribeEvent = false;
+  return true;
+}
+
+bool bleTakeShotRequest(uint8_t* value, size_t* len) {
+  bool got = false;
+  portENTER_CRITICAL(&writeMux);
+  if (shotReqPending) {
+    memcpy(value, shotReqBuf, shotReqLen);
+    *len = shotReqLen;
+    shotReqPending = false;
     got = true;
   }
   portEXIT_CRITICAL(&writeMux);

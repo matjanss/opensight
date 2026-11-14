@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 ESP Sensor: an ESP32 BLE peripheral (`firmware/`) and a Rust desktop app (`app/`) that
-talk over the protocol in `protocol/PROTOCOL.md`. A test bed for the firmware + app pattern.
+talk over the protocol in `protocol/PROTOCOL.md`. The prototype of an electronic target
+system; where it is heading is described in `FUTURE_ARCHITECTURE.md`.
 
 ## Build
 
@@ -22,8 +23,10 @@ app could misread new firmware or the reverse.
 
 ## Firmware
 
-- `main.cpp`: button (short press = LED, 2 s hold = pairing mode, 10 s hold = PIN reset),
-  heartbeat, name and PIN in NVS (namespace `"sensor"`), LED output. Simple 10 ms loop.
+- `main.cpp`: button (short press = test shot, 2 s hold = pairing mode, 10 s hold = PIN
+  reset), heartbeat, name and PIN in NVS (namespace `"sensor"`), LED output, and the shot
+  buffer: the last 64 shots, indicated one at a time until the app confirms each
+  (`serviceShots`). Simple 10 ms loop.
 - `ble_link.cpp`: NimBLE GATT server. NimBLE callbacks run in NimBLE's task: they only store
   requests, which `loop()` picks up with `bleTake*()`. Don't touch pins, NVS or app state
   from a callback.
@@ -34,6 +37,8 @@ app could misread new firmware or the reverse.
   when the central re-pairs on the same link. Writing a new PIN
   deletes all bonds but the writer's; BOOT held 10 s resets the PIN and deletes all bonds.
 - `BOOT_PIN` is defined by the Arduino core; ours is `BOOT_BTN_PIN`.
+- NimBLE only calls `onPassKeyDisplay()` while its static passkey is the default 123456,
+  so `bleSetPasskey` must not call `NimBLEDevice::setSecurityPasskey`.
 
 ## App
 
@@ -49,8 +54,15 @@ app could misread new firmware or the reverse.
   system-wide "no input" capability, so without the passkey (no MITM). Connecting to a
   sensor in pairing mode deletes BlueZ's old keys first (stale bonds). The sensor list
   shows BlueZ's real pairing state; unpaired sensors can only be paired in pairing mode.
-- `main.rs`: egui UI. The main window shows only heartbeat and LED; everything else (dark
-  mode, sensor list and pairing, name, PIN, disconnect/forget) is in a settings window,
+- `card.rs`: target cards. Each card is an SVG (the picture) plus JSON (scoring geometry);
+  scoring never looks at the SVG. The cards are rendered with resvg, using the embedded IBM
+  Plex font rather than system fonts. The built-in card is in `assets/cards/`.
+  1 SVG unit = 1 mm.
+- Shots: `ble.rs` asks for missed shots on every connect and drops duplicates by
+  (boot, seq). The app keeps the series in memory.
+- `main.rs`: egui UI. While connected, the main window shows the target card with the
+  series' shots (the newest in the UI's only color) and the series list; everything else
+  (dark mode, sensor list and pairing, name, PIN, heartbeat, LED, disconnect/forget) is in a settings window,
   an immediate viewport opened from the gear in the status bar. The PIN popup and messages
   show in the settings window while it's open. The remembered sensor ID and theme are
   saved with eframe's storage.

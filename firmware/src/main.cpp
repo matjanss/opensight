@@ -2,11 +2,14 @@
 //
 // - BLE peripheral, protocol in protocol/PROTOCOL.md
 // - Heartbeat (millis()) every 2 s
-// - BOOT short press toggles the onboard LED, BOOT held 2 s opens a 60 s pairing window,
-//   BOOT held 10 s resets the PIN and deletes all bonds
+// - BOOT short press makes a test shot (until there is measuring hardware), BOOT held 2 s
+//   opens a 60 s pairing window, BOOT held 10 s resets the PIN and deletes all bonds
+// - Shots are numbered, buffered and indicated to the app until it confirms them
+// - The onboard LED is switched from the app
 // - Sensor name and pairing PIN stored in flash, changeable over BLE
 #include <Arduino.h>
 #include <Preferences.h>
+#include <math.h>
 #include "config.h"
 #include "protocol.h"
 #include "ble_link.h"
@@ -17,6 +20,20 @@ static bool ledOn = false;
 static bool pairing = false;
 static uint32_t pairingEnd;
 static uint32_t resetSignalEnd = 0;   // LED stays on until then after a PIN reset
+static uint32_t shotFlashEnd = 0;     // LED flashes until then after a shot
+
+// The last SHOT_BUFFER shots, kept so the app can ask for them again after a link drop.
+// Numbered from 1 per boot; bootId tells the app which boot a number belongs to.
+struct Shot {
+  uint32_t seq, timeMs;
+  int32_t  x, y;   // 0.01 mm from the centre, x right, y up (as seen by the shooter)
+};
+static Shot     shots[SHOT_BUFFER];
+static uint32_t bootId;
+static uint32_t lastSeq = 0;    // 0: no shot yet
+static uint32_t sendNext = 1;   // next shot to indicate; lastSeq + 1 when the app has them all
+static uint32_t inFlight = 0;   // the shot being indicated
+static uint32_t retryAt = 0;
 
 static bool isValidName(const char* s, size_t len) {
   if (len < 1 || len > (size_t)NAME_MAX_LEN) return false;
@@ -65,7 +82,64 @@ static void resetSecurity(uint32_t now) {
   setPairing(true);   // restarts the 60 s window, so the user can pair right away
 }
 
-// Debounced BOOT button: short press toggles the LED, a 2 s hold starts pairing mode,
+static uint32_t oldestSeq() { return lastSeq >= (uint32_t)SHOT_BUFFER ? lastSeq - SHOT_BUFFER + 1 : 1; }
+
+static void addShot(int32_t x, int32_t y, uint32_t now) {
+  Shot& s = shots[(++lastSeq) % SHOT_BUFFER];
+  s = {lastSeq, now, x, y};
+  shotFlashEnd = now + SHOT_FLASH_MS;
+  Serial.printf("Shot %u: x %.2f mm, y %.2f mm\n", (unsigned)lastSeq, x / 100.0, y / 100.0);
+}
+
+// A test shot, normally distributed around the centre (Box-Muller).
+static void makeTestShot(uint32_t now) {
+  float u1 = (esp_random() + 1.0f) / 4294967297.0f;   // (0, 1]: log() stays finite
+  float u2 = esp_random() / 4294967296.0f;
+  float r = sqrtf(-2.0f * logf(u1)) * TEST_SHOT_SIGMA_MM * 100.0f;
+  addShot(lroundf(r * cosf(2 * PI * u2)), lroundf(r * sinf(2 * PI * u2)), now);
+}
+
+static void put32(uint8_t* p, uint32_t v) {
+  for (int i = 0; i < 4; i++) p[i] = v >> (8 * i);
+}
+
+static uint32_t get32(const uint8_t* p) {
+  return (uint32_t)p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+// Indicates the shots the app doesn't have yet, one at a time, oldest first. A shot counts
+// as delivered only once the app confirmed it; a failed one is sent again.
+static void serviceShots(uint32_t now) {
+  // A fresh subscription gets new shots only, unless the app asks for older ones.
+  if (bleTakeShotSubscribed()) sendNext = lastSeq + 1;
+
+  uint8_t req[12];
+  size_t len;
+  if (bleTakeShotRequest(req, &len) && len == SHOT_REQUEST_LEN) {
+    // From the shot after the app's last one; a different boot means it has none of ours.
+    uint32_t from = get32(req) == bootId ? get32(req + 4) : 1;
+    sendNext = constrain(from, oldestSeq(), lastSeq + 1);
+  }
+
+  switch (bleTakeShotResult()) {
+    case 1:  if (sendNext == inFlight) sendNext++; break;   // (unless a request moved it)
+    case -1: retryAt = now + SHOT_RETRY_MS; break;
+  }
+
+  if (sendNext < oldestSeq()) sendNext = oldestSeq();   // overwritten meanwhile: lost
+  if (sendNext > lastSeq || (int32_t)(now - retryAt) < 0 || !bleShotReady()) return;
+  const Shot& s = shots[sendNext % SHOT_BUFFER];
+  uint8_t buf[SHOT_LEN];
+  put32(buf, s.seq);
+  put32(buf + 4, bootId);
+  put32(buf + 8, s.timeMs);
+  put32(buf + 12, (uint32_t)s.x);
+  put32(buf + 16, (uint32_t)s.y);
+  if (bleSendShot(buf, sizeof buf)) inFlight = sendNext;
+  else retryAt = now + SHOT_RETRY_MS;
+}
+
+// Debounced BOOT button: short press makes a test shot, a 2 s hold starts pairing mode,
 // a 10 s hold resets the PIN. Both fire while still held, so the user sees the LED react.
 static void pollButton(uint32_t now) {
   static int lastRaw = HIGH, stable = HIGH;
@@ -81,7 +155,7 @@ static void pollButton(uint32_t now) {
       longFired = false;
       resetFired = false;
     } else if (!longFired) {
-      setLed(!ledOn);
+      makeTestShot(now);
     }
   }
   if (stable == LOW && !longFired && now - pressedAt >= LONG_PRESS_MS) {
@@ -116,7 +190,7 @@ static void handleBleWrites() {
 
   uint8_t p[8];
   if (bleTakePinWrite(p, &len)) {
-    uint32_t pin = len == 4 ? (uint32_t)p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24 : UINT32_MAX;
+    uint32_t pin = len == 4 ? get32(p) : UINT32_MAX;
     if (pin <= PASSKEY_MAX) {
       prefs.putUInt("pin", pin);
       bleSetPasskey(pin);
@@ -134,6 +208,7 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
 
+  bootId = esp_random() | 1;   // never 0, which the app sends when it has no shots yet
   prefs.begin("sensor");
   loadName();
   Serial.printf("\nESP Sensor \"%s\", protocol v%d\n", sensorName, PROTOCOL_VERSION);
@@ -152,6 +227,7 @@ void loop() {
 
   pollButton(now);
   handleBleWrites();
+  serviceShots(now);
 
   if (pairing && (bleTakeNewBond() || (int32_t)(now - pairingEnd) >= 0)) setPairing(false);
 
@@ -160,8 +236,12 @@ void loop() {
     bleSetHeartbeat(now);
   }
 
-  // Solid after a PIN reset, blinking in pairing mode, otherwise the state the user set.
-  bool out = (int32_t)(now - resetSignalEnd) < 0 ? true : pairing ? ((now / PAIRING_BLINK_MS) & 1) : ledOn;
+  // Solid after a PIN reset, blinking in pairing mode, flipped briefly after a shot,
+  // otherwise the state the app set.
+  bool out = (int32_t)(now - resetSignalEnd) < 0 ? true
+           : pairing                              ? ((now / PAIRING_BLINK_MS) & 1)
+           : (int32_t)(now - shotFlashEnd) < 0    ? !ledOn
+                                                  : ledOn;
   digitalWrite(LED_PIN, out ? HIGH : LOW);
 
   delay(LOOP_PERIOD_MS);

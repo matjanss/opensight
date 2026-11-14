@@ -28,6 +28,14 @@ void bleSetPasskey(uint32_t pin);       // used for pairings from now on
 int  bleDeleteOtherBonds();             // all but the connected central's; returns how many
 void bleDeleteAllBonds();               // also disconnects the connected central
 
+// Shots, indicated one at a time: start one with bleSendShot() when bleShotReady(), then
+// bleTakeShotResult() reports whether the app confirmed it. Call from the main loop.
+bool bleShotReady();                                   // subscribed, nothing in flight
+bool bleSendShot(const uint8_t* value, size_t len);    // false if it could not be sent
+int  bleTakeShotResult();                              // 1 confirmed, -1 failed, 0 nothing new
+bool bleTakeShotSubscribed();                          // the app (re)subscribed to shots
+bool bleTakeShotRequest(uint8_t* value, size_t* len);  // raw bytes, validated by the caller
+
 // Requests from the app, or events, since the last call. Each returns true once per event.
 bool bleTakeLedWrite(uint8_t* value, size_t* len);         // raw bytes, validated by the caller
 bool bleTakeNameWrite(char* buf, size_t bufSize, size_t* len);

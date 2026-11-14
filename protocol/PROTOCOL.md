@@ -47,6 +47,7 @@ All characteristic UUIDs share the service UUID's base and differ only in the
 | `f103`      | Name      | read, write, notify  | Sensor name, 1–20 bytes of printable ASCII (0x20–0x7E), no terminator |
 | `f104`      | Version   | read                 | `u8` `PROTOCOL_VERSION`                        |
 | `f105`      | PIN       | write                | `u32` new pairing passkey, 0–999 999 (6 digits) |
+| `f106`      | Shot      | write, indicate      | Indicated: one shot (20 bytes). Written: a shot request (8 bytes) |
 
 Full UUIDs:
 - Heartbeat `5631f101-5314-4f02-b637-0654ff6d409d`
@@ -54,6 +55,7 @@ Full UUIDs:
 - Name `5631f103-5314-4f02-b637-0654ff6d409d`
 - Version `5631f104-5314-4f02-b637-0654ff6d409d`
 - PIN `5631f105-5314-4f02-b637-0654ff6d409d`
+- Shot `5631f106-5314-4f02-b637-0654ff6d409d`
 
 ### Behaviour
 
@@ -61,8 +63,8 @@ Full UUIDs:
   about 49.7 days, like `millis()`.
   Example: 12 345 ms → `39 30 00 00`.
 - **LED**: writing `0` or `1` switches the onboard LED. Any other value or length is
-  ignored. The sensor notifies the new state after every change, from the app or from
-  the BOOT button, so the app does not need to assume its write succeeded.
+  ignored. The sensor notifies the new state after every change, so the app does not
+  need to assume its write succeeded.
 - **Name**: writing a valid name stores it in flash, updates the advertised name and
   notifies the new name. An invalid write (empty, longer than 20 bytes, or any byte
   outside 0x20–0x7E) is ignored, and the sensor notifies the unchanged name, so the app
@@ -76,6 +78,42 @@ Full UUIDs:
   It can't be read, so the PIN never leaves the sensor. The app shows PINs as 6 digits
   with leading zeros. Example: 123 456 → `40 E2 01 00`.
   Firmware from before this characteristic doesn't have it; the app treats it as optional.
+- **Shot**: see below. Also optional for the app.
+
+### Shots
+
+Each shot is **indicated**, so the app's Bluetooth stack confirms every one. The sensor sends
+one shot at a time, oldest first, and moves on only after the confirmation. A shot that
+wasn't confirmed is sent again.
+
+Shot (sensor → app, 20 bytes):
+
+| Bytes | Type  | Field   | Meaning                                                      |
+|-------|-------|---------|--------------------------------------------------------------|
+| 0–3   | `u32` | seq     | Shot number, from 1 for every boot of the sensor             |
+| 4–7   | `u32` | boot    | Random per boot, never 0: tells which boot `seq` belongs to  |
+| 8–11  | `u32` | time    | The sensor's `millis()` at the impact                        |
+| 12–15 | `i32` | x       | Hundredths of a mm from the target centre, positive to the right |
+| 16–19 | `i32` | y       | Hundredths of a mm from the target centre, positive upwards  |
+
+Directions are as seen by the shooter. The sensor knows nothing about target cards or
+scoring: the app maps the position onto the card and scores it.
+
+Example: shot 3 of boot `0x12345678`, at 12 345 ms, x = 1.25 mm, y = −2.5 mm →
+`03 00 00 00 78 56 34 12 39 30 00 00 7D 00 00 00 06 FF FF FF`.
+
+Shot request (app → sensor, 8 bytes): `u32` boot, `u32` next seq. "Send your shots from
+`next seq` of `boot` on."
+- The sensor keeps the last **64 shots** of the current boot (in RAM).
+- When it subscribes, an app gets only shots made after that. Right after subscribing,
+  the app writes a request with the boot and seq of the last shot it has, plus 1.
+- If `boot` is not the sensor's current boot (for example 0, because the app has no shots
+  yet), the sensor sends every shot it still has.
+- The app drops duplicates by (boot, seq). A gap in `seq` within one boot means shots
+  were lost: more than 64 were made while the app was away.
+- A request of the wrong length is ignored.
+
+Example: the app has shot 3 of boot `0x12345678` → `78 56 34 12 04 00 00 00`.
 
 ## Security and pairing
 
@@ -100,7 +138,7 @@ Full UUIDs:
 
 | Action                  | Result                                        |
 |-------------------------|-----------------------------------------------|
-| BOOT short press (< 2 s)| Toggle the LED                                |
+| BOOT short press (< 2 s)| Make a test shot, normally distributed around the centre (σ 15 mm), until there is measuring hardware. The LED flashes briefly |
 | BOOT held 2 s           | Enter pairing mode for 60 s                   |
 | BOOT held 10 s          | Reset the PIN to `000000`, delete all bonds, enter pairing mode |
 | LED blinking fast       | Pairing mode (the LED state is restored after) |

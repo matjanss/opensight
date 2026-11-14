@@ -12,6 +12,7 @@ pub const LED_UUID: Uuid = uuid!("5631f102-5314-4f02-b637-0654ff6d409d");
 pub const NAME_UUID: Uuid = uuid!("5631f103-5314-4f02-b637-0654ff6d409d");
 pub const VERSION_UUID: Uuid = uuid!("5631f104-5314-4f02-b637-0654ff6d409d");
 pub const PIN_UUID: Uuid = uuid!("5631f105-5314-4f02-b637-0654ff6d409d");
+pub const SHOT_UUID: Uuid = uuid!("5631f106-5314-4f02-b637-0654ff6d409d");
 
 pub const MANUFACTURER_ID: u16 = 0xFFFF;
 pub const ADV_FLAG_PAIRING: u8 = 0x01;
@@ -89,6 +90,51 @@ pub fn encode_pin(pin: u32) -> [u8; 4] {
     pin.to_le_bytes()
 }
 
+/// One shot as the sensor reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shot {
+    /// Numbered from 1 for every boot of the sensor.
+    pub seq: u32,
+    /// Random per boot of the sensor, never 0: tells which boot `seq` belongs to.
+    pub boot: u32,
+    /// The sensor's `millis()` at the impact.
+    pub time_ms: u32,
+    /// Hundredths of a mm from the centre; x to the right, y up, as seen by the shooter.
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Shot {
+    pub fn x_mm(&self) -> f32 {
+        self.x as f32 / 100.0
+    }
+    pub fn y_mm(&self) -> f32 {
+        self.y as f32 / 100.0
+    }
+}
+
+/// Shot indication: seq `u32`, boot `u32`, time `u32`, x `i32`, y `i32`, little-endian.
+pub fn decode_shot(bytes: &[u8]) -> Option<Shot> {
+    let b: &[u8; 20] = bytes.try_into().ok()?;
+    let word = |i: usize| [b[i], b[i + 1], b[i + 2], b[i + 3]];
+    Some(Shot {
+        seq: u32::from_le_bytes(word(0)),
+        boot: u32::from_le_bytes(word(4)),
+        time_ms: u32::from_le_bytes(word(8)),
+        x: i32::from_le_bytes(word(12)),
+        y: i32::from_le_bytes(word(16)),
+    })
+}
+
+/// Shot request: "send your buffered shots from `next_seq` of boot `boot` on". With a
+/// boot the sensor doesn't have (0 when the app has no shots yet), it sends all it has.
+pub fn encode_shot_request(boot: u32, next_seq: u32) -> [u8; 8] {
+    let mut out = [0; 8];
+    out[..4].copy_from_slice(&boot.to_le_bytes());
+    out[4..].copy_from_slice(&next_seq.to_le_bytes());
+    out
+}
+
 /// What the sensor puts in its advertisement's manufacturer data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdvInfo {
@@ -162,6 +208,31 @@ mod tests {
         assert!(validate_pin("1234567").is_err());
         assert!(validate_pin("12a456").is_err());
         assert!(validate_pin("+12345").is_err());
+    }
+
+    #[test]
+    fn shot_example() {
+        let bytes = [
+            0x03, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0x39, 0x30, 0x00, 0x00, 0x7D, 0x00, 0x00, 0x00,
+            0x06, 0xFF, 0xFF, 0xFF,
+        ];
+        let shot = decode_shot(&bytes).unwrap();
+        assert_eq!(
+            shot,
+            Shot {
+                seq: 3,
+                boot: 0x1234_5678,
+                time_ms: 12_345,
+                x: 125,
+                y: -250
+            }
+        );
+        assert_eq!((shot.x_mm(), shot.y_mm()), (1.25, -2.5));
+        assert_eq!(decode_shot(&bytes[..19]), None);
+        assert_eq!(
+            encode_shot_request(0x1234_5678, 4),
+            [0x78, 0x56, 0x34, 0x12, 0x04, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]

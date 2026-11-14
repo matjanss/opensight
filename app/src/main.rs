@@ -3,6 +3,7 @@
 
 mod agent;
 mod ble;
+mod card;
 mod protocol;
 
 use std::sync::mpsc;
@@ -16,8 +17,15 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use agent::PasskeyReply;
 use ble::{Command, Event, SensorInfo};
+use card::{Card, CardTexture, Score};
 
 const CONTENT_MAX_WIDTH: f32 = 460.0;
+/// Width of the column next to the target card; below this window width they stack.
+const SIDE_WIDTH: f32 = 280.0;
+const STACK_BELOW: f32 = 640.0;
+/// The newest shot on the card. The only color in the UI: it has to stand out on both the
+/// black and the white of the card.
+const LAST_SHOT_COLOR: Color32 = Color32::from_rgb(232, 96, 52);
 /// After a failed automatic reconnect, wait this long before trying again.
 const AUTO_RETRY: Duration = Duration::from_secs(10);
 const KEY_REMEMBERED: &str = "remembered_sensor";
@@ -26,7 +34,7 @@ const KEY_DARK: &str = "dark_mode";
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([480.0, 700.0])
+            .with_inner_size([900.0, 640.0])
             .with_min_inner_size([360.0, 420.0])
             .with_title("ESP Sensor"),
         ..Default::default()
@@ -74,6 +82,14 @@ struct SensorApp {
     pin_confirm: bool,
     passkey_prompt: Option<PasskeyPrompt>,
 
+    card: Card,
+    card_texture: CardTexture,
+    shots_supported: bool,
+    /// The shots of the current series, oldest first. Kept across reconnects to the same
+    /// sensor; cleared by the user or when another sensor connects.
+    series: Vec<(protocol::Shot, Score)>,
+    series_sensor: Option<String>,
+
     /// The sensor this app connected to last; reconnected automatically when seen.
     remembered: Option<String>,
     /// Off after the user disconnects, so we don't reconnect behind their back.
@@ -104,6 +120,11 @@ impl SensorApp {
             pin_input: String::new(),
             pin_confirm: false,
             passkey_prompt: None,
+            card: card::air_pistol(),
+            card_texture: CardTexture::default(),
+            shots_supported: false,
+            series: Vec::new(),
+            series_sensor: None,
             remembered: storage
                 .and_then(|s| s.get_string(KEY_REMEMBERED))
                 .filter(|s| !s.is_empty()),
@@ -141,9 +162,15 @@ impl SensorApp {
                     led,
                     heartbeat,
                     pin_supported,
+                    shots_supported,
                 } => {
                     self.passkey_prompt = None;
                     self.pin_supported = pin_supported;
+                    self.shots_supported = shots_supported;
+                    if self.series_sensor.as_deref() != Some(id.as_str()) {
+                        self.series.clear();
+                        self.series_sensor = Some(id.clone());
+                    }
                     self.pin_input.clear();
                     self.pin_confirm = false;
                     self.remembered = Some(id.clone());
@@ -168,6 +195,10 @@ impl SensorApp {
                     self.heartbeat_at = Some(Instant::now());
                 }
                 Event::Led(on) => self.led = on,
+                Event::Shot(shot) => {
+                    let score = self.card.score(shot.x_mm(), shot.y_mm());
+                    self.series.push((shot, score));
+                }
                 Event::Name(name) => {
                     self.name_input = name.clone();
                     self.sensor_name = name;
@@ -232,11 +263,16 @@ impl eframe::App for SensorApp {
             )
             .show(ui, |ui| self.status_bar(ui));
 
+        let on_target = matches!(self.link, Link::Connected { .. }) && self.fatal.is_none();
         egui::CentralPanel::default().show(ui, |ui| {
+            if on_target {
+                self.target_screen(ui);
+                return;
+            }
             egui::ScrollArea::vertical().show(ui, |ui| {
                 centered_column(ui, |ui| {
                     ui.add_space(20.0);
-                    title(ui, "ESP Sensor", "BLE test app");
+                    title(ui, "ESP Sensor", "Electronic target prototype");
                     ui.add_space(14.0);
                     self.main_body(ui);
                     ui.add_space(16.0);
@@ -340,7 +376,135 @@ impl SensorApp {
         }
     }
 
-    /// Main window: what the sensor reports, nothing to configure.
+    /// Main window while connected: the target card with the shots, and the series beside
+    /// it (below it in a narrow window).
+    fn target_screen(&mut self, ui: &mut Ui) {
+        ui.add_space(8.0);
+        self.message_notice(ui, false);
+        let avail = ui.available_size();
+        let gap = 16.0;
+        if avail.x >= STACK_BELOW {
+            let aspect = self.card.size_mm().y / self.card.size_mm().x;
+            let card_w = (avail.x - SIDE_WIDTH - gap).min(avail.y / aspect).max(160.0);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.add_space(((avail.x - card_w - gap - SIDE_WIDTH) / 2.0 - gap).max(0.0));
+                self.target_card(ui, card_w);
+                ui.vertical(|ui| {
+                    ui.set_width(SIDE_WIDTH);
+                    egui::ScrollArea::vertical().show(ui, |ui| self.series_column(ui));
+                });
+            });
+        } else {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                self.target_card(ui, ui.available_width());
+                ui.add_space(6.0);
+                self.series_column(ui);
+            });
+        }
+    }
+
+    /// The card, `width` points wide, with every shot of the series; the newest in color.
+    fn target_card(&mut self, ui: &mut Ui, width: f32) {
+        let size = self.card.size_mm() * (width / self.card.size_mm().x);
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        let px = width * ui.ctx().pixels_per_point();
+        if let Some(tex) = self.card_texture.get(ui.ctx(), &self.card, px) {
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(tex.id(), rect, uv, Color32::WHITE);
+        }
+        let scale = width / self.card.size_mm().x;
+        let radius = self.card.pellet_diameter_mm / 2.0 * scale;
+        for (i, (shot, _)) in self.series.iter().enumerate() {
+            let pos = rect.min + self.card.to_card(shot.x_mm(), shot.y_mm()) * scale;
+            let (fill, stroke) = if i + 1 == self.series.len() {
+                (LAST_SHOT_COLOR, Stroke::new(1.5, Color32::WHITE))
+            } else {
+                (Color32::from_gray(150), Stroke::new(1.0, Color32::from_gray(30)))
+            };
+            painter.circle(pos, radius, fill, stroke);
+        }
+    }
+
+    /// Last shot and the series list with the total.
+    fn series_column(&mut self, ui: &mut Ui) {
+        let decimal = self.card.decimal;
+        card(ui, "Last shot", |ui| {
+            let Some((shot, score)) = self.series.last() else {
+                let text = if self.shots_supported {
+                    "No shots yet. Press BOOT on the target for a test shot."
+                } else {
+                    "This target's firmware doesn't send shots. Update the firmware."
+                };
+                ui.add(egui::Label::new(RichText::new(text).weak()).wrap());
+                return;
+            };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(score.text(decimal)).size(44.0).strong());
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let mut line = format!("Shot {} · ring {}", self.series.len(), score.ring);
+                    if score.inner_ten {
+                        line.push_str(" · inner ten");
+                    }
+                    ui.label(line);
+                    let off = shot.x_mm().hypot(shot.y_mm());
+                    ui.label(RichText::new(format!("{off:.1} mm from the centre")).weak());
+                });
+            });
+        });
+
+        let mut clear = false;
+        card(ui, &format!("Series · {}", self.card.name), |ui| {
+            let tenths: u32 = self.series.iter().map(|(_, s)| s.tenths as u32).sum();
+            let rings: u32 = self.series.iter().map(|(_, s)| s.ring as u32).sum();
+            ui.horizontal(|ui| {
+                let total = if decimal {
+                    format!("{}.{}", tenths / 10, tenths % 10)
+                } else {
+                    rings.to_string()
+                };
+                ui.label(RichText::new(total).size(28.0).strong());
+                let n = self.series.len();
+                let mut detail = format!("{n} shot{}", if n == 1 { "" } else { "s" });
+                if decimal {
+                    detail.push_str(&format!(" · {rings} in whole rings"));
+                }
+                ui.label(RichText::new(detail).weak());
+            });
+            if self.series.is_empty() {
+                return;
+            }
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("series")
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    for (i, (_, score)) in self.series.iter().enumerate().rev() {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("{}", i + 1)).weak());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(RichText::new(score.text(decimal)).strong());
+                                if score.inner_ten {
+                                    ui.label(RichText::new("X").small().weak());
+                                }
+                            });
+                        });
+                    }
+                });
+            ui.separator();
+            clear = ui
+                .add(egui::Button::new("Clear series").frame(false))
+                .on_hover_text("Start a new series. Only clears this app's list.")
+                .clicked();
+        });
+        if clear {
+            self.series.clear();
+        }
+    }
+
+    /// Main window without a connection.
     fn main_body(&mut self, ui: &mut Ui) {
         if let Some(e) = &self.fatal {
             card(ui, "Bluetooth unavailable", |ui| {
@@ -351,10 +515,7 @@ impl SensorApp {
         }
         self.message_notice(ui, false);
         match &self.link {
-            Link::Connected { .. } => {
-                self.heartbeat_card(ui);
-                self.led_card(ui);
-            }
+            Link::Connected { .. } => {} // shown by target_screen
             Link::Connecting { name } => connecting_card(ui, name),
             Link::Idle => self.no_sensor_card(ui),
         }
@@ -418,6 +579,8 @@ impl SensorApp {
                 let id = id.clone();
                 self.name_card(ui);
                 self.pin_card(ui);
+                self.heartbeat_card(ui);
+                self.led_card(ui);
                 card(ui, "Connection", |ui| {
                     ui.label(format!("Connected to {}.", self.sensor_name));
                     ui.horizontal(|ui| {

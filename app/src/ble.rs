@@ -59,6 +59,8 @@ pub enum Event {
         heartbeat: Option<u32>,
         /// False for firmware without the PIN characteristic.
         pin_supported: bool,
+        /// False for firmware without the shot characteristic.
+        shots_supported: bool,
     },
     /// `reason` is None when the user asked for the disconnect.
     Disconnected {
@@ -67,6 +69,8 @@ pub enum Event {
     Heartbeat(u32),
     Led(bool),
     Name(String),
+    /// A shot the app hasn't had before (duplicates are dropped here).
+    Shot(proto::Shot),
     /// The sensor accepted a new PIN.
     PinChanged,
     /// Pairing needs the sensor's PIN: ask the user, answer through the reply (Linux).
@@ -114,8 +118,14 @@ impl EventSink {
 
 type Notifications = Pin<Box<dyn Stream<Item = ValueNotification> + Send>>;
 
-/// An open connection plus the values read while opening it: name, LED, heartbeat.
-type Opened = (Connection, Notifications, String, bool, Option<u32>);
+/// An open connection plus the values read while opening it.
+struct Opened {
+    conn: Connection,
+    stream: Notifications,
+    name: String,
+    led: bool,
+    heartbeat: Option<u32>,
+}
 
 struct Connection {
     peripheral: Peripheral,
@@ -123,6 +133,8 @@ struct Connection {
     name: Characteristic,
     /// None on firmware from before the PIN characteristic.
     pin: Option<Characteristic>,
+    /// None on firmware from before the shot characteristic.
+    shot: Option<Characteristic>,
 }
 
 async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Result<(), String> {
@@ -166,6 +178,9 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
     let mut conn: Option<Connection> = None;
     let mut notifications: Option<Notifications> = None;
     let mut prune = tokio::time::interval(Duration::from_secs(2));
+    // (boot, seq) of the newest shot received, kept across reconnects: after a link drop
+    // the sensor is asked for everything after it.
+    let mut last_shot: Option<(u32, u32)> = None;
 
     loop {
         tokio::select! {
@@ -219,13 +234,14 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                     events.send(Event::Connecting { name: info.name.clone() });
                     let pid = pid.clone();
                     let pairing_mode = info.adv.is_some_and(|a| a.pairing);
-                    let attempt = connect(&adapter, &pid, agent.as_ref(), pairing_mode);
+                    let attempt = connect(&adapter, &pid, agent.as_ref(), pairing_mode, last_shot);
                     let result = tokio::time::timeout(CONNECT_TIMEOUT, attempt).await;
                     if let Ok(Err(e)) = &result { eprintln!("ble: connect failed: {e}"); }
                     match result {
-                        Ok(Ok((c, stream, name, led, heartbeat))) => {
+                        Ok(Ok(Opened { conn: c, stream, name, led, heartbeat })) => {
                             let pin_supported = c.pin.is_some();
-                            events.send(Event::Connected { id, name, led, heartbeat, pin_supported });
+                            let shots_supported = c.shot.is_some();
+                            events.send(Event::Connected { id, name, led, heartbeat, pin_supported, shots_supported });
                             conn = Some(c);
                             notifications = Some(stream);
                         }
@@ -273,6 +289,9 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                         u if u == proto::HEARTBEAT_UUID => proto::decode_heartbeat(&n.value).map(Event::Heartbeat),
                         u if u == proto::LED_UUID => proto::decode_led(&n.value).map(Event::Led),
                         u if u == proto::NAME_UUID => proto::decode_name(&n.value).map(Event::Name),
+                        u if u == proto::SHOT_UUID => proto::decode_shot(&n.value)
+                            .and_then(|shot| new_shot(&mut last_shot, shot, events))
+                            .map(Event::Shot),
                         _ => None,
                     };
                     if let Some(ev) = ev { events.send(ev); }
@@ -288,6 +307,26 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
         }
     }
     Ok(())
+}
+
+/// Drops shots the app already has (the sensor resends after a link drop). Reports a gap,
+/// which means the sensor's buffer overflowed while the app was away.
+fn new_shot(last: &mut Option<(u32, u32)>, shot: proto::Shot, events: &EventSink) -> Option<proto::Shot> {
+    if let Some((boot, seq)) = *last
+        && boot == shot.boot
+    {
+        if shot.seq <= seq {
+            return None;
+        }
+        if shot.seq > seq + 1 {
+            let n = shot.seq - seq - 1;
+            events.send(Event::Error(format!(
+                "{n} shot(s) were lost: the target couldn't keep them all while it wasn't connected."
+            )));
+        }
+    }
+    *last = Some((shot.boot, shot.seq));
+    Some(shot)
 }
 
 /// Waits for the next notification, or forever while not connected.
@@ -360,6 +399,7 @@ async fn connect(
     pid: &PeripheralId,
     agent: Option<&PairingAgent>,
     pairing_mode: bool,
+    last_shot: Option<(u32, u32)>,
 ) -> Result<Opened, String> {
     let path = bluez_path(pid);
     if pairing_mode
@@ -373,7 +413,7 @@ async fn connect(
         }
     }
     let p = adapter.peripheral(pid).await.map_err(|e| e.to_string())?;
-    let result = open(&p, agent, &path).await;
+    let result = open(&p, agent, &path, last_shot).await;
     if result.is_err() {
         let _ = p.disconnect().await;
     }
@@ -381,9 +421,14 @@ async fn connect(
 }
 
 /// Connects, pairs if needed, checks the protocol version, reads the current values and
-/// subscribes. Without our agent (other OSes), the first read needs an encrypted link, so
+/// subscribes. Asks for the shots after `last_shot` (all buffered ones if None). Without our agent (other OSes), the first read needs an encrypted link, so
 /// that is where the OS pairing prompt appears if the two aren't bonded yet.
-async fn open(p: &Peripheral, agent: Option<&PairingAgent>, path: &str) -> Result<Opened, String> {
+async fn open(
+    p: &Peripheral,
+    agent: Option<&PairingAgent>,
+    path: &str,
+    last_shot: Option<(u32, u32)>,
+) -> Result<Opened, String> {
     let refused = "The sensor refused the connection. If it isn't paired with this computer yet, \
                    hold BOOT for 2 s until the LED blinks, then press Pair.";
 
@@ -413,6 +458,7 @@ async fn open(p: &Peripheral, agent: Option<&PairingAgent>, path: &str) -> Resul
         find(proto::NAME_UUID)?,
     );
     let pin = chars.iter().find(|c| c.uuid == proto::PIN_UUID).cloned();
+    let shot = chars.iter().find(|c| c.uuid == proto::SHOT_UUID).cloned();
 
     let read_err = |e: btleplug::Error| {
         format!(
@@ -437,17 +483,28 @@ async fn open(p: &Peripheral, agent: Option<&PairingAgent>, path: &str) -> Resul
             .await
             .map_err(|e| format!("Could not subscribe: {e}"))?;
     }
+    if let Some(shot) = &shot {
+        // Subscribe first, so nothing sent in between is missed (duplicates are dropped).
+        p.subscribe(shot)
+            .await
+            .map_err(|e| format!("Could not subscribe to shots: {e}"))?;
+        let (boot, next) = last_shot.map_or((0, 0), |(boot, seq)| (boot, seq + 1));
+        p.write(shot, &proto::encode_shot_request(boot, next), WriteType::WithResponse)
+            .await
+            .map_err(|e| format!("Could not ask for missed shots: {e}"))?;
+    }
 
-    Ok((
-        Connection {
+    Ok(Opened {
+        conn: Connection {
             peripheral: p.clone(),
             led,
             name,
             pin,
+            shot,
         },
         stream,
-        name_value,
-        led_value,
-        heartbeat_value,
-    ))
+        name: name_value,
+        led: led_value,
+        heartbeat: heartbeat_value,
+    })
 }

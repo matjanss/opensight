@@ -11,8 +11,14 @@ rust-analyzer picks up `app/`.
 
 ## What it does
 
-- The sensor sends a heartbeat (its `millis()`) every 2 seconds; the app shows it.
-- The BOOT button toggles the blue LED; the app can toggle it too, and both stay in sync.
+- The sensor is the prototype of an electronic target. Until it has measuring hardware,
+  a short press on BOOT makes a test shot.
+- The app shows the shots on a 10 m air pistol card and scores them (decimal). The series
+  list and total sit next to the card.
+- No shot is lost when the link drops: the sensor keeps its last 64 shots and resends the
+  ones the app missed.
+- Settings also show the heartbeat (the sensor's `millis()`, every 2 s) and switch the
+  blue LED.
 - The sensor has a name (`ESPSensor-xyz` at first) that you can change from the app.
 - The app remembers the sensor and reconnects to it automatically.
 - Pairing needs the sensor's 6-digit PIN (`000000` at first), which you can change from
