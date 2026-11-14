@@ -11,10 +11,8 @@ static NimBLECharacteristic* shotChr;
 static std::string           advName;
 
 static volatile bool pairingMode = false;
-// Set when NimBLE asks for the passkey, which only happens during an actual pairing (not when
-// a bonded central reconnects). A re-pairing replaces an existing bond, so "was the central
-// bonded when it connected" can't tell the two apart.
-static volatile bool passkeyUsed = false;
+// Set when a central finishes a secured (passkey/MITM) link while bonded: a new pairing or a
+// bonded central reconnecting. Ends pairing mode.
 static volatile bool newBond = false;
 static volatile uint32_t passkey = DEFAULT_PASSKEY;   // read by NimBLE's task during pairing
 
@@ -82,7 +80,6 @@ class ServerCallbacks : public NimBLEServerCallbacks {
       s->disconnect(info);
       return;
     }
-    passkeyUsed = false;
   }
 
   void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int reason) override {
@@ -108,13 +105,11 @@ class ServerCallbacks : public NimBLEServerCallbacks {
       server->disconnect(info);
       return;
     }
-    if (info.isBonded() && passkeyUsed) newBond = true;   // ends pairing mode
-    passkeyUsed = false;
+    if (info.isBonded()) newBond = true;   // ends pairing mode
   }
 
   // We have no display: the passkey is the stored PIN, and the user types it on the computer.
   uint32_t onPassKeyDisplay() override {
-    passkeyUsed = true;
     return passkey;
   }
 };
