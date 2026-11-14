@@ -19,7 +19,8 @@ struct Meta {
     /// Where the target centre is, in SVG units (mm from the top left).
     centre_mm: [f32; 2],
     pellet_diameter_mm: f32,
-    /// Decimal scoring (10.9 at best) or whole rings only.
+    /// Whether the card can be scored in decimals (10.9 at best). The user's preference
+    /// picks decimal or traditional scoring on such cards; others are always whole rings.
     decimal: bool,
     inner_ten_diameter_mm: Option<f32>,
     /// Scoring rings, any order. Every ring's outer edge counts: a hole touching it scores it.
@@ -55,9 +56,12 @@ pub struct Score {
 }
 
 impl Score {
+    /// Decimal: "10.4". Traditional: the whole ring, with "X" for an inner ten.
     pub fn text(&self, decimal: bool) -> String {
         if decimal {
             format!("{}.{}", self.tenths / 10, self.tenths % 10)
+        } else if self.inner_ten {
+            "X".to_string()
         } else {
             self.ring.to_string()
         }
@@ -233,6 +237,14 @@ mod tests {
     fn inner_ten() {
         assert!(s(4.75, 0.0).inner_ten); // 2.5 + 2.25
         assert!(!s(4.8, 0.0).inner_ten);
+    }
+
+    #[test]
+    fn traditional_text_uses_x_for_inner_ten() {
+        assert_eq!(s(0.0, 0.0).text(false), "X");
+        assert_eq!(s(0.0, 0.0).text(true), "10.9");
+        assert_eq!(s(4.8, 0.0).text(false), "10"); // a ten, but not an inner ten
+        assert_eq!(s(1000.0, 0.0).text(false), "0");
     }
 
     #[test]

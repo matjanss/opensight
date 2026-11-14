@@ -30,6 +30,7 @@ const LAST_SHOT_COLOR: Color32 = Color32::from_rgb(232, 96, 52);
 const AUTO_RETRY: Duration = Duration::from_secs(10);
 const KEY_REMEMBERED: &str = "remembered_sensor";
 const KEY_DARK: &str = "dark_mode";
+const KEY_DECIMAL: &str = "decimal_scoring";
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -99,6 +100,8 @@ struct SensorApp {
     message: Option<String>,
     fatal: Option<String>,
     dark_mode: bool,
+    /// Decimal scoring (10.4) instead of traditional whole rings with X. Off by default.
+    decimal_scoring: bool,
     settings_open: bool,
 }
 
@@ -135,6 +138,9 @@ impl SensorApp {
             dark_mode: storage
                 .and_then(|s| s.get_string(KEY_DARK))
                 .is_none_or(|v| v == "true"),
+            decimal_scoring: storage
+                .and_then(|s| s.get_string(KEY_DECIMAL))
+                .is_some_and(|v| v == "true"),
             settings_open: false,
         }
     }
@@ -296,7 +302,7 @@ impl eframe::App for SensorApp {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             centered_column(ui, |ui| {
                                 ui.add_space(20.0);
-                                title(ui, "Settings", "Appearance and the connected sensor");
+                                title(ui, "Settings", "Appearance, scoring and the connected sensor");
                                 ui.add_space(14.0);
                                 self.settings_body(ui);
                                 ui.add_space(16.0);
@@ -323,6 +329,7 @@ impl eframe::App for SensorApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(KEY_REMEMBERED, self.remembered.clone().unwrap_or_default());
         storage.set_string(KEY_DARK, self.dark_mode.to_string());
+        storage.set_string(KEY_DECIMAL, self.decimal_scoring.to_string());
     }
 }
 
@@ -429,7 +436,7 @@ impl SensorApp {
 
     /// Last shot and the series list with the total.
     fn series_column(&mut self, ui: &mut Ui) {
-        let decimal = self.card.decimal;
+        let decimal = self.decimal_scoring && self.card.decimal;
         card(ui, "Last shot", |ui| {
             let Some((shot, score)) = self.series.last() else {
                 let text = if self.shots_supported {
@@ -445,7 +452,7 @@ impl SensorApp {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let mut line = format!("Shot {} · ring {}", self.series.len(), score.ring);
-                    if score.inner_ten {
+                    if score.inner_ten && decimal {
                         line.push_str(" · inner ten");
                     }
                     ui.label(line);
@@ -465,11 +472,14 @@ impl SensorApp {
                 } else {
                     rings.to_string()
                 };
+                let inner_tens = self.series.iter().filter(|(_, s)| s.inner_ten).count();
                 ui.label(RichText::new(total).size(28.0).strong());
                 let n = self.series.len();
                 let mut detail = format!("{n} shot{}", if n == 1 { "" } else { "s" });
                 if decimal {
                     detail.push_str(&format!(" · {rings} in whole rings"));
+                } else if inner_tens > 0 {
+                    detail.push_str(&format!(" · {inner_tens}X"));
                 }
                 ui.label(RichText::new(detail).weak());
             });
@@ -486,7 +496,7 @@ impl SensorApp {
                             ui.label(RichText::new(format!("{}", i + 1)).weak());
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(RichText::new(score.text(decimal)).strong());
-                                if score.inner_ten {
+                                if score.inner_ten && decimal {
                                     ui.label(RichText::new("X").small().weak());
                                 }
                             });
@@ -567,6 +577,19 @@ impl SensorApp {
                     toggle_switch(ui, &mut self.dark_mode);
                 });
             });
+        });
+        card(ui, "Scoring", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Decimal scoring");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    toggle_switch(ui, &mut self.decimal_scoring);
+                });
+            });
+            ui.label(
+                RichText::new("Off: whole rings, X for an inner ten. On: tenths, up to 10.9.")
+                    .small()
+                    .weak(),
+            );
         });
         if let Some(e) = &self.fatal {
             card(ui, "Bluetooth unavailable", |ui| {

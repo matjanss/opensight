@@ -13,7 +13,7 @@ rust-analyzer picks up `app/`.
 
 - The sensor is the prototype of an electronic target. Until it has measuring hardware,
   a short press on BOOT makes a test shot.
-- The app shows the shots on a 10 m air pistol card and scores them (decimal). The series
+- The app shows the shots on a 10 m air pistol card and scores them: whole rings with X for an inner ten, or decimals (a setting). The series
   list and total sit next to the card.
 - No shot is lost when the link drops: the sensor keeps its last 64 shots and resends the
   ones the app missed.

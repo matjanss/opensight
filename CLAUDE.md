@@ -62,7 +62,7 @@ app could misread new firmware or the reverse.
   (boot, seq). The app keeps the series in memory.
 - `main.rs`: egui UI. While connected, the main window shows the target card with the
   series' shots (the newest in the UI's only color) and the series list; everything else
-  (dark mode, sensor list and pairing, name, PIN, heartbeat, LED, disconnect/forget) is in a settings window,
+  (dark mode, decimal scoring (off by default: whole rings, X = inner ten), sensor list and pairing, name, PIN, heartbeat, LED, disconnect/forget) is in a settings window,
   an immediate viewport opened from the gear in the status bar. The PIN popup and messages
   show in the settings window while it's open. The remembered sensor ID and theme are
   saved with eframe's storage.
