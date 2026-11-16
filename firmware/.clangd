@@ -1,3 +1,42 @@
+CompileFlags:
+  Add:
+    - "-Wall"
+    - "-Wextra"
+    - "-Wunused-variable"
+    - "-Wunused-function"
+    - "-Wno-unused-parameter"
+    - "-Wno-reserved-identifier"
+  Remove:
+    - "-misc-unused-parameters"
+    - "-mfix-esp32-psram-cache-issue"
+    - "-mfix-esp32-psram-cache-strategy=*"
+    - "-fno-shrink-wrap"
+    - "-fno-malloc-dce"
+    - "-fno-tree-switch-conversion"
+    - "-fstrict-volatile-bitfields"
+    - "-fzero-init-padding-bits=*"
+    - "-free"
+    - "-fipa-pta"
+    - "-march=*"
+    - "-mtune=*"
+    - "-mdisable-hardware-atomics"
+    - "-mlongcalls"
+    - "-mtext-section-literals"
+    - "-mtarget-align"
+    - "-mno-target-align"
+    - "-isysroot"
+Diagnostics:
+  Suppress: [pp_expects_filename, unused-includes]
+---
+If:
+  PathMatch: .*\.ino
+CompileFlags:
+  Add:
+    - "-x"
+    - "c++"
+    - "-include"
+    - "Arduino.h"
+---
 # clangd setup for the ESP32 firmware. The compile database is machine specific (absolute
 # paths) and git-ignored; regenerate it on each machine with:
 #   pio run -d firmware -t compiledb

@@ -90,6 +90,8 @@ struct SensorApp {
     /// sensor; cleared by the user or when another sensor connects.
     series: Vec<(protocol::Shot, Score)>,
     series_sensor: Option<String>,
+    /// (boot, seq) of the shot whose info popup is open on the card.
+    selected_shot: Option<(u32, u32)>,
 
     /// The sensor this app connected to last; reconnected automatically when seen.
     remembered: Option<String>,
@@ -128,6 +130,7 @@ impl SensorApp {
             shots_supported: false,
             series: Vec::new(),
             series_sensor: None,
+            selected_shot: None,
             remembered: storage
                 .and_then(|s| s.get_string(KEY_REMEMBERED))
                 .filter(|s| !s.is_empty()),
@@ -412,9 +415,11 @@ impl SensorApp {
     }
 
     /// The card, `width` points wide, with every shot of the series; the newest in color.
+    /// Clicking a shot opens a small popup with its info; clicking it again, clicking
+    /// elsewhere on the card or Escape closes it.
     fn target_card(&mut self, ui: &mut Ui, width: f32) {
         let size = self.card.size_mm() * (width / self.card.size_mm().x);
-        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
         let painter = ui.painter_at(rect);
         let px = width * ui.ctx().pixels_per_point();
         if let Some(tex) = self.card_texture.get(ui.ctx(), &self.card, px) {
@@ -423,15 +428,81 @@ impl SensorApp {
         }
         let scale = width / self.card.size_mm().x;
         let radius = self.card.pellet_diameter_mm / 2.0 * scale;
+        let shot_pos = |shot: &protocol::Shot| rect.min + self.card.to_card(shot.x_mm(), shot.y_mm()) * scale;
         for (i, (shot, _)) in self.series.iter().enumerate() {
-            let pos = rect.min + self.card.to_card(shot.x_mm(), shot.y_mm()) * scale;
             let (fill, stroke) = if i + 1 == self.series.len() {
                 (LAST_SHOT_COLOR, Stroke::new(1.5, Color32::WHITE))
             } else {
                 (Color32::from_gray(150), Stroke::new(1.0, Color32::from_gray(30)))
             };
-            painter.circle(pos, radius, fill, stroke);
+            painter.circle(shot_pos(shot), radius, fill, stroke);
         }
+
+        // The shot under the pointer: the nearest within the hole (at least a few points
+        // wide on a small card), the newest of equally near ones (it's drawn on top).
+        let hit_r = radius.max(6.0);
+        let shot_at = |p: egui::Pos2| {
+            self.series
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(i, (shot, _))| (i, shot_pos(shot).distance(p)))
+                .filter(|&(_, d)| d <= hit_r)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        };
+        if response.hover_pos().and_then(shot_at).is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked() {
+            let key = |i: usize| (self.series[i].0.boot, self.series[i].0.seq);
+            let hit = response.interact_pointer_pos().and_then(shot_at).map(key);
+            self.selected_shot = if hit == self.selected_shot { None } else { hit };
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.selected_shot = None;
+        }
+
+        // Gone when the series was cleared or replaced.
+        let Some(i) = self
+            .selected_shot
+            .and_then(|key| self.series.iter().position(|(s, _)| (s.boot, s.seq) == key))
+        else {
+            self.selected_shot = None;
+            return;
+        };
+        let (shot, score) = &self.series[i];
+        let pos = shot_pos(shot);
+        // A dark and a light ring, visible on the card's black and white parts.
+        painter.circle_stroke(pos, radius + 3.0, Stroke::new(3.0, Color32::BLACK));
+        painter.circle_stroke(pos, radius + 3.0, Stroke::new(1.5, Color32::WHITE));
+
+        // Beside the shot, towards the card's middle so it stays on the card.
+        let gap = radius + 8.0;
+        let (offset, pivot) = if pos.x > rect.center().x {
+            (egui::vec2(-gap, -gap), egui::Align2::RIGHT_BOTTOM)
+        } else {
+            (egui::vec2(gap, -gap), egui::Align2::LEFT_BOTTOM)
+        };
+        let decimal = self.decimal_scoring && self.card.decimal;
+        egui::Area::new(egui::Id::unique("shot_info"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos + offset)
+            .pivot(pivot)
+            .constrain(true)
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("Shot {}", i + 1)).strong());
+                        ui.label(RichText::new(score.text(decimal)).size(20.0).strong());
+                    });
+                    ui.label(format!("x {:+.2} mm · y {:+.2} mm", shot.x_mm(), shot.y_mm()));
+                    let off = shot.x_mm().hypot(shot.y_mm());
+                    ui.label(RichText::new(format!("{off:.2} mm from the centre")).weak());
+                });
+            });
     }
 
     /// Last shot and the series list with the total.
