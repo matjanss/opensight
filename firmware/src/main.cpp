@@ -5,7 +5,7 @@
 // - BOOT short press makes a test shot (until there is measuring hardware), BOOT held 2 s
 //   opens a 60 s pairing window, BOOT held 10 s resets the PIN and deletes all bonds
 // - Shots are numbered, buffered and indicated to the app until it confirms them
-// - The onboard LED is switched from the app
+// - The onboard LED shows status only: pairing mode, a PIN reset, shots
 // - Sensor name and pairing PIN stored in flash, changeable over BLE
 #include <Arduino.h>
 #include <Preferences.h>
@@ -16,7 +16,6 @@
 
 static Preferences prefs;
 static char sensorName[NAME_MAX_LEN + 1];
-static bool ledOn = false;
 static bool pairing = false;
 static uint32_t pairingEnd;
 static uint32_t resetSignalEnd = 0;   // LED stays on until then after a PIN reset
@@ -51,12 +50,6 @@ static void loadName() {
     snprintf(sensorName, sizeof sensorName, "%s%03x", NAME_PREFIX, (unsigned)(esp_random() & 0xFFF));
     prefs.putString("name", sensorName);
   }
-}
-
-static void setLed(bool on) {
-  ledOn = on;
-  bleSetLed(on);                       // notify even if unchanged, so the app sees the real state
-  Serial.printf("LED %s\n", on ? "on" : "off");
 }
 
 static void setPairing(bool on) {
@@ -170,13 +163,7 @@ static void pollButton(uint32_t now) {
 
 // Apply what the app wrote. Invalid writes are answered with the unchanged value.
 static void handleBleWrites() {
-  uint8_t v[4];
   size_t len;
-  if (bleTakeLedWrite(v, &len)) {
-    if (len == 1 && v[0] <= 1) setLed(v[0] == 1);
-    else bleSetLed(ledOn);
-  }
-
   char buf[32];
   if (bleTakeNameWrite(buf, sizeof buf, &len)) {
     if (isValidName(buf, len)) {
@@ -213,7 +200,7 @@ void setup() {
   loadName();
   Serial.printf("\nOpenSights \"%s\", protocol v%d\n", sensorName, PROTOCOL_VERSION);
 
-  bleBegin(sensorName, ledOn, loadPin());
+  bleBegin(sensorName, loadPin());
   if (prefs.getString("gatt", "") != GATT_BUILD_ID) {
     bleServicesChanged();
     prefs.putString("gatt", GATT_BUILD_ID);
@@ -236,12 +223,11 @@ void loop() {
     bleSetHeartbeat(now);
   }
 
-  // Solid after a PIN reset, blinking in pairing mode, flipped briefly after a shot,
-  // otherwise the state the app set.
+  // Solid after a PIN reset, blinking in pairing mode, a short flash after a shot,
+  // otherwise off.
   bool out = (int32_t)(now - resetSignalEnd) < 0 ? true
            : pairing                              ? ((now / PAIRING_BLINK_MS) & 1)
-           : (int32_t)(now - shotFlashEnd) < 0    ? !ledOn
-                                                  : ledOn;
+                                                  : (int32_t)(now - shotFlashEnd) < 0;
   digitalWrite(LED_PIN, out ? HIGH : LOW);
 
   delay(LOOP_PERIOD_MS);

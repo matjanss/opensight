@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 use uuid::{Uuid, uuid};
 
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
 pub const SERVICE_UUID: Uuid = uuid!("5631f100-5314-4f02-b637-0654ff6d409d");
 pub const HEARTBEAT_UUID: Uuid = uuid!("5631f101-5314-4f02-b637-0654ff6d409d");
-pub const LED_UUID: Uuid = uuid!("5631f102-5314-4f02-b637-0654ff6d409d");
+// 5631f102 was the LED (version 1); not reused.
 pub const NAME_UUID: Uuid = uuid!("5631f103-5314-4f02-b637-0654ff6d409d");
 pub const VERSION_UUID: Uuid = uuid!("5631f104-5314-4f02-b637-0654ff6d409d");
 pub const PIN_UUID: Uuid = uuid!("5631f105-5314-4f02-b637-0654ff6d409d");
@@ -26,19 +26,6 @@ pub const NAME_MAX_LEN: usize = 20;
 /// Heartbeat: `u32` little-endian, milliseconds since the sensor booted.
 pub fn decode_heartbeat(bytes: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.try_into().ok()?))
-}
-
-/// LED: one byte, 0 = off, 1 = on.
-pub fn decode_led(bytes: &[u8]) -> Option<bool> {
-    match bytes {
-        [0] => Some(false),
-        [1] => Some(true),
-        _ => None,
-    }
-}
-
-pub fn encode_led(on: bool) -> [u8; 1] {
-    [on as u8]
 }
 
 fn is_name_char(c: char) -> bool {
@@ -167,31 +154,24 @@ mod tests {
 
     #[test]
     fn advertisement_example() {
-        // On air: FF FF 01 01. btleplug strips the company ID into the map key.
-        let data = HashMap::from([(0xFFFF, vec![0x01, 0x01])]);
+        // On air: FF FF 02 01. btleplug strips the company ID into the map key.
+        let data = HashMap::from([(0xFFFF, vec![0x02, 0x01])]);
         assert_eq!(
             decode_adv(&data),
             Some(AdvInfo {
-                version: 1,
+                version: 2,
                 pairing: true
             })
         );
-        let data = HashMap::from([(0xFFFF, vec![0x01, 0x00])]);
+        let data = HashMap::from([(0xFFFF, vec![0x02, 0x00])]);
         assert_eq!(
             decode_adv(&data),
             Some(AdvInfo {
-                version: 1,
+                version: 2,
                 pairing: false
             })
         );
         assert_eq!(decode_adv(&HashMap::new()), None);
-    }
-
-    #[test]
-    fn led_values() {
-        assert_eq!(decode_led(&encode_led(true)), Some(true));
-        assert_eq!(decode_led(&encode_led(false)), Some(false));
-        assert_eq!(decode_led(&[2]), None);
     }
 
     #[test]

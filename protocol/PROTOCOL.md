@@ -1,4 +1,4 @@
-# OpenSights BLE protocol, version 1
+# OpenSights BLE protocol, version 2
 
 The single source of truth for the link between the firmware (`firmware/`) and the
 desktop app (`app/`). A change here must be made on both sides in the same commit,
@@ -28,7 +28,7 @@ Manufacturer data: company ID `0xFFFF` (reserved for testing), then 2 bytes:
 | 0    | `PROTOCOL_VERSION`                              |
 | 1    | Flags. Bit 0: sensor is in pairing mode. Other bits 0. |
 
-Example, version 1 in pairing mode: `FF FF 01 01` (company ID little-endian, then the two bytes).
+Example, version 2 in pairing mode: `FF FF 02 01` (company ID little-endian, then the two bytes).
 
 The app finds sensors by the service UUID, and reads the pairing flag to decide
 whether to offer "Pair" (flag set) or tell the user to enter pairing mode first.
@@ -43,15 +43,16 @@ All characteristic UUIDs share the service UUID's base and differ only in the
 | UUID suffix | Name      | Properties           | Value                                         |
 |-------------|-----------|----------------------|-----------------------------------------------|
 | `f101`      | Heartbeat | read, notify         | `u32` milliseconds since the sensor booted (`millis()`) at the last heartbeat |
-| `f102`      | LED       | read, write, notify  | `u8`: 0 = off, 1 = on                          |
 | `f103`      | Name      | read, write, notify  | Sensor name, 1–20 bytes of printable ASCII (0x20–0x7E), no terminator |
 | `f104`      | Version   | read                 | `u8` `PROTOCOL_VERSION`                        |
 | `f105`      | PIN       | write                | `u32` new pairing passkey, 0–999 999 (6 digits) |
 | `f106`      | Shot      | write, indicate      | Indicated: one shot (20 bytes). Written: a shot request (8 bytes) |
 
+`f102` was the LED switch in version 1. It is gone (the LED only shows the sensor's
+status, see below) and its UUID is not reused.
+
 Full UUIDs:
 - Heartbeat `5631f101-5314-4f02-b637-0654ff6d409d`
-- LED `5631f102-5314-4f02-b637-0654ff6d409d`
 - Name `5631f103-5314-4f02-b637-0654ff6d409d`
 - Version `5631f104-5314-4f02-b637-0654ff6d409d`
 - PIN `5631f105-5314-4f02-b637-0654ff6d409d`
@@ -62,9 +63,6 @@ Full UUIDs:
 - **Heartbeat** is notified every 2000 ms while a client is subscribed. It wraps after
   about 49.7 days, like `millis()`.
   Example: 12 345 ms → `39 30 00 00`.
-- **LED**: writing `0` or `1` switches the onboard LED. Any other value or length is
-  ignored. The sensor notifies the new state after every change, so the app does not
-  need to assume its write succeeded.
 - **Name**: writing a valid name stores it in flash, updates the advertised name and
   notifies the new name. An invalid write (empty, longer than 20 bytes, or any byte
   outside 0x20–0x7E) is ignored, and the sensor notifies the unchanged name, so the app
@@ -141,7 +139,7 @@ Example: the app has shot 3 of boot `0x12345678` → `78 56 34 12 04 00 00 00`.
 | BOOT short press (< 2 s)| Make a test shot, normally distributed around the centre (σ 15 mm), until there is measuring hardware. The LED flashes briefly |
 | BOOT held 2 s           | Enter pairing mode for 60 s                   |
 | BOOT held 10 s          | Reset the PIN to `000000`, delete all bonds, enter pairing mode |
-| LED blinking fast       | Pairing mode (the LED state is restored after) |
+| LED blinking fast       | Pairing mode                                  |
 | LED on for 1.5 s, then blinking | The PIN reset was done                |
 
 ## Default name

@@ -23,6 +23,8 @@ const CONTENT_MAX_WIDTH: f32 = 460.0;
 /// Width of the column next to the target card; below this window width they stack.
 const SIDE_WIDTH: f32 = 280.0;
 const STACK_BELOW: f32 = 640.0;
+/// Least height of the last shot and series cards below the target card when stacked.
+const STACKED_SERIES_MIN: f32 = 360.0;
 /// The newest shot on the card. The only color in the UI: it has to stand out on both the
 /// black and the white of the card.
 const LAST_SHOT_COLOR: Color32 = Color32::from_rgb(232, 96, 52);
@@ -33,6 +35,9 @@ const KEY_DARK: &str = "dark_mode";
 const KEY_DECIMAL: &str = "decimal_scoring";
 const KEY_ZOOM_CONTROLS: &str = "zoom_controls";
 const KEY_REPLAY_CONTROLS: &str = "replay_controls";
+const KEY_CLOSE_CALLS: &str = "close_calls";
+const KEY_CLOSE_CALL_MM: &str = "close_call_mm";
+const KEY_REPLAY_DELAY: &str = "replay_delay_s";
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -213,11 +218,33 @@ fn paint_icon(painter: &egui::Painter, c: egui::Pos2, icon: Icon, color: Color32
 }
 
 /// Seconds between shots in a replay, slowest first.
-const REPLAY_DELAYS: [f32; 6] = [4.0, 2.0, 1.0, 0.5, 0.25, 0.1];
-/// Shown with each delay, snail to rabbit (monochrome Noto Emoji, part of egui's fonts).
-const REPLAY_ANIMALS: [&str; 6] = ["🐌", "🐌", "🐢", "🐕", "🐇", "🐇"];
-/// A shot this close (mm) to a higher score gets "Manual review recommended".
-const REVIEW_MARGIN_MM: f32 = 0.5;
+/// The replay delay's range in seconds (the default-speed slider and the speed buttons).
+const REPLAY_DELAY_MIN: f32 = 0.1;
+const REPLAY_DELAY_MAX: f32 = 5.0;
+/// Where the slower/faster buttons step to, slowest first.
+const REPLAY_STEPS: [f32; 12] = [5.0, 4.0, 3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 0.35, 0.25, 0.15, 0.1];
+
+/// The animal shown with a replay delay, snail to rabbit (monochrome Noto Emoji, part of
+/// egui's fonts).
+fn replay_animal(delay_s: f32) -> &'static str {
+    match delay_s {
+        d if d >= 2.5 => "🐌",
+        d if d >= 1.0 => "🐢",
+        d if d >= 0.4 => "🐕",
+        _ => "🐇",
+    }
+}
+
+/// A delay as "0.25", "1.5" or "2": up to two decimals, no trailing zeros.
+fn format_delay(delay_s: f32) -> String {
+    format!("{}", (delay_s * 100.0).round() / 100.0)
+}
+
+/// The close-call margin's range in mm, and its default: a shot this close to a higher
+/// score is flagged for manual review.
+const CLOSE_CALL_MIN_MM: f32 = 0.1;
+const CLOSE_CALL_MAX_MM: f32 = 2.0;
+const CLOSE_CALL_DEFAULT_MM: f32 = 0.5;
 
 /// What a shot needing review just missed, e.g. "0.32 mm from ring 10".
 fn review_detail(h: Higher) -> String {
@@ -320,8 +347,8 @@ struct Replay {
     shown: Option<usize>,
     playing: bool,
     next_at: Instant,
-    /// Index into `REPLAY_DELAYS`.
-    speed: usize,
+    /// Seconds between shots.
+    delay_s: f32,
 }
 
 impl Default for Replay {
@@ -330,7 +357,7 @@ impl Default for Replay {
             shown: None,
             playing: false,
             next_at: Instant::now(),
-            speed: 2, // 1 s
+            delay_s: 1.0,
         }
     }
 }
@@ -341,7 +368,7 @@ impl Replay {
     }
 
     fn delay(&self) -> Duration {
-        Duration::from_secs_f32(REPLAY_DELAYS[self.speed])
+        Duration::from_secs_f32(self.delay_s)
     }
 
     /// Plays from where it is, or from an empty card when all shots show; pauses if playing.
@@ -376,11 +403,14 @@ impl Replay {
 
     /// `faster`: one step faster, else slower. A shot due later than the new delay comes sooner.
     fn change_speed(&mut self, faster: bool, now: Instant) {
-        self.speed = if faster {
-            (self.speed + 1).min(REPLAY_DELAYS.len() - 1)
+        let step = if faster {
+            REPLAY_STEPS.iter().find(|&&d| d < self.delay_s * 0.99)
         } else {
-            self.speed.saturating_sub(1)
+            REPLAY_STEPS.iter().rev().find(|&&d| d > self.delay_s * 1.01)
         };
+        if let Some(&d) = step {
+            self.delay_s = d;
+        }
         self.next_at = self.next_at.min(now + self.delay());
     }
 
@@ -408,7 +438,7 @@ const BAR_BUTTON: f32 = 28.0;
 const BAR_PAD: f32 = 4.0;
 const ZOOM_LABEL: f32 = 56.0;
 /// The replay bar's speed label, e.g. "🐇 0.25s".
-const REPLAY_LABEL: f32 = 64.0;
+const REPLAY_LABEL: f32 = 72.0;
 
 /// The rounded background of a bar of buttons over the card.
 fn control_bar(ui: &Ui, painter: &egui::Painter, bar: egui::Rect, salt: &str) {
@@ -476,9 +506,8 @@ fn replay_controls(
 ) -> bool {
     control_bar(ui, painter, bar, "replay_bar");
     let slot = |i: usize| bar_slot(bar, i as f32 * BAR_BUTTON, BAR_BUTTON);
-    let every = format!("now a shot every {} s", REPLAY_DELAYS[replay.speed]);
+    let every = format!("now a shot every {} s", format_delay(replay.delay_s));
     let replaying = replay.shown.is_some();
-    let last = REPLAY_DELAYS.len() - 1;
     let (play_icon, play_hover) = if replay.playing {
         (Icon::Pause, "Pause")
     } else if replaying {
@@ -500,7 +529,7 @@ fn replay_controls(
             painter,
             slot(1),
             Icon::Slower,
-            replay.speed > 0,
+            replay.delay_s < REPLAY_DELAY_MAX * 0.99,
             &format!("Slower ({every})"),
         ),
         icon_button(ui, painter, slot(2), play_icon, len > 0, play_hover),
@@ -517,7 +546,7 @@ fn replay_controls(
             painter,
             slot(4),
             Icon::Faster,
-            replay.speed < last,
+            replay.delay_s > REPLAY_DELAY_MIN * 1.01,
             &format!("Faster ({every})"),
         ),
         icon_button(ui, painter, slot(5), Icon::Next, replaying, "Next shot"),
@@ -537,15 +566,15 @@ fn replay_controls(
 }
 
 /// The replay speed at the right end of the replay bar: an animal and the delay.
-fn replay_speed_label(ui: &Ui, painter: &egui::Painter, bar: egui::Rect, speed: usize) {
+fn replay_speed_label(ui: &Ui, painter: &egui::Painter, bar: egui::Rect, delay_s: f32) {
     let rect = bar_slot(bar, 6.0 * BAR_BUTTON, REPLAY_LABEL);
-    let delay = REPLAY_DELAYS[speed];
+    let delay = format_delay(delay_s);
     ui.interact(rect, ui.scope_id().with("replay_speed"), egui::Sense::hover())
         .on_hover_text(format!("A shot every {delay} s"));
     painter.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
-        format!("{} {delay}s", REPLAY_ANIMALS[speed]),
+        format!("{} {delay}s", replay_animal(delay_s)),
         TextStyle::Body.resolve(ui.style()),
         ui.visuals().text_color(),
     );
@@ -565,7 +594,6 @@ struct SensorApp {
     sensors: Vec<SensorInfo>,
     heartbeat: Option<u32>,
     heartbeat_at: Option<Instant>,
-    led: bool,
     sensor_name: String,
     name_input: String,
     pin_supported: bool,
@@ -587,6 +615,11 @@ struct SensorApp {
     replay: Replay,
     show_zoom_controls: bool,
     show_replay_controls: bool,
+    show_close_calls: bool,
+    /// A shot this close (mm) to a higher score is a close call.
+    close_call_mm: f32,
+    /// Seconds between shots when a replay starts; the bar's buttons change it from there.
+    replay_delay_s: f32,
 
     /// The sensor this app connected to last; reconnected automatically when seen.
     remembered: Option<String>,
@@ -606,6 +639,10 @@ impl SensorApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let storage = cc.storage;
         let (cmd, events) = ble::spawn(cc.egui_ctx.clone());
+        let replay_delay_s = storage
+            .and_then(|s| s.get_string(KEY_REPLAY_DELAY))
+            .and_then(|v| v.parse().ok())
+            .map_or(1.0, |v: f32| v.clamp(REPLAY_DELAY_MIN, REPLAY_DELAY_MAX));
         Self {
             cmd,
             events,
@@ -613,7 +650,6 @@ impl SensorApp {
             sensors: Vec::new(),
             heartbeat: None,
             heartbeat_at: None,
-            led: false,
             sensor_name: String::new(),
             name_input: String::new(),
             pin_supported: false,
@@ -627,13 +663,26 @@ impl SensorApp {
             series_sensor: None,
             selected_shot: None,
             view: CardView::default(),
-            replay: Replay::default(),
+            replay: Replay {
+                delay_s: replay_delay_s,
+                ..Replay::default()
+            },
             show_zoom_controls: storage
                 .and_then(|s| s.get_string(KEY_ZOOM_CONTROLS))
                 .is_none_or(|v| v == "true"),
             show_replay_controls: storage
                 .and_then(|s| s.get_string(KEY_REPLAY_CONTROLS))
                 .is_none_or(|v| v == "true"),
+            show_close_calls: storage
+                .and_then(|s| s.get_string(KEY_CLOSE_CALLS))
+                .is_none_or(|v| v == "true"),
+            close_call_mm: storage
+                .and_then(|s| s.get_string(KEY_CLOSE_CALL_MM))
+                .and_then(|v| v.parse().ok())
+                .map_or(CLOSE_CALL_DEFAULT_MM, |v: f32| {
+                    v.clamp(CLOSE_CALL_MIN_MM, CLOSE_CALL_MAX_MM)
+                }),
+            replay_delay_s,
             remembered: storage
                 .and_then(|s| s.get_string(KEY_REMEMBERED))
                 .filter(|s| !s.is_empty()),
@@ -671,7 +720,6 @@ impl SensorApp {
                 Event::Connected {
                     id,
                     name,
-                    led,
                     heartbeat,
                     pin_supported,
                     shots_supported,
@@ -689,7 +737,6 @@ impl SensorApp {
                     self.link = Link::Connected { id };
                     self.name_input = name.clone();
                     self.sensor_name = name;
-                    self.led = led;
                     self.heartbeat = heartbeat;
                     self.heartbeat_at = heartbeat.map(|_| Instant::now());
                     self.message = None;
@@ -706,7 +753,6 @@ impl SensorApp {
                     self.heartbeat = Some(ms);
                     self.heartbeat_at = Some(Instant::now());
                 }
-                Event::Led(on) => self.led = on,
                 Event::Shot(shot) => {
                     let score = self.card.score(shot.x_mm(), shot.y_mm());
                     self.series.push((shot, score));
@@ -838,6 +884,9 @@ impl eframe::App for SensorApp {
         storage.set_string(KEY_DECIMAL, self.decimal_scoring.to_string());
         storage.set_string(KEY_ZOOM_CONTROLS, self.show_zoom_controls.to_string());
         storage.set_string(KEY_REPLAY_CONTROLS, self.show_replay_controls.to_string());
+        storage.set_string(KEY_CLOSE_CALLS, self.show_close_calls.to_string());
+        storage.set_string(KEY_CLOSE_CALL_MM, self.close_call_mm.to_string());
+        storage.set_string(KEY_REPLAY_DELAY, self.replay_delay_s.to_string());
     }
 }
 
@@ -900,21 +949,32 @@ impl SensorApp {
         let gap = 16.0;
         if avail.x >= STACK_BELOW {
             let aspect = self.card.size_mm().y / self.card.size_mm().x;
+            // The card as big as the height allows; the side column takes the rest of the
+            // width, and the series card in it the rest of the height.
             let card_w = (avail.x - SIDE_WIDTH - gap).min(avail.y / aspect).max(160.0);
+            let side_w = (avail.x - card_w - gap).max(SIDE_WIDTH);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                ui.add_space(((avail.x - card_w - gap - SIDE_WIDTH) / 2.0 - gap).max(0.0));
                 self.target_card(ui, card_w);
                 ui.vertical(|ui| {
-                    ui.set_width(SIDE_WIDTH);
-                    egui::ScrollArea::vertical().show(ui, |ui| self.series_column(ui));
+                    ui.set_width(side_w);
+                    ui.set_height(avail.y);
+                    self.series_column(ui);
                 });
             });
         } else {
+            // Stacked: the series card fills the window below the card, or scrolls with it
+            // when the window is short.
             egui::ScrollArea::vertical().show(ui, |ui| {
-                self.target_card(ui, ui.available_width());
+                let width = ui.available_width();
+                self.target_card(ui, width);
                 ui.add_space(6.0);
-                self.series_column(ui);
+                let card_h = width * self.card.size_mm().y / self.card.size_mm().x;
+                let rest = (avail.y - card_h - 6.0 - ui.spacing().item_spacing.y).max(STACKED_SERIES_MIN);
+                ui.allocate_ui(egui::vec2(width, rest), |ui| {
+                    ui.set_height(rest);
+                    self.series_column(ui);
+                });
             });
         }
     }
@@ -1058,7 +1118,7 @@ impl SensorApp {
             if replay_controls(ui, &painter, bar, &mut self.replay, len, now) {
                 ui.ctx().request_repaint();
             }
-            replay_speed_label(ui, &painter, bar, self.replay.speed);
+            replay_speed_label(ui, &painter, bar, self.replay.delay_s);
         }
 
         // Every shot of the series that nearly scored higher, worth a look at the real card.
@@ -1068,9 +1128,9 @@ impl SensorApp {
             .iter()
             .enumerate()
             .filter_map(|(i, (s, _))| Some((i, self.card.higher(s.x_mm(), s.y_mm())?)))
-            .filter(|(_, h)| h.gap_mm <= REVIEW_MARGIN_MM)
+            .filter(|(_, h)| h.gap_mm <= self.close_call_mm)
             .collect();
-        if !close_calls.is_empty() {
+        if self.show_close_calls && !close_calls.is_empty() {
             let lines: Vec<String> = close_calls
                 .iter()
                 .map(|&(i, h)| format!("Shot {} · {}", i + 1, review_detail(h)))
@@ -1129,7 +1189,9 @@ impl SensorApp {
                     let off = shot.x_mm().hypot(shot.y_mm());
                     ui.label(RichText::new(format!("{off:.2} mm from the centre")).weak());
                     let higher = self.card.higher(shot.x_mm(), shot.y_mm());
-                    if let Some(h) = higher.filter(|h| h.gap_mm <= REVIEW_MARGIN_MM) {
+                    if let Some(h) =
+                        higher.filter(|h| self.show_close_calls && h.gap_mm <= self.close_call_mm)
+                    {
                         let text = format!("⚠ Close call: {}, manual review recommended", review_detail(h));
                         ui.label(RichText::new(text).small());
                     }
@@ -1137,7 +1199,8 @@ impl SensorApp {
             });
     }
 
-    /// Last shot and the series list with the total.
+    /// Last shot and the series list with the total. The series card fills the rest of
+    /// `ui`'s height; its list scrolls.
     fn series_column(&mut self, ui: &mut Ui) {
         let decimal = self.decimal_scoring && self.card.decimal;
         card(ui, "Last shot", |ui| {
@@ -1165,53 +1228,81 @@ impl SensorApp {
             });
         });
 
+        // The series card fills the height the chart below it leaves.
+        let chart = !self.series.is_empty();
+        let series_h = if chart {
+            (ui.available_height() - CHART_CARD_H - ui.spacing().item_spacing.y).max(200.0)
+        } else {
+            ui.available_height()
+        };
         let mut clear = false;
-        card(ui, &format!("Series · {}", self.card.name), |ui| {
-            let tenths: u32 = self.series.iter().map(|(_, s)| s.tenths as u32).sum();
-            let rings: u32 = self.series.iter().map(|(_, s)| s.ring as u32).sum();
-            ui.horizontal(|ui| {
-                let total = if decimal {
-                    format!("{}.{}", tenths / 10, tenths % 10)
-                } else {
-                    rings.to_string()
-                };
-                let inner_tens = self.series.iter().filter(|(_, s)| s.inner_ten).count();
-                ui.label(RichText::new(total).size(28.0).strong());
-                let n = self.series.len();
-                let mut detail = format!("{n} shot{}", if n == 1 { "" } else { "s" });
-                if decimal {
-                    detail.push_str(&format!(" · {rings} in whole rings"));
-                } else if inner_tens > 0 {
-                    detail.push_str(&format!(" · {inner_tens}X"));
+        let width = ui.available_width();
+        ui.allocate_ui(egui::vec2(width, series_h), |ui| {
+            ui.set_height(series_h);
+            card(ui, &format!("Series · {}", self.card.name), |ui| {
+                let tenths: u32 = self.series.iter().map(|(_, s)| s.tenths as u32).sum();
+                let rings: u32 = self.series.iter().map(|(_, s)| s.ring as u32).sum();
+                ui.horizontal(|ui| {
+                    let total = if decimal {
+                        format!("{}.{}", tenths / 10, tenths % 10)
+                    } else {
+                        rings.to_string()
+                    };
+                    let inner_tens = self.series.iter().filter(|(_, s)| s.inner_ten).count();
+                    ui.label(RichText::new(total).size(28.0).strong());
+                    let n = self.series.len();
+                    let mut detail = format!("{n} shot{}", if n == 1 { "" } else { "s" });
+                    if decimal {
+                        detail.push_str(&format!(" · {rings} in whole rings"));
+                    } else if inner_tens > 0 {
+                        detail.push_str(&format!(" · {inner_tens}X"));
+                    }
+                    ui.label(RichText::new(detail).weak());
+                });
+                if self.series.is_empty() {
+                    ui.allocate_space(ui.available_size()); // fill the column anyway
+                    return;
                 }
-                ui.label(RichText::new(detail).weak());
-            });
-            if self.series.is_empty() {
-                return;
-            }
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .id_salt("series")
-                .max_height(240.0)
-                .show(ui, |ui| {
-                    for (i, (_, score)) in self.series.iter().enumerate().rev() {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("{}", i + 1)).weak());
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(score.text(decimal)).strong());
-                                if score.inner_ten && decimal {
-                                    ui.label(RichText::new("X").small().weak());
+                ui.separator();
+                // "Clear series" at the bottom, the list scrolling in the height between.
+                ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                    clear = ui
+                        .add(egui::Button::new("Clear series").frame(false))
+                        .on_hover_text("Start a new series. Only clears this app's list.")
+                        .clicked();
+                    ui.separator();
+                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("series")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for (i, (_, score)) in self.series.iter().enumerate().rev() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(format!("{}", i + 1)).weak());
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            ui.label(RichText::new(score.text(decimal)).strong());
+                                            if score.inner_ten && decimal {
+                                                ui.label(RichText::new("X").small().weak());
+                                            }
+                                        });
+                                    });
                                 }
                             });
-                        });
-                    }
+                    });
                 });
-            ui.separator();
-            clear = ui
-                .add(egui::Button::new("Clear series").frame(false))
-                .on_hover_text("Start a new series. Only clears this app's list.")
-                .clicked();
+            });
         });
+        if chart {
+            let title = if decimal {
+                "Shots per score"
+            } else {
+                "Shots per ring"
+            };
+            card(ui, title, |ui| {
+                let scores: Vec<Score> = self.series.iter().map(|(_, s)| *s).collect();
+                score_chart(ui, &scores, decimal);
+            });
+        }
         if clear {
             self.series.clear();
         }
@@ -1301,14 +1392,61 @@ impl SensorApp {
                     toggle_switch(ui, &mut self.show_zoom_controls);
                 });
             });
+            ui.label(
+                RichText::new("The wheel zooms and dragging moves the card either way.")
+                    .small()
+                    .weak(),
+            );
             ui.horizontal(|ui| {
                 ui.label("Replay controls");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     toggle_switch(ui, &mut self.show_replay_controls);
                 });
             });
+            ui.horizontal(|ui| {
+                ui.label("Default replay speed");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let slider =
+                        egui::Slider::new(&mut self.replay_delay_s, REPLAY_DELAY_MIN..=REPLAY_DELAY_MAX)
+                            .step_by(0.05)
+                            .custom_formatter(|v, _| {
+                                format!("{} {}s", replay_animal(v as f32), format_delay(v as f32))
+                            })
+                            .custom_parser(|t| {
+                                t.trim()
+                                    .trim_end_matches('s')
+                                    .split_whitespace()
+                                    .last()?
+                                    .parse()
+                                    .ok()
+                            });
+                    if ui.add(slider).changed() {
+                        self.replay.delay_s = self.replay_delay_s;
+                    }
+                });
+            });
+            ui.label(RichText::new("Seconds between shots in a replay.").small().weak());
+            ui.horizontal(|ui| {
+                ui.label("Close call notification");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    toggle_switch(ui, &mut self.show_close_calls);
+                });
+            });
+            ui.add_enabled_ui(self.show_close_calls, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Close call within");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut self.close_call_mm, CLOSE_CALL_MIN_MM..=CLOSE_CALL_MAX_MM)
+                                .step_by(0.05)
+                                .fixed_decimals(2)
+                                .suffix(" mm"),
+                        );
+                    });
+                });
+            });
             ui.label(
-                RichText::new("The wheel zooms and dragging moves the card either way.")
+                RichText::new("Flags shots this close to a higher score for manual review.")
                     .small()
                     .weak(),
             );
@@ -1322,11 +1460,14 @@ impl SensorApp {
         match &self.link {
             Link::Connected { id } => {
                 let id = id.clone();
-                self.name_card(ui);
-                self.pin_card(ui);
-                self.heartbeat_card(ui);
-                self.led_card(ui);
-                card(ui, "Connection", |ui| {
+                card(ui, "Sensor settings", |ui| {
+                    self.name_card(ui);
+                    ui.separator();
+                    self.pin_card(ui);
+                    ui.separator();
+                    self.heartbeat_card(ui);
+                    ui.separator();
+                    section_title(ui, "Connection");
                     ui.label(format!("Connected to {}.", self.sensor_name));
                     ui.horizontal(|ui| {
                         if ui.button("Disconnect").clicked() {
@@ -1353,7 +1494,7 @@ impl SensorApp {
     }
 
     fn heartbeat_card(&mut self, ui: &mut Ui) {
-        card(ui, "Heartbeat", |ui| match self.heartbeat {
+        section(ui, "Heartbeat", |ui| match self.heartbeat {
             Some(ms) => {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(group_digits(ms)).size(40.0).strong());
@@ -1371,31 +1512,8 @@ impl SensorApp {
         });
     }
 
-    fn led_card(&mut self, ui: &mut Ui) {
-        card(ui, "LED", |ui| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(
-                        RichText::new(if self.led { "On" } else { "Off" })
-                            .size(28.0)
-                            .strong(),
-                    );
-                    ui.label(RichText::new("Onboard LED, GPIO2").weak());
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let label = if self.led { "Turn off" } else { "Turn on" };
-                    // No optimistic update: the label flips when the sensor confirms.
-                    if ui.button(label).clicked() {
-                        self.send(Command::SetLed(!self.led));
-                    }
-                });
-            });
-        });
-    }
-
     fn name_card(&mut self, ui: &mut Ui) {
-        card(ui, "Name", |ui| {
+        section(ui, "Name", |ui| {
             let checked = protocol::validate_name(&self.name_input);
             let unchanged = checked.as_deref().is_ok_and(|n| n == self.sensor_name);
             let mut submit = false;
@@ -1431,7 +1549,7 @@ impl SensorApp {
     }
 
     fn pin_card(&mut self, ui: &mut Ui) {
-        card(ui, "Pairing PIN", |ui| {
+        section(ui, "Pairing PIN", |ui| {
             if !self.pin_supported {
                 ui.label(RichText::new("This sensor's firmware can't change its PIN.").weak());
                 return;
@@ -1780,6 +1898,179 @@ fn card(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
         });
 }
 
+/// Height of the chart card under the series card (the chart itself gets what's left of it).
+const CHART_CARD_H: f32 = 210.0;
+
+/// A "nice" step (1, 2 or 5 × 10ⁿ) that splits `range` into at most `max_steps` steps.
+fn nice_step(range: f32, max_steps: usize) -> f32 {
+    let mut magnitude = 10f32.powf((range.max(1e-6) / max_steps as f32).log10().floor());
+    loop {
+        for m in [1.0, 2.0, 5.0] {
+            let step = m * magnitude;
+            if range / step <= max_steps as f32 + 1e-3 {
+                return step;
+            }
+        }
+        magnitude *= 10.0;
+    }
+}
+
+/// Number of shots per score: bars per ring for whole-ring scoring, points per tenth for
+/// decimal scoring. Both axes fit the data. Fills the rest of `ui`.
+fn score_chart(ui: &mut Ui, scores: &[Score], decimal: bool) {
+    let size = egui::vec2(ui.available_width(), ui.available_height().max(110.0));
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let visuals = ui.visuals();
+    let font = TextStyle::Small.resolve(ui.style());
+    let (text, weak) = (visuals.text_color(), visuals.weak_text_color());
+    let grid = visuals.widgets.noninteractive.bg_stroke;
+
+    // Shots per score, in tenths (a whole ring n is n * 10).
+    let mut counts = std::collections::BTreeMap::<u16, u32>::new();
+    for s in scores {
+        *counts
+            .entry(if decimal { s.tenths } else { s.ring as u16 * 10 })
+            .or_default() += 1;
+    }
+    let (Some((&lo, _)), Some((&hi, _))) = (counts.first_key_value(), counts.last_key_value()) else {
+        return;
+    };
+    let max_count = counts.values().copied().max().unwrap_or(1);
+
+    // Y: 0 up to a nice step above the highest count.
+    let y_step = nice_step(max_count as f32, 4).max(1.0);
+    let y_max = (max_count as f32 / y_step).ceil() * y_step;
+    let label_w = painter
+        .layout_no_wrap(format!("{y_max}"), font.clone(), weak)
+        .size()
+        .x;
+    let label_h = font.size + 4.0;
+    let plot = egui::Rect::from_min_max(
+        rect.min + egui::vec2(label_w + 8.0, label_h / 2.0),
+        rect.max - egui::vec2(10.0, label_h + 2.0),
+    );
+    let y_at = |count: f32| plot.bottom() - count / y_max * plot.height();
+    let mut y = 0.0;
+    while y <= y_max + 1e-3 {
+        let py = y_at(y);
+        painter.hline(plot.x_range(), py, grid);
+        painter.text(
+            egui::pos2(plot.left() - 6.0, py),
+            egui::Align2::RIGHT_CENTER,
+            format!("{y}"),
+            font.clone(),
+            weak,
+        );
+        y += y_step;
+    }
+
+    let hover = response.hover_pos();
+    let tip = if decimal {
+        // X: whole rings around the data (a whole top score is its own end), ticks at a
+        // nice step of tenths.
+        let x_lo = (lo / 10 * 10) as f32;
+        let x_hi = if hi % 10 == 0 && hi > lo {
+            hi
+        } else {
+            (hi / 10 + 1) * 10
+        } as f32;
+        let x_at = |t: f32| plot.left() + (t - x_lo) / (x_hi - x_lo) * plot.width();
+        let x_step = nice_step(x_hi - x_lo, 8).max(1.0);
+        let mut t = x_lo;
+        while t <= x_hi + 1e-3 {
+            let px = x_at(t);
+            painter.vline(
+                px,
+                plot.y_range(),
+                Stroke::new(grid.width, grid.color.gamma_multiply(0.5)),
+            );
+            let label = if x_step >= 10.0 {
+                format!("{}", t / 10.0)
+            } else {
+                format!("{:.1}", t / 10.0)
+            };
+            painter.text(
+                egui::pos2(px, plot.bottom() + 3.0),
+                egui::Align2::CENTER_TOP,
+                label,
+                font.clone(),
+                weak,
+            );
+            t += x_step;
+        }
+        let nearest = hover.and_then(|p| {
+            counts
+                .iter()
+                .map(|(&t, &n)| (t, n, egui::pos2(x_at(t as f32), y_at(n as f32)).distance(p)))
+                .filter(|&(_, _, d)| d <= 10.0)
+                .min_by(|a, b| a.2.total_cmp(&b.2))
+        });
+        for (&t, &n) in &counts {
+            let hovered = nearest.is_some_and(|(nt, _, _)| nt == t);
+            let r = if hovered { 5.0 } else { 3.5 };
+            painter.circle_filled(egui::pos2(x_at(t as f32), y_at(n as f32)), r, text);
+        }
+        nearest.map(|(t, n, _)| format!("{}.{}: {n} shot{}", t / 10, t % 10, if n == 1 { "" } else { "s" }))
+    } else {
+        // X: one bar per ring, from the lowest to the highest ring shot.
+        let (lo, hi) = (lo / 10, hi / 10);
+        let slots = (hi - lo + 1) as f32;
+        let slot_w = plot.width() / slots;
+        let hovered = hover
+            .filter(|p| plot.x_range().contains(p.x))
+            .map(|p| lo + ((p.x - plot.left()) / slot_w).floor() as u16);
+        for ring in lo..=hi {
+            let n = counts.get(&(ring * 10)).copied().unwrap_or(0);
+            let cx = plot.left() + (ring - lo) as f32 * slot_w + slot_w / 2.0;
+            let bar_w = (slot_w * 0.6).min(36.0);
+            let fill = if hovered == Some(ring) {
+                text
+            } else {
+                text.gamma_multiply(0.6)
+            };
+            if n > 0 {
+                let bar = egui::Rect::from_min_max(
+                    egui::pos2(cx - bar_w / 2.0, y_at(n as f32)),
+                    egui::pos2(cx + bar_w / 2.0, plot.bottom()),
+                );
+                painter.rect_filled(bar, 2.0, fill);
+            }
+            painter.text(
+                egui::pos2(cx, plot.bottom() + 3.0),
+                egui::Align2::CENTER_TOP,
+                ring.to_string(),
+                font.clone(),
+                weak,
+            );
+        }
+        hovered.filter(|r| (lo..=hi).contains(r)).map(|r| {
+            let n = counts.get(&(r * 10)).copied().unwrap_or(0);
+            let what = if r == 0 {
+                "Miss".to_string()
+            } else {
+                format!("Ring {r}")
+            };
+            format!("{what}: {n} shot{}", if n == 1 { "" } else { "s" })
+        })
+    };
+    painter.hline(plot.x_range(), plot.bottom(), Stroke::new(1.0, weak));
+    if let Some(tip) = tip {
+        response.on_hover_text_at_pointer(tip);
+    }
+}
+
+/// A heading inside a card, for a card made of several sections.
+fn section_title(ui: &mut Ui, title: &str) {
+    ui.label(RichText::new(title).strong());
+}
+
+/// A titled section inside a card.
+fn section(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
+    section_title(ui, title);
+    add_contents(ui);
+}
+
 /// A message above the cards in an outlined box. Returns true when dismissed.
 fn notice(ui: &mut Ui, text: &str) -> bool {
     let stroke = Stroke::new(1.0, ui.visuals().text_color());
@@ -1916,13 +2207,30 @@ mod tests {
     fn replay_speed_stays_in_range() {
         let mut r = Replay::default();
         let now = Instant::now();
-        for _ in 0..10 {
+        for _ in 0..20 {
             r.change_speed(true, now);
         }
-        assert_eq!(r.speed, REPLAY_DELAYS.len() - 1);
-        for _ in 0..10 {
+        assert_eq!(r.delay_s, REPLAY_DELAY_MIN);
+        for _ in 0..20 {
             r.change_speed(false, now);
         }
-        assert_eq!(r.speed, 0);
+        assert_eq!(r.delay_s, REPLAY_DELAY_MAX);
+        // From a default between the steps, to the next step.
+        r.delay_s = 1.2;
+        r.change_speed(true, now);
+        assert_eq!(r.delay_s, 1.0);
+        r.delay_s = 1.2;
+        r.change_speed(false, now);
+        assert_eq!(r.delay_s, 1.5);
+    }
+
+    #[test]
+    fn nice_steps() {
+        assert_eq!(nice_step(3.0, 4), 1.0);
+        assert_eq!(nice_step(7.0, 4), 2.0);
+        assert_eq!(nice_step(13.0, 4), 5.0);
+        assert_eq!(nice_step(40.0, 4), 10.0);
+        assert_eq!(nice_step(10.0, 8), 2.0); // one ring in tenths: 0.2 apart
+        assert_eq!(nice_step(60.0, 8), 10.0); // six rings: one apart
     }
 }

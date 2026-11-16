@@ -4,11 +4,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-const uint8_t PROTOCOL_VERSION = 1;
+const uint8_t PROTOCOL_VERSION = 2;
 
 const char* const SERVICE_UUID   = "5631f100-5314-4f02-b637-0654ff6d409d";
 const char* const HEARTBEAT_UUID = "5631f101-5314-4f02-b637-0654ff6d409d";   // u32 LE millis()
-const char* const LED_UUID       = "5631f102-5314-4f02-b637-0654ff6d409d";   // u8 0/1
+// 5631f102 was the LED (version 1); not reused.
 const char* const NAME_UUID      = "5631f103-5314-4f02-b637-0654ff6d409d";   // 1..20 printable ASCII
 const char* const VERSION_UUID   = "5631f104-5314-4f02-b637-0654ff6d409d";   // u8
 const char* const PIN_UUID       = "5631f105-5314-4f02-b637-0654ff6d409d";   // u32 LE, write only

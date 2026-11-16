@@ -29,7 +29,6 @@ const REDISCOVER_POLL: Duration = Duration::from_millis(250);
 pub enum Command {
     Connect(String),
     Disconnect,
-    SetLed(bool),
     SetName(String),
     /// Changes the sensor's pairing PIN (0–999 999). Unpairs all other computers.
     SetPin(u32),
@@ -55,7 +54,6 @@ pub enum Event {
     Connected {
         id: String,
         name: String,
-        led: bool,
         heartbeat: Option<u32>,
         /// False for firmware without the PIN characteristic.
         pin_supported: bool,
@@ -67,7 +65,6 @@ pub enum Event {
         reason: Option<String>,
     },
     Heartbeat(u32),
-    Led(bool),
     Name(String),
     /// A shot the app hasn't had before (duplicates are dropped here).
     Shot(proto::Shot),
@@ -123,13 +120,11 @@ struct Opened {
     conn: Connection,
     stream: Notifications,
     name: String,
-    led: bool,
     heartbeat: Option<u32>,
 }
 
 struct Connection {
     peripheral: Peripheral,
-    led: Characteristic,
     name: Characteristic,
     /// None on firmware from before the PIN characteristic.
     pin: Option<Characteristic>,
@@ -238,10 +233,10 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                     let result = tokio::time::timeout(CONNECT_TIMEOUT, attempt).await;
                     if let Ok(Err(e)) = &result { eprintln!("ble: connect failed: {e}"); }
                     match result {
-                        Ok(Ok(Opened { conn: c, stream, name, led, heartbeat })) => {
+                        Ok(Ok(Opened { conn: c, stream, name, heartbeat })) => {
                             let pin_supported = c.pin.is_some();
                             let shots_supported = c.shot.is_some();
-                            events.send(Event::Connected { id, name, led, heartbeat, pin_supported, shots_supported });
+                            events.send(Event::Connected { id, name, heartbeat, pin_supported, shots_supported });
                             conn = Some(c);
                             notifications = Some(stream);
                         }
@@ -260,12 +255,6 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                         let _ = c.peripheral.disconnect().await;
                         events.send(Event::Disconnected { reason: None });
                     }
-                }
-                Some(Command::SetLed(on)) => {
-                    if let Some(c) = &conn
-                        && let Err(e) = c.peripheral.write(&c.led, &proto::encode_led(on), WriteType::WithResponse).await {
-                            events.send(Event::Error(format!("Could not switch the LED: {e}")));
-                        }
                 }
                 Some(Command::SetName(name)) => {
                     if let Some(c) = &conn
@@ -287,7 +276,6 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                 Some(n) => {
                     let ev = match n.uuid {
                         u if u == proto::HEARTBEAT_UUID => proto::decode_heartbeat(&n.value).map(Event::Heartbeat),
-                        u if u == proto::LED_UUID => proto::decode_led(&n.value).map(Event::Led),
                         u if u == proto::NAME_UUID => proto::decode_name(&n.value).map(Event::Name),
                         u if u == proto::SHOT_UUID => proto::decode_shot(&n.value)
                             .and_then(|shot| new_shot(&mut last_shot, shot, events))
@@ -451,10 +439,9 @@ async fn open(
             "This device doesn't look like an OpenSights sensor (characteristic missing).".to_string()
         })
     };
-    let (version, heartbeat, led, name) = (
+    let (version, heartbeat, name) = (
         find(proto::VERSION_UUID)?,
         find(proto::HEARTBEAT_UUID)?,
-        find(proto::LED_UUID)?,
         find(proto::NAME_UUID)?,
     );
     let pin = chars.iter().find(|c| c.uuid == proto::PIN_UUID).cloned();
@@ -474,11 +461,10 @@ async fn open(
         ));
     }
     let name_value = proto::decode_name(&p.read(&name).await.map_err(read_err)?).unwrap_or_default();
-    let led_value = proto::decode_led(&p.read(&led).await.map_err(read_err)?).unwrap_or(false);
     let heartbeat_value = proto::decode_heartbeat(&p.read(&heartbeat).await.map_err(read_err)?);
 
     let stream = p.notifications().await.map_err(|e| e.to_string())?;
-    for c in [&heartbeat, &led, &name] {
+    for c in [&heartbeat, &name] {
         p.subscribe(c)
             .await
             .map_err(|e| format!("Could not subscribe: {e}"))?;
@@ -501,14 +487,12 @@ async fn open(
     Ok(Opened {
         conn: Connection {
             peripheral: p.clone(),
-            led,
             name,
             pin,
             shot,
         },
         stream,
         name: name_value,
-        led: led_value,
         heartbeat: heartbeat_value,
     })
 }

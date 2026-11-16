@@ -5,7 +5,6 @@
 
 static NimBLEServer*         server;
 static NimBLECharacteristic* heartbeatChr;
-static NimBLECharacteristic* ledChr;
 static NimBLECharacteristic* nameChr;
 static NimBLECharacteristic* shotChr;
 static std::string           advName;
@@ -18,9 +17,6 @@ static volatile uint32_t passkey = DEFAULT_PASSKEY;   // read by NimBLE's task d
 
 // Writes from the app, handed from the NimBLE task to the main loop.
 static portMUX_TYPE writeMux = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t ledBuf[4];
-static size_t  ledLen;
-static bool    ledPending = false;
 static char    nameBuf[32];                   // larger than NAME_MAX_LEN so too-long writes are seen
 static size_t  nameLen;
 static bool    namePending = false;
@@ -114,17 +110,6 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
 };
 
-class LedCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
-    const NimBLEAttValue& v = c->getValue();
-    portENTER_CRITICAL(&writeMux);
-    ledLen = v.size() < sizeof ledBuf ? v.size() : sizeof ledBuf;
-    memcpy(ledBuf, v.data(), ledLen);
-    ledPending = true;
-    portEXIT_CRITICAL(&writeMux);
-  }
-};
-
 class NameCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
     const NimBLEAttValue& v = c->getValue();
@@ -177,12 +162,11 @@ class ShotCallbacks : public NimBLECharacteristicCallbacks {
 const char* const GATT_BUILD_ID = __DATE__ " " __TIME__;
 
 static ServerCallbacks serverCallbacks;
-static LedCallbacks    ledCallbacks;
 static NameCallbacks   nameCallbacks;
 static PinCallbacks    pinCallbacks;
 static ShotCallbacks   shotCallbacks;
 
-void bleBegin(const char* name, bool ledOn, uint32_t pin) {
+void bleBegin(const char* name, uint32_t pin) {
   advName = name;
   NimBLEDevice::init(name);
 
@@ -200,10 +184,6 @@ void bleBegin(const char* name, bool ledOn, uint32_t pin) {
 
   heartbeatChr = svc->createCharacteristic(HEARTBEAT_UUID, READ_SECURE | NIMBLE_PROPERTY::NOTIFY);
   heartbeatChr->setValue((uint32_t)0);
-
-  ledChr = svc->createCharacteristic(LED_UUID, READ_SECURE | WRITE_SECURE | NIMBLE_PROPERTY::NOTIFY);
-  ledChr->setValue((uint8_t)(ledOn ? 1 : 0));
-  ledChr->setCallbacks(&ledCallbacks);
 
   nameChr = svc->createCharacteristic(NAME_UUID, READ_SECURE | WRITE_SECURE | NIMBLE_PROPERTY::NOTIFY);
   nameChr->setValue(name);
@@ -226,11 +206,6 @@ void bleBegin(const char* name, bool ledOn, uint32_t pin) {
 void bleSetHeartbeat(uint32_t ms) {
   heartbeatChr->setValue(ms);
   heartbeatChr->notify();
-}
-
-void bleSetLed(bool on) {
-  ledChr->setValue((uint8_t)(on ? 1 : 0));
-  ledChr->notify();
 }
 
 void bleSetName(const char* name) {
@@ -272,19 +247,6 @@ int bleDeleteOtherBonds() {
 void bleDeleteAllBonds() {
   if (server->getConnectedCount() > 0) server->disconnect(server->getPeerInfo(0));
   NimBLEDevice::deleteAllBonds();
-}
-
-bool bleTakeLedWrite(uint8_t* value, size_t* len) {
-  bool got = false;
-  portENTER_CRITICAL(&writeMux);
-  if (ledPending) {
-    memcpy(value, ledBuf, ledLen);
-    *len = ledLen;
-    ledPending = false;
-    got = true;
-  }
-  portEXIT_CRITICAL(&writeMux);
-  return got;
 }
 
 bool bleTakeNameWrite(char* buf, size_t bufSize, size_t* len) {
