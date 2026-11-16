@@ -68,6 +68,17 @@ impl Score {
     }
 }
 
+/// The next higher score a shot just missed: how far its hole is from that scoring edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Higher {
+    /// Between the hole's edge and the higher scoring edge, in mm.
+    pub gap_mm: f32,
+    /// The ring that edge scores.
+    pub ring: u8,
+    /// The edge is the inner ten's (within ring 10).
+    pub inner_ten: bool,
+}
+
 /// The 10 m air pistol card shipped with the app.
 pub fn air_pistol() -> Card {
     Card::load(
@@ -151,6 +162,23 @@ impl Card {
             tenths,
             inner_ten,
         }
+    }
+
+    /// The next higher scoring edge for a shot at (x, y) mm from the centre, by the same
+    /// rule as `score`: the next ring in, or the inner ten for a ten. `None` for an inner ten
+    /// (or a ten on a card without one): nothing scores higher.
+    pub fn higher(&self, x_mm: f32, y_mm: f32) -> Option<Higher> {
+        let edge = x_mm.hypot(y_mm) - self.pellet_diameter_mm / 2.0;
+        let (ring, r, inner_ten) = match self.rings.iter().position(|&(_, r)| edge <= r) {
+            None => self.rings.last().map(|&(ring, r)| (ring, r, false))?, // a miss
+            Some(0) => (self.rings[0].0, self.inner_ten_r.filter(|&r| edge > r)?, true),
+            Some(i) => (self.rings[i - 1].0, self.rings[i - 1].1, false),
+        };
+        Some(Higher {
+            gap_mm: edge - r,
+            ring,
+            inner_ten,
+        })
     }
 
     /// Renders the card `width` pixels wide.
@@ -304,5 +332,22 @@ mod tests {
         assert_eq!(card.size_mm(), egui::vec2(170.0, 170.0));
         assert_eq!(card.to_card(10.0, 5.0), egui::vec2(95.0, 80.0));
         assert!(card.render(256).is_some());
+    }
+
+    #[test]
+    fn higher_is_the_next_scoring_edge_in() {
+        let card = air_pistol();
+        let near = |d: f32| {
+            card.higher(d, 0.0)
+                .map(|h| ((h.gap_mm * 100.0).round() / 100.0, h.ring, h.inner_ten))
+        };
+        // Ring 9, hole edge 0.4 mm outside ring 10 (radius 5.75 + 2.25 pellet radius).
+        assert_eq!(near(8.4), Some((0.4, 10, false)));
+        // A ten, 0.25 mm outside the inner ten (radius 2.5).
+        assert_eq!(near(5.0), Some((0.25, 10, true)));
+        // An inner ten: nothing higher.
+        assert_eq!(near(4.0), None);
+        // A miss, 0.3 mm outside ring 1 (radius 77.75).
+        assert_eq!(near(80.3), Some((0.3, 1, false)));
     }
 }

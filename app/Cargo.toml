@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 btleplug = "0.13.5"
 eframe = { version = "0.37", features = ["persistence"] }
+# Monochrome emoji (the replay speed animals, ⚠) compiled in, instead of the system's
+# color emoji font: the UI is grayscale, and looks the same everywhere.
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 futures = "0.3.34"
 resvg = { version = "0.45", default-features = false, features = ["text"] }
 serde = { version = "1.0.229", features = ["derive"] }

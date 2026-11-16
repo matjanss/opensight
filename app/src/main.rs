@@ -17,7 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use agent::PasskeyReply;
 use ble::{Command, Event, SensorInfo};
-use card::{Card, CardTexture, Score};
+use card::{Card, CardTexture, Higher, Score};
 
 const CONTENT_MAX_WIDTH: f32 = 460.0;
 /// Width of the column next to the target card; below this window width they stack.
@@ -214,6 +214,105 @@ fn paint_icon(painter: &egui::Painter, c: egui::Pos2, icon: Icon, color: Color32
 
 /// Seconds between shots in a replay, slowest first.
 const REPLAY_DELAYS: [f32; 6] = [4.0, 2.0, 1.0, 0.5, 0.25, 0.1];
+/// Shown with each delay, snail to rabbit (monochrome Noto Emoji, part of egui's fonts).
+const REPLAY_ANIMALS: [&str; 6] = ["🐌", "🐌", "🐢", "🐕", "🐇", "🐇"];
+/// A shot this close (mm) to a higher score gets "Manual review recommended".
+const REVIEW_MARGIN_MM: f32 = 0.5;
+
+/// What a shot needing review just missed, e.g. "0.32 mm from ring 10".
+fn review_detail(h: Higher) -> String {
+    if h.inner_ten {
+        format!("{:.2} mm from an inner ten", h.gap_mm)
+    } else {
+        format!("{:.2} mm from ring {}", h.gap_mm, h.ring)
+    }
+}
+
+/// At most this many close calls are listed on the notice; the rest are counted.
+const REVIEW_MAX_LINES: usize = 8;
+
+/// The close-call notice at the top left of the card: a title, then one line per close call
+/// (`lines`, in shot order). Returns the index of a line that was clicked.
+fn review_notice(ui: &Ui, painter: &egui::Painter, card_rect: egui::Rect, lines: &[String]) -> Option<usize> {
+    let visuals = ui.visuals();
+    let small = TextStyle::Small.resolve(ui.style());
+    let title = painter.layout_no_wrap(
+        "Close Call - Manual review recommended".into(),
+        TextStyle::Body.resolve(ui.style()),
+        visuals.strong_text_color(),
+    );
+    let mut galleys: Vec<_> = lines
+        .iter()
+        .take(REVIEW_MAX_LINES)
+        .map(|l| painter.layout_no_wrap(l.clone(), small.clone(), visuals.text_color()))
+        .collect();
+    let more = lines.len().saturating_sub(REVIEW_MAX_LINES);
+    let more = (more > 0)
+        .then(|| painter.layout_no_wrap(format!("and {more} more"), small, visuals.weak_text_color()));
+
+    let (pad, icon, gap, line_gap) = (8.0, 22.0, 8.0, 2.0);
+    let text_w = galleys
+        .iter()
+        .chain(&more)
+        .map(|g| g.size().x)
+        .fold(title.size().x, f32::max);
+    let rows_h: f32 = galleys.iter().chain(&more).map(|g| g.size().y + line_gap).sum();
+    let size = egui::vec2(
+        pad + icon + gap + text_w + pad + 4.0,
+        pad + (title.size().y + 4.0 + rows_h).max(icon) + pad,
+    );
+    let rect = egui::Rect::from_min_size(card_rect.min + egui::vec2(10.0, 10.0), size);
+    // Clicks on the notice mustn't reach the card (and close the shot popup).
+    ui.interact(rect, ui.scope_id().with("review_notice"), egui::Sense::click());
+    painter.rect(
+        rect,
+        CornerRadius::same(10),
+        visuals.window_fill,
+        visuals.window_stroke,
+        egui::StrokeKind::Inside,
+    );
+
+    // An exclamation mark in a filled circle, beside the title.
+    let c = egui::pos2(
+        rect.left() + pad + icon / 2.0,
+        rect.top() + pad + title.size().y.max(icon) / 2.0,
+    );
+    painter.circle_filled(c, icon / 2.0, visuals.strong_text_color());
+    let mark = visuals.window_fill;
+    painter.line_segment(
+        [c - egui::vec2(0.0, 6.0), c + egui::vec2(0.0, 2.0)],
+        Stroke::new(2.5, mark),
+    );
+    painter.circle_filled(c + egui::vec2(0.0, 5.5), 1.5, mark);
+
+    let x = c.x + icon / 2.0 + gap;
+    let mut y = c.y - title.size().y / 2.0;
+    let title_h = title.size().y;
+    painter.galley(egui::pos2(x, y), title, Color32::PLACEHOLDER);
+    y += title_h + 4.0;
+    let mut clicked = None;
+    for (i, g) in galleys.drain(..).enumerate() {
+        let row = egui::Rect::from_min_size(
+            egui::pos2(x - 4.0, y - 1.0),
+            egui::vec2(text_w + 8.0, g.size().y + 2.0),
+        );
+        let response = ui.interact(row, ui.scope_id().with(("review_line", i)), egui::Sense::click());
+        if response.hovered() {
+            painter.rect_filled(row, 4.0, visuals.widgets.hovered.weak_bg_fill);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.on_hover_text("Show this shot").clicked() {
+            clicked = Some(i);
+        }
+        let h = g.size().y;
+        painter.galley(egui::pos2(x, y), g, Color32::PLACEHOLDER);
+        y += h + line_gap;
+    }
+    if let Some(g) = more {
+        painter.galley(egui::pos2(x, y), g, Color32::PLACEHOLDER);
+    }
+    clicked
+}
 
 /// Replaying the series on the card: the shots appear again one by one.
 struct Replay {
@@ -308,6 +407,8 @@ impl Replay {
 const BAR_BUTTON: f32 = 28.0;
 const BAR_PAD: f32 = 4.0;
 const ZOOM_LABEL: f32 = 56.0;
+/// The replay bar's speed label, e.g. "🐇 0.25s".
+const REPLAY_LABEL: f32 = 64.0;
 
 /// The rounded background of a bar of buttons over the card.
 fn control_bar(ui: &Ui, painter: &egui::Painter, bar: egui::Rect, salt: &str) {
@@ -433,6 +534,21 @@ fn replay_controls(
         _ => replay.next(len),
     }
     true
+}
+
+/// The replay speed at the right end of the replay bar: an animal and the delay.
+fn replay_speed_label(ui: &Ui, painter: &egui::Painter, bar: egui::Rect, speed: usize) {
+    let rect = bar_slot(bar, 6.0 * BAR_BUTTON, REPLAY_LABEL);
+    let delay = REPLAY_DELAYS[speed];
+    ui.interact(rect, ui.scope_id().with("replay_speed"), egui::Sense::hover())
+        .on_hover_text(format!("A shot every {delay} s"));
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("{} {delay}s", REPLAY_ANIMALS[speed]),
+        TextStyle::Body.resolve(ui.style()),
+        ui.visuals().text_color(),
+    );
 }
 
 enum Link {
@@ -919,7 +1035,7 @@ impl SensorApp {
         let margin = 10.0;
         let height = BAR_BUTTON + 2.0 * BAR_PAD;
         let zoom_w = 2.0 * BAR_BUTTON + ZOOM_LABEL + 2.0 * BAR_PAD;
-        let replay_w = 6.0 * BAR_BUTTON + 2.0 * BAR_PAD;
+        let replay_w = 6.0 * BAR_BUTTON + REPLAY_LABEL + 2.0 * BAR_PAD;
         let bottom = rect.bottom() - margin - height;
         if self.show_zoom_controls {
             let bar = egui::Rect::from_min_size(
@@ -940,6 +1056,32 @@ impl SensorApp {
                 egui::vec2(replay_w, height),
             );
             if replay_controls(ui, &painter, bar, &mut self.replay, len, now) {
+                ui.ctx().request_repaint();
+            }
+            replay_speed_label(ui, &painter, bar, self.replay.speed);
+        }
+
+        // Every shot of the series that nearly scored higher, worth a look at the real card.
+        // Stays until the series is cleared, also during a replay.
+        let close_calls: Vec<(usize, Higher)> = self
+            .series
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (s, _))| Some((i, self.card.higher(s.x_mm(), s.y_mm())?)))
+            .filter(|(_, h)| h.gap_mm <= REVIEW_MARGIN_MM)
+            .collect();
+        if !close_calls.is_empty() {
+            let lines: Vec<String> = close_calls
+                .iter()
+                .map(|&(i, h)| format!("Shot {} · {}", i + 1, review_detail(h)))
+                .collect();
+            if let Some(line) = review_notice(ui, &painter, rect, &lines) {
+                let i = close_calls[line].0;
+                let shot = &self.series[i].0;
+                self.selected_shot = Some((shot.boot, shot.seq));
+                if i >= visible {
+                    self.replay.stop(); // not replayed yet: show all shots to show this one
+                }
                 ui.ctx().request_repaint();
             }
         }
@@ -986,6 +1128,11 @@ impl SensorApp {
                     ui.label(format!("x {:+.2} mm · y {:+.2} mm", shot.x_mm(), shot.y_mm()));
                     let off = shot.x_mm().hypot(shot.y_mm());
                     ui.label(RichText::new(format!("{off:.2} mm from the centre")).weak());
+                    let higher = self.card.higher(shot.x_mm(), shot.y_mm());
+                    if let Some(h) = higher.filter(|h| h.gap_mm <= REVIEW_MARGIN_MM) {
+                        let text = format!("⚠ Close call: {}, manual review recommended", review_detail(h));
+                        ui.label(RichText::new(text).small());
+                    }
                 });
             });
     }

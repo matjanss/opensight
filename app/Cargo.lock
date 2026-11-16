@@ -2535,6 +2535,7 @@ dependencies = [
  "dbus",
  "dbus-tokio",
  "eframe",
+ "egui",
  "futures",
  "libdbus-sys",
  "resvg",
