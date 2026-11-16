@@ -61,8 +61,8 @@ app could misread new firmware or the reverse.
 - Shots: `ble.rs` asks for missed shots on every connect and drops duplicates by
   (boot, seq). The app keeps the series in memory.
 - `main.rs`: egui UI. While connected, the main window shows the target card with the
-  series' shots (the newest in the UI's only color; clicking one opens a small info popup; zoom with the wheel or the overlay buttons, drag to pan; zoomed in, a sharp render of just the visible part replaces the stretched card once the view stops moving) and the series list; everything else
-  (dark mode, decimal scoring (off by default: whole rings, X = inner ten), sensor list and pairing, name, PIN, heartbeat, LED, disconnect/forget) is in a settings window,
+  series' shots (the newest in the UI's only color; clicking one opens a small info popup; zoom with the wheel or the zoom bar (bottom right), drag to pan; the replay bar (bottom left) shows the series again shot by shot; both bars can be hidden in settings; zoomed in, a sharp render of just the visible part replaces the stretched card once the view stops moving) and the series list; everything else
+  (dark mode, zoom/replay bars, decimal scoring (off by default: whole rings, X = inner ten), sensor list and pairing, name, PIN, heartbeat, LED, disconnect/forget) is in a settings window,
   an immediate viewport opened from the gear in the status bar. The PIN popup and messages
   show in the settings window while it's open. The remembered sensor ID and theme are
   saved with eframe's storage.

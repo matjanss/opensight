@@ -31,6 +31,8 @@ const AUTO_RETRY: Duration = Duration::from_secs(10);
 const KEY_REMEMBERED: &str = "remembered_sensor";
 const KEY_DARK: &str = "dark_mode";
 const KEY_DECIMAL: &str = "decimal_scoring";
+const KEY_ZOOM_CONTROLS: &str = "zoom_controls";
+const KEY_REPLAY_CONTROLS: &str = "replay_controls";
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -98,15 +100,29 @@ impl CardView {
     }
 }
 
-/// A zoom button: a magnifier with a minus or (`plus`) a plus.
-fn zoom_button(
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Icon {
+    ZoomOut,
+    ZoomIn,
+    Previous,
+    Slower,
+    Play,
+    Pause,
+    Stop,
+    Faster,
+    Next,
+}
+
+/// A round icon button for the bars over the card.
+fn icon_button(
     ui: &Ui,
     painter: &egui::Painter,
     rect: egui::Rect,
-    plus: bool,
+    icon: Icon,
     enabled: bool,
+    hover: &str,
 ) -> egui::Response {
-    let id = ui.scope_id().with(("zoom", plus));
+    let id = ui.scope_id().with(("icon", icon));
     let sense = if enabled {
         egui::Sense::click()
     } else {
@@ -126,17 +142,297 @@ fn zoom_button(
             visuals.widgets.hovered.weak_bg_fill,
         );
     }
-    let c = rect.center() - egui::vec2(1.5, 1.5); // the lens; the handle goes down right
-    let r = 6.5;
+    paint_icon(painter, rect.center(), icon, color);
+    response.on_hover_text(hover)
+}
+
+/// Draws `icon` about 14 points wide around `c`.
+fn paint_icon(painter: &egui::Painter, c: egui::Pos2, icon: Icon, color: Color32) {
+    use egui::pos2;
     let stroke = Stroke::new(1.5, color);
-    painter.circle_stroke(c, r, stroke);
-    let d = egui::vec2(1.0, 1.0).normalized();
-    painter.line_segment([c + d * r, c + d * (r + 5.0)], Stroke::new(2.0, color));
-    painter.line_segment([c - egui::vec2(3.0, 0.0), c + egui::vec2(3.0, 0.0)], stroke);
-    if plus {
-        painter.line_segment([c - egui::vec2(0.0, 3.0), c + egui::vec2(0.0, 3.0)], stroke);
+    // A filled triangle pointing from `base_x` to `tip_x`, `h` high above and below the middle.
+    let tri = |tip_x: f32, base_x: f32, h: f32| {
+        let (top, bottom) = (pos2(base_x, c.y - h), pos2(base_x, c.y + h));
+        let tip = pos2(tip_x, c.y);
+        // Clockwise on screen, for egui's anti-aliasing.
+        let points = if tip_x > base_x {
+            vec![top, tip, bottom]
+        } else {
+            vec![bottom, tip, top]
+        };
+        painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+    };
+    let bar = |x0: f32, x1: f32| {
+        painter.rect_filled(
+            egui::Rect::from_min_max(pos2(x0, c.y - 6.0), pos2(x1, c.y + 6.0)),
+            0.0,
+            color,
+        );
+    };
+    match icon {
+        Icon::ZoomOut | Icon::ZoomIn => {
+            let c = c - egui::vec2(1.5, 1.5); // the lens; the handle goes down right
+            let r = 6.5;
+            painter.circle_stroke(c, r, stroke);
+            let d = egui::vec2(1.0, 1.0).normalized();
+            painter.line_segment([c + d * r, c + d * (r + 5.0)], Stroke::new(2.0, color));
+            painter.line_segment([c - egui::vec2(3.0, 0.0), c + egui::vec2(3.0, 0.0)], stroke);
+            if icon == Icon::ZoomIn {
+                painter.line_segment([c - egui::vec2(0.0, 3.0), c + egui::vec2(0.0, 3.0)], stroke);
+            }
+        }
+        Icon::Previous => {
+            bar(c.x - 6.0, c.x - 4.0);
+            tri(c.x - 4.0, c.x + 5.0, 6.0);
+        }
+        Icon::Next => {
+            bar(c.x + 4.0, c.x + 6.0);
+            tri(c.x + 4.0, c.x - 5.0, 6.0);
+        }
+        Icon::Slower => {
+            tri(c.x - 7.0, c.x, 5.0);
+            tri(c.x, c.x + 7.0, 5.0);
+        }
+        Icon::Faster => {
+            tri(c.x + 7.0, c.x, 5.0);
+            tri(c.x, c.x - 7.0, 5.0);
+        }
+        Icon::Play => tri(c.x + 5.5, c.x - 4.5, 6.5),
+        Icon::Pause => {
+            bar(c.x - 5.0, c.x - 1.5);
+            bar(c.x + 1.5, c.x + 5.0);
+        }
+        Icon::Stop => {
+            painter.rect_filled(
+                egui::Rect::from_center_size(c, egui::vec2(10.0, 10.0)),
+                1.0,
+                color,
+            );
+        }
     }
-    response.on_hover_text(if plus { "Zoom in" } else { "Zoom out" })
+}
+
+/// Seconds between shots in a replay, slowest first.
+const REPLAY_DELAYS: [f32; 6] = [4.0, 2.0, 1.0, 0.5, 0.25, 0.1];
+
+/// Replaying the series on the card: the shots appear again one by one.
+struct Replay {
+    /// How many of the series' shots are on the card; `None` = all, no replay.
+    shown: Option<usize>,
+    playing: bool,
+    next_at: Instant,
+    /// Index into `REPLAY_DELAYS`.
+    speed: usize,
+}
+
+impl Default for Replay {
+    fn default() -> Self {
+        Self {
+            shown: None,
+            playing: false,
+            next_at: Instant::now(),
+            speed: 2, // 1 s
+        }
+    }
+}
+
+impl Replay {
+    fn visible(&self, len: usize) -> usize {
+        self.shown.map_or(len, |n| n.min(len))
+    }
+
+    fn delay(&self) -> Duration {
+        Duration::from_secs_f32(REPLAY_DELAYS[self.speed])
+    }
+
+    /// Plays from where it is, or from an empty card when all shots show; pauses if playing.
+    fn play_pause(&mut self, len: usize, now: Instant) {
+        if self.playing {
+            self.playing = false;
+            return;
+        }
+        if self.visible(len) >= len {
+            self.shown = Some(0);
+        }
+        self.playing = true;
+        self.next_at = now + self.delay();
+    }
+
+    fn stop(&mut self) {
+        self.shown = None;
+        self.playing = false;
+    }
+
+    fn previous(&mut self, len: usize) {
+        self.shown = Some(self.visible(len).saturating_sub(1));
+        self.playing = false;
+    }
+
+    fn next(&mut self, len: usize) {
+        self.playing = false;
+        if let Some(n) = self.shown {
+            self.shown = (n + 1 < len).then_some(n + 1);
+        }
+    }
+
+    /// `faster`: one step faster, else slower. A shot due later than the new delay comes sooner.
+    fn change_speed(&mut self, faster: bool, now: Instant) {
+        self.speed = if faster {
+            (self.speed + 1).min(REPLAY_DELAYS.len() - 1)
+        } else {
+            self.speed.saturating_sub(1)
+        };
+        self.next_at = self.next_at.min(now + self.delay());
+    }
+
+    /// Shows the next shot when it's due; the replay ends once all show. Returns when the
+    /// next one is due.
+    fn tick(&mut self, len: usize, now: Instant) -> Option<Instant> {
+        if !self.playing {
+            return None;
+        }
+        if now >= self.next_at {
+            let n = self.visible(len) + 1;
+            self.next_at = now + self.delay();
+            if n >= len {
+                self.stop();
+                return None;
+            }
+            self.shown = Some(n);
+        }
+        Some(self.next_at)
+    }
+}
+
+/// Size of the bars' round buttons and the bars' padding, in points.
+const BAR_BUTTON: f32 = 28.0;
+const BAR_PAD: f32 = 4.0;
+const ZOOM_LABEL: f32 = 56.0;
+
+/// The rounded background of a bar of buttons over the card.
+fn control_bar(ui: &Ui, painter: &egui::Painter, bar: egui::Rect, salt: &str) {
+    // Clicks between the buttons mustn't reach the card (and close the shot popup).
+    ui.interact(bar, ui.scope_id().with(salt), egui::Sense::click());
+    let visuals = ui.visuals();
+    painter.rect(
+        bar,
+        CornerRadius::same((bar.height() / 2.0) as u8),
+        visuals.window_fill,
+        visuals.window_stroke,
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// A slot `width` wide, `x` points from the start of `bar`'s padding.
+fn bar_slot(bar: egui::Rect, x: f32, width: f32) -> egui::Rect {
+    egui::Rect::from_min_size(
+        bar.min + egui::vec2(BAR_PAD + x, BAR_PAD),
+        egui::vec2(width, BAR_BUTTON),
+    )
+}
+
+/// Zoom out · percentage · zoom in. Clicking the percentage goes back to 100%. Returns the
+/// new zoom when one was clicked.
+fn zoom_controls(ui: &Ui, painter: &egui::Painter, bar: egui::Rect, zoom: f32) -> Option<f32> {
+    control_bar(ui, painter, bar, "zoom_bar");
+    let out_rect = bar_slot(bar, 0.0, BAR_BUTTON);
+    let label_rect = bar_slot(bar, BAR_BUTTON, ZOOM_LABEL);
+    let in_rect = bar_slot(bar, BAR_BUTTON + ZOOM_LABEL, BAR_BUTTON);
+
+    let zoom_out = icon_button(ui, painter, out_rect, Icon::ZoomOut, zoom > ZOOM_MIN, "Zoom out");
+    let zoom_in = icon_button(ui, painter, in_rect, Icon::ZoomIn, zoom < ZOOM_MAX, "Zoom in");
+    let reset = ui.interact(label_rect, ui.scope_id().with("zoom_reset"), egui::Sense::click());
+    let text_color = ui.visuals().widgets.style(&reset).text_color();
+    painter.text(
+        label_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("{:.0}%", zoom * 100.0),
+        TextStyle::Body.resolve(ui.style()),
+        text_color,
+    );
+    let reset = reset.on_hover_text("Back to 100%");
+
+    if zoom_out.clicked() {
+        ZOOM_STEPS.iter().rev().find(|&&z| z < zoom / 1.01).copied()
+    } else if zoom_in.clicked() {
+        ZOOM_STEPS.iter().find(|&&z| z > zoom * 1.01).copied()
+    } else if reset.clicked() {
+        Some(1.0)
+    } else {
+        None
+    }
+}
+
+/// Previous · slower · play/pause · stop · faster · next, for a series of `len` shots.
+/// Returns whether something was clicked.
+fn replay_controls(
+    ui: &Ui,
+    painter: &egui::Painter,
+    bar: egui::Rect,
+    replay: &mut Replay,
+    len: usize,
+    now: Instant,
+) -> bool {
+    control_bar(ui, painter, bar, "replay_bar");
+    let slot = |i: usize| bar_slot(bar, i as f32 * BAR_BUTTON, BAR_BUTTON);
+    let every = format!("now a shot every {} s", REPLAY_DELAYS[replay.speed]);
+    let replaying = replay.shown.is_some();
+    let last = REPLAY_DELAYS.len() - 1;
+    let (play_icon, play_hover) = if replay.playing {
+        (Icon::Pause, "Pause")
+    } else if replaying {
+        (Icon::Play, "Continue the replay")
+    } else {
+        (Icon::Play, "Replay the series")
+    };
+    let buttons = [
+        icon_button(
+            ui,
+            painter,
+            slot(0),
+            Icon::Previous,
+            replay.visible(len) > 0,
+            "Previous shot",
+        ),
+        icon_button(
+            ui,
+            painter,
+            slot(1),
+            Icon::Slower,
+            replay.speed > 0,
+            &format!("Slower ({every})"),
+        ),
+        icon_button(ui, painter, slot(2), play_icon, len > 0, play_hover),
+        icon_button(
+            ui,
+            painter,
+            slot(3),
+            Icon::Stop,
+            replaying,
+            "Stop, show all shots",
+        ),
+        icon_button(
+            ui,
+            painter,
+            slot(4),
+            Icon::Faster,
+            replay.speed < last,
+            &format!("Faster ({every})"),
+        ),
+        icon_button(ui, painter, slot(5), Icon::Next, replaying, "Next shot"),
+    ];
+    let Some(clicked) = buttons.iter().position(|b| b.clicked()) else {
+        return false;
+    };
+    match clicked {
+        0 => replay.previous(len),
+        1 => replay.change_speed(false, now),
+        2 => replay.play_pause(len, now),
+        3 => replay.stop(),
+        4 => replay.change_speed(true, now),
+        _ => replay.next(len),
+    }
+    true
 }
 
 enum Link {
@@ -172,6 +468,9 @@ struct SensorApp {
     /// (boot, seq) of the shot whose info popup is open on the card.
     selected_shot: Option<(u32, u32)>,
     view: CardView,
+    replay: Replay,
+    show_zoom_controls: bool,
+    show_replay_controls: bool,
 
     /// The sensor this app connected to last; reconnected automatically when seen.
     remembered: Option<String>,
@@ -212,6 +511,13 @@ impl SensorApp {
             series_sensor: None,
             selected_shot: None,
             view: CardView::default(),
+            replay: Replay::default(),
+            show_zoom_controls: storage
+                .and_then(|s| s.get_string(KEY_ZOOM_CONTROLS))
+                .is_none_or(|v| v == "true"),
+            show_replay_controls: storage
+                .and_then(|s| s.get_string(KEY_REPLAY_CONTROLS))
+                .is_none_or(|v| v == "true"),
             remembered: storage
                 .and_then(|s| s.get_string(KEY_REMEMBERED))
                 .filter(|s| !s.is_empty()),
@@ -414,6 +720,8 @@ impl eframe::App for SensorApp {
         storage.set_string(KEY_REMEMBERED, self.remembered.clone().unwrap_or_default());
         storage.set_string(KEY_DARK, self.dark_mode.to_string());
         storage.set_string(KEY_DECIMAL, self.decimal_scoring.to_string());
+        storage.set_string(KEY_ZOOM_CONTROLS, self.show_zoom_controls.to_string());
+        storage.set_string(KEY_REPLAY_CONTROLS, self.show_replay_controls.to_string());
     }
 }
 
@@ -557,9 +865,20 @@ impl SensorApp {
         }
 
         let radius = self.card.pellet_diameter_mm / 2.0 * scale;
+        // Replay: only the first `visible` shots are on the card.
+        let now = Instant::now();
+        let len = self.series.len();
+        if !self.show_replay_controls {
+            self.replay.stop();
+        }
+        if let Some(at) = self.replay.tick(len, now) {
+            ui.ctx().request_repaint_after(at.saturating_duration_since(now));
+        }
+        let visible = self.replay.visible(len);
+
         let shot_pos = |shot: &protocol::Shot| to_screen(self.card.to_card(shot.x_mm(), shot.y_mm()));
-        for (i, (shot, _)) in self.series.iter().enumerate() {
-            let (fill, stroke) = if i + 1 == self.series.len() {
+        for (i, (shot, _)) in self.series[..visible].iter().enumerate() {
+            let (fill, stroke) = if i + 1 == visible {
                 (LAST_SHOT_COLOR, Stroke::new(1.5, Color32::WHITE))
             } else {
                 (Color32::from_gray(150), Stroke::new(1.0, Color32::from_gray(30)))
@@ -571,7 +890,7 @@ impl SensorApp {
         // wide on a small card), the newest of equally near ones (it's drawn on top).
         let hit_r = radius.max(6.0);
         let shot_at = |p: egui::Pos2| {
-            self.series
+            self.series[..visible]
                 .iter()
                 .enumerate()
                 .rev()
@@ -596,10 +915,33 @@ impl SensorApp {
             self.selected_shot = None;
         }
 
-        if let Some(zoom) = Self::zoom_controls(ui, &painter, rect, self.view.zoom) {
-            self.view.zoom = zoom;
-            self.view.clamp(card_mm);
-            ui.ctx().request_repaint();
+        // Zoom bottom right, replay bottom left; the replay one row up if both don't fit.
+        let margin = 10.0;
+        let height = BAR_BUTTON + 2.0 * BAR_PAD;
+        let zoom_w = 2.0 * BAR_BUTTON + ZOOM_LABEL + 2.0 * BAR_PAD;
+        let replay_w = 6.0 * BAR_BUTTON + 2.0 * BAR_PAD;
+        let bottom = rect.bottom() - margin - height;
+        if self.show_zoom_controls {
+            let bar = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - margin - zoom_w, bottom),
+                egui::vec2(zoom_w, height),
+            );
+            if let Some(zoom) = zoom_controls(ui, &painter, bar, self.view.zoom) {
+                self.view.zoom = zoom;
+                self.view.clamp(card_mm);
+                ui.ctx().request_repaint();
+            }
+        }
+        if self.show_replay_controls {
+            let crowded = self.show_zoom_controls && rect.width() < zoom_w + replay_w + 3.0 * margin;
+            let top = if crowded { bottom - height - 8.0 } else { bottom };
+            let bar = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + margin, top),
+                egui::vec2(replay_w, height),
+            );
+            if replay_controls(ui, &painter, bar, &mut self.replay, len, now) {
+                ui.ctx().request_repaint();
+            }
         }
 
         // Gone when the series was cleared or replaced.
@@ -612,8 +954,8 @@ impl SensorApp {
         };
         let (shot, score) = &self.series[i];
         let pos = shot_pos(shot);
-        if !rect.contains(pos) {
-            return; // zoomed or moved out of view; it shows again when it's back
+        if !rect.contains(pos) || i >= visible {
+            return; // out of view, or not replayed yet; it shows again when it's back
         }
         // A dark and a light ring, visible on the card's black and white parts.
         painter.circle_stroke(pos, radius + 3.0, Stroke::new(3.0, Color32::BLACK));
@@ -646,53 +988,6 @@ impl SensorApp {
                     ui.label(RichText::new(format!("{off:.2} mm from the centre")).weak());
                 });
             });
-    }
-
-    /// Zoom out · percentage · zoom in, over the bottom of the card at `card_rect`.
-    /// Clicking the percentage goes back to 100%. Returns the new zoom when one was clicked.
-    fn zoom_controls(ui: &mut Ui, painter: &egui::Painter, card_rect: egui::Rect, zoom: f32) -> Option<f32> {
-        let (button, label, pad) = (28.0, 56.0, 4.0);
-        let size = egui::vec2(2.0 * button + label + 2.0 * pad, button + 2.0 * pad);
-        let bar = egui::Rect::from_center_size(
-            card_rect.center_bottom() - egui::vec2(0.0, size.y / 2.0 + 10.0),
-            size,
-        );
-        // Clicks between the buttons mustn't reach the card (and close the shot popup).
-        ui.interact(bar, ui.scope_id().with("zoom_bar"), egui::Sense::click());
-        let visuals = ui.visuals();
-        painter.rect(
-            bar,
-            CornerRadius::same((size.y / 2.0) as u8),
-            visuals.window_fill,
-            visuals.window_stroke,
-            egui::StrokeKind::Inside,
-        );
-        let out_rect = egui::Rect::from_min_size(bar.min + egui::vec2(pad, pad), egui::vec2(button, button));
-        let label_rect = egui::Rect::from_min_size(out_rect.right_top(), egui::vec2(label, button));
-        let in_rect = egui::Rect::from_min_size(label_rect.right_top(), egui::vec2(button, button));
-
-        let zoom_out = zoom_button(ui, painter, out_rect, false, zoom > ZOOM_MIN);
-        let zoom_in = zoom_button(ui, painter, in_rect, true, zoom < ZOOM_MAX);
-        let reset = ui.interact(label_rect, ui.scope_id().with("zoom_reset"), egui::Sense::click());
-        let text_color = ui.visuals().widgets.style(&reset).text_color();
-        painter.text(
-            label_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            format!("{:.0}%", zoom * 100.0),
-            TextStyle::Body.resolve(ui.style()),
-            text_color,
-        );
-        let reset = reset.on_hover_text("Back to 100%");
-
-        if zoom_out.clicked() {
-            ZOOM_STEPS.iter().rev().find(|&&z| z < zoom / 1.01).copied()
-        } else if zoom_in.clicked() {
-            ZOOM_STEPS.iter().find(|&&z| z > zoom * 1.01).copied()
-        } else if reset.clicked() {
-            Some(1.0)
-        } else {
-            None
-        }
     }
 
     /// Last shot and the series list with the total.
@@ -848,6 +1143,25 @@ impl SensorApp {
             });
             ui.label(
                 RichText::new("Off: whole rings, X for an inner ten. On: tenths, up to 10.9.")
+                    .small()
+                    .weak(),
+            );
+        });
+        card(ui, "Target card", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Zoom controls");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    toggle_switch(ui, &mut self.show_zoom_controls);
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.label("Replay controls");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    toggle_switch(ui, &mut self.show_replay_controls);
+                });
+            });
+            ui.label(
+                RichText::new("The wheel zooms and dragging moves the card either way.")
                     .small()
                     .weak(),
             );
@@ -1412,5 +1726,56 @@ mod tests {
         v.zoom_by(0.01, Vec2::ZERO, BASE, CARD); // back out past 100%
         assert_eq!(v.zoom, ZOOM_MIN);
         assert_eq!(v.centre_mm, CARD / 2.0);
+    }
+
+    #[test]
+    fn replay_shows_the_shots_one_by_one_then_all() {
+        let mut r = Replay::default();
+        let t = Instant::now();
+        let d = r.delay();
+        assert_eq!(r.visible(3), 3);
+        r.play_pause(3, t);
+        assert_eq!(r.visible(3), 0);
+        assert_eq!(r.tick(3, t), Some(t + d)); // not due yet
+        assert_eq!(r.visible(3), 0);
+        r.tick(3, t + d);
+        assert_eq!(r.visible(3), 1);
+        r.tick(3, t + d * 2);
+        assert_eq!(r.visible(3), 2);
+        assert_eq!(r.tick(3, t + d * 3), None); // the last one ends the replay
+        assert_eq!((r.shown, r.playing), (None, false));
+    }
+
+    #[test]
+    fn replay_steps_and_stops() {
+        let mut r = Replay::default();
+        r.previous(5);
+        assert_eq!(r.shown, Some(4));
+        r.previous(5);
+        r.next(5);
+        assert_eq!(r.shown, Some(4));
+        r.next(5); // past the last: back to all
+        assert_eq!(r.shown, None);
+        r.previous(5);
+        r.play_pause(5, Instant::now()); // continues from 4, doesn't restart
+        assert_eq!((r.shown, r.playing), (Some(4), true));
+        r.play_pause(5, Instant::now());
+        assert!(!r.playing);
+        r.stop();
+        assert_eq!(r.visible(5), 5);
+    }
+
+    #[test]
+    fn replay_speed_stays_in_range() {
+        let mut r = Replay::default();
+        let now = Instant::now();
+        for _ in 0..10 {
+            r.change_speed(true, now);
+        }
+        assert_eq!(r.speed, REPLAY_DELAYS.len() - 1);
+        for _ in 0..10 {
+            r.change_speed(false, now);
+        }
+        assert_eq!(r.speed, 0);
     }
 }
