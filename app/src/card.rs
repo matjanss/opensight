@@ -155,26 +155,35 @@ impl Card {
 
     /// Renders the card `width` pixels wide.
     fn render(&self, width: u32) -> Option<ColorImage> {
-        let size = self.svg.size();
-        let scale = width as f32 / size.width();
-        let height = (size.height() * scale).ceil() as u32;
-        let mut pixmap = tiny_skia::Pixmap::new(width, height)?;
+        let size = self.size_mm();
+        let height = (size.y * width as f32 / size.x).ceil() as u32;
+        let all = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        self.render_region(all, [width, height])
+    }
+
+    /// Renders the part `mm` of the card (mm from the top left) into `size_px` pixels.
+    fn render_region(&self, mm: egui::Rect, size_px: [u32; 2]) -> Option<ColorImage> {
+        let scale = size_px[0] as f32 / mm.width();
+        let mut pixmap = tiny_skia::Pixmap::new(size_px[0], size_px[1])?;
         resvg::render(
             &self.svg,
-            tiny_skia::Transform::from_scale(scale, scale),
+            tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, -mm.min.x * scale, -mm.min.y * scale),
             &mut pixmap.as_mut(),
         );
         Some(ColorImage::from_rgba_premultiplied(
-            [width as usize, height as usize],
+            [size_px[0] as usize, size_px[1] as usize],
             pixmap.data(),
         ))
     }
 }
 
 /// The rendered card, re-rendered when the shown size changes enough to look blurry.
+/// Zoomed in, also a sharp render of just the visible part (`detail`).
 #[derive(Default)]
 pub struct CardTexture {
     texture: Option<(String, u32, TextureHandle)>,
+    /// Card ID, the part shown (mm), its size in pixels, the texture.
+    detail: Option<(String, egui::Rect, [u32; 2], TextureHandle)>,
 }
 
 /// Renders in steps of this many pixels, so resizing the window doesn't re-render every frame.
@@ -190,6 +199,39 @@ impl CardTexture {
             self.texture = Some((card.id.clone(), width, tex));
         }
         self.texture.as_ref().map(|(_, _, t)| t)
+    }
+
+    /// The part `mm` of the card rendered at `size_px`, for the zoomed-in view. Re-rendered
+    /// only when `refresh` (the view stopped moving); until then this returns the last
+    /// render and the part it shows, to be drawn where that part is now.
+    pub fn detail(
+        &mut self,
+        ctx: &egui::Context,
+        card: &Card,
+        mm: egui::Rect,
+        size_px: [u32; 2],
+        refresh: bool,
+    ) -> Option<(&TextureHandle, egui::Rect)> {
+        let fresh =
+            matches!(&self.detail, Some((id, m, s, _)) if *id == card.id && *m == mm && *s == size_px);
+        if refresh
+            && !fresh
+            && let Some(image) = card.render_region(mm, size_px)
+        {
+            if let Some((id, m, s, tex)) = &mut self.detail
+                && *id == card.id
+            {
+                tex.set(image, TextureOptions::LINEAR);
+                (*m, *s) = (mm, size_px);
+            } else {
+                let tex = ctx.load_texture(format!("card-{}-detail", card.id), image, TextureOptions::LINEAR);
+                self.detail = Some((card.id.clone(), mm, size_px, tex));
+            }
+        }
+        self.detail
+            .as_ref()
+            .filter(|(id, ..)| *id == card.id)
+            .map(|(_, m, _, t)| (t, *m))
     }
 }
 

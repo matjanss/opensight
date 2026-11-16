@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontFamily, FontId, Layout, RichText, Stroke, TextStyle, Theme,
-    ThemePreference, Ui,
+    ThemePreference, Ui, Vec2,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -60,6 +60,85 @@ struct PasskeyPrompt {
     focus: bool,
 }
 
+const ZOOM_MIN: f32 = 1.0;
+const ZOOM_MAX: f32 = 16.0;
+/// Where the zoom buttons step to; the wheel zooms smoothly in between.
+const ZOOM_STEPS: [f32; 9] = [1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0];
+
+/// How the target card is zoomed and moved.
+#[derive(Clone, Copy, PartialEq, Default)]
+struct CardView {
+    /// 1 = the whole card fits.
+    zoom: f32,
+    /// The card point (mm from the top left) at the middle of the view.
+    centre_mm: Vec2,
+}
+
+impl CardView {
+    /// Keeps the zoom in range and the card covering the whole view.
+    fn clamp(&mut self, card_mm: Vec2) {
+        self.zoom = self.zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+        let half = card_mm / (2.0 * self.zoom);
+        self.centre_mm = self.centre_mm.clamp(half, card_mm - half);
+    }
+
+    /// Zooms by `factor`, keeping the card point at `anchor` (points from the view's
+    /// middle) in place. `base`: points per mm at 100%.
+    fn zoom_by(&mut self, factor: f32, anchor: Vec2, base: f32, card_mm: Vec2) {
+        let at = self.centre_mm + anchor / (base * self.zoom);
+        self.zoom = (self.zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+        self.centre_mm = at - anchor / (base * self.zoom);
+        self.clamp(card_mm);
+    }
+
+    /// Moves the card along with a drag of `delta` points.
+    fn pan(&mut self, delta: Vec2, base: f32, card_mm: Vec2) {
+        self.centre_mm -= delta / (base * self.zoom);
+        self.clamp(card_mm);
+    }
+}
+
+/// A zoom button: a magnifier with a minus or (`plus`) a plus.
+fn zoom_button(
+    ui: &Ui,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    plus: bool,
+    enabled: bool,
+) -> egui::Response {
+    let id = ui.scope_id().with(("zoom", plus));
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let response = ui.interact(rect, id, sense);
+    let visuals = ui.visuals();
+    let color = if !enabled {
+        visuals.weak_text_color()
+    } else {
+        visuals.widgets.style(&response).fg_stroke.color
+    };
+    if enabled && response.hovered() {
+        painter.circle_filled(
+            rect.center(),
+            rect.width() / 2.0,
+            visuals.widgets.hovered.weak_bg_fill,
+        );
+    }
+    let c = rect.center() - egui::vec2(1.5, 1.5); // the lens; the handle goes down right
+    let r = 6.5;
+    let stroke = Stroke::new(1.5, color);
+    painter.circle_stroke(c, r, stroke);
+    let d = egui::vec2(1.0, 1.0).normalized();
+    painter.line_segment([c + d * r, c + d * (r + 5.0)], Stroke::new(2.0, color));
+    painter.line_segment([c - egui::vec2(3.0, 0.0), c + egui::vec2(3.0, 0.0)], stroke);
+    if plus {
+        painter.line_segment([c - egui::vec2(0.0, 3.0), c + egui::vec2(0.0, 3.0)], stroke);
+    }
+    response.on_hover_text(if plus { "Zoom in" } else { "Zoom out" })
+}
+
 enum Link {
     Idle,
     Connecting { name: String },
@@ -92,6 +171,7 @@ struct SensorApp {
     series_sensor: Option<String>,
     /// (boot, seq) of the shot whose info popup is open on the card.
     selected_shot: Option<(u32, u32)>,
+    view: CardView,
 
     /// The sensor this app connected to last; reconnected automatically when seen.
     remembered: Option<String>,
@@ -131,6 +211,7 @@ impl SensorApp {
             series: Vec::new(),
             series_sensor: None,
             selected_shot: None,
+            view: CardView::default(),
             remembered: storage
                 .and_then(|s| s.get_string(KEY_REMEMBERED))
                 .filter(|s| !s.is_empty()),
@@ -416,19 +497,67 @@ impl SensorApp {
 
     /// The card, `width` points wide, with every shot of the series; the newest in color.
     /// Clicking a shot opens a small popup with its info; clicking it again, clicking
-    /// elsewhere on the card or Escape closes it.
+    /// elsewhere on the card or Escape closes it. Zoom with the wheel or the controls at the
+    /// bottom; drag to move the card while zoomed in.
     fn target_card(&mut self, ui: &mut Ui, width: f32) {
-        let size = self.card.size_mm() * (width / self.card.size_mm().x);
-        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-        let painter = ui.painter_at(rect);
-        let px = width * ui.ctx().pixels_per_point();
-        if let Some(tex) = self.card_texture.get(ui.ctx(), &self.card, px) {
-            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-            painter.image(tex.id(), rect, uv, Color32::WHITE);
+        let card_mm = self.card.size_mm();
+        let base = width / card_mm.x; // points per mm at 100%
+        let (rect, response) = ui.allocate_exact_size(card_mm * base, egui::Sense::click_and_drag());
+
+        // Zoom (about the pointer) and pan.
+        self.view.clamp(card_mm);
+        let view_before = self.view;
+        if response.hovered() {
+            let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+            let factor = pinch * (scroll / 200.0).exp();
+            if factor != 1.0 {
+                let anchor = response.hover_pos().map_or(Vec2::ZERO, |p| p - rect.center());
+                self.view.zoom_by(factor, anchor, base, card_mm);
+            }
+            // The wheel zooms the card; it mustn't also scroll the page around it.
+            ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
         }
-        let scale = width / self.card.size_mm().x;
+        if response.dragged() {
+            self.view.pan(response.drag_delta(), base, card_mm);
+        }
+
+        let scale = base * self.view.zoom; // points per mm
+        let origin = rect.center() - self.view.centre_mm * scale; // the card's top left
+        let to_screen = |mm: Vec2| origin + mm * scale;
+        let painter = ui.painter_at(rect);
+        let ppp = ui.ctx().pixels_per_point();
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        if let Some(tex) = self.card_texture.get(ui.ctx(), &self.card, width * ppp) {
+            painter.image(
+                tex.id(),
+                egui::Rect::from_min_size(origin, card_mm * scale),
+                uv,
+                Color32::WHITE,
+            );
+        }
+        if self.view.zoom > 1.0 {
+            // A sharp render of the visible part, over the stretched full card. Rendered
+            // once the view stops moving; while it moves the last one moves along.
+            let visible = egui::Rect::from_center_size(self.view.centre_mm.to_pos2(), rect.size() / scale);
+            let px = [
+                (rect.width() * ppp).round() as u32,
+                (rect.height() * ppp).round() as u32,
+            ];
+            let settled = self.view == view_before && !response.dragged();
+            if let Some((tex, mm)) = self
+                .card_texture
+                .detail(ui.ctx(), &self.card, visible, px, settled)
+            {
+                let at = egui::Rect::from_min_max(to_screen(mm.min.to_vec2()), to_screen(mm.max.to_vec2()));
+                painter.image(tex.id(), at, uv, Color32::WHITE);
+            }
+            if !settled {
+                ui.ctx().request_repaint();
+            }
+        }
+
         let radius = self.card.pellet_diameter_mm / 2.0 * scale;
-        let shot_pos = |shot: &protocol::Shot| rect.min + self.card.to_card(shot.x_mm(), shot.y_mm()) * scale;
+        let shot_pos = |shot: &protocol::Shot| to_screen(self.card.to_card(shot.x_mm(), shot.y_mm()));
         for (i, (shot, _)) in self.series.iter().enumerate() {
             let (fill, stroke) = if i + 1 == self.series.len() {
                 (LAST_SHOT_COLOR, Stroke::new(1.5, Color32::WHITE))
@@ -451,8 +580,12 @@ impl SensorApp {
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| i)
         };
-        if response.hover_pos().and_then(shot_at).is_some() {
+        if response.dragged() && self.view.zoom > 1.0 {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if response.hover_pos().and_then(shot_at).is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        } else if response.hovered() && self.view.zoom > 1.0 {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
         if response.clicked() {
             let key = |i: usize| (self.series[i].0.boot, self.series[i].0.seq);
@@ -461,6 +594,12 @@ impl SensorApp {
         }
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.selected_shot = None;
+        }
+
+        if let Some(zoom) = Self::zoom_controls(ui, &painter, rect, self.view.zoom) {
+            self.view.zoom = zoom;
+            self.view.clamp(card_mm);
+            ui.ctx().request_repaint();
         }
 
         // Gone when the series was cleared or replaced.
@@ -473,6 +612,9 @@ impl SensorApp {
         };
         let (shot, score) = &self.series[i];
         let pos = shot_pos(shot);
+        if !rect.contains(pos) {
+            return; // zoomed or moved out of view; it shows again when it's back
+        }
         // A dark and a light ring, visible on the card's black and white parts.
         painter.circle_stroke(pos, radius + 3.0, Stroke::new(3.0, Color32::BLACK));
         painter.circle_stroke(pos, radius + 3.0, Stroke::new(1.5, Color32::WHITE));
@@ -496,6 +638,7 @@ impl SensorApp {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(format!("Shot {}", i + 1)).strong());
+                        ui.label("Score:");
                         ui.label(RichText::new(score.text(decimal)).size(20.0).strong());
                     });
                     ui.label(format!("x {:+.2} mm · y {:+.2} mm", shot.x_mm(), shot.y_mm()));
@@ -503,6 +646,53 @@ impl SensorApp {
                     ui.label(RichText::new(format!("{off:.2} mm from the centre")).weak());
                 });
             });
+    }
+
+    /// Zoom out · percentage · zoom in, over the bottom of the card at `card_rect`.
+    /// Clicking the percentage goes back to 100%. Returns the new zoom when one was clicked.
+    fn zoom_controls(ui: &mut Ui, painter: &egui::Painter, card_rect: egui::Rect, zoom: f32) -> Option<f32> {
+        let (button, label, pad) = (28.0, 56.0, 4.0);
+        let size = egui::vec2(2.0 * button + label + 2.0 * pad, button + 2.0 * pad);
+        let bar = egui::Rect::from_center_size(
+            card_rect.center_bottom() - egui::vec2(0.0, size.y / 2.0 + 10.0),
+            size,
+        );
+        // Clicks between the buttons mustn't reach the card (and close the shot popup).
+        ui.interact(bar, ui.scope_id().with("zoom_bar"), egui::Sense::click());
+        let visuals = ui.visuals();
+        painter.rect(
+            bar,
+            CornerRadius::same((size.y / 2.0) as u8),
+            visuals.window_fill,
+            visuals.window_stroke,
+            egui::StrokeKind::Inside,
+        );
+        let out_rect = egui::Rect::from_min_size(bar.min + egui::vec2(pad, pad), egui::vec2(button, button));
+        let label_rect = egui::Rect::from_min_size(out_rect.right_top(), egui::vec2(label, button));
+        let in_rect = egui::Rect::from_min_size(label_rect.right_top(), egui::vec2(button, button));
+
+        let zoom_out = zoom_button(ui, painter, out_rect, false, zoom > ZOOM_MIN);
+        let zoom_in = zoom_button(ui, painter, in_rect, true, zoom < ZOOM_MAX);
+        let reset = ui.interact(label_rect, ui.scope_id().with("zoom_reset"), egui::Sense::click());
+        let text_color = ui.visuals().widgets.style(&reset).text_color();
+        painter.text(
+            label_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("{:.0}%", zoom * 100.0),
+            TextStyle::Body.resolve(ui.style()),
+            text_color,
+        );
+        let reset = reset.on_hover_text("Back to 100%");
+
+        if zoom_out.clicked() {
+            ZOOM_STEPS.iter().rev().find(|&&z| z < zoom / 1.01).copied()
+        } else if zoom_in.clicked() {
+            ZOOM_STEPS.iter().find(|&&z| z > zoom * 1.01).copied()
+        } else if reset.clicked() {
+            Some(1.0)
+        } else {
+            None
+        }
     }
 
     /// Last shot and the series list with the total.
@@ -1180,4 +1370,47 @@ fn toggle_switch(ui: &mut Ui, on: &mut bool) -> egui::Response {
             .circle_filled(egui::pos2(x, rect.center().y), radius - 4.0, knob);
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CARD: Vec2 = egui::vec2(170.0, 170.0);
+    const BASE: f32 = 3.0; // points per mm at 100%
+
+    fn view() -> CardView {
+        let mut v = CardView::default();
+        v.clamp(CARD);
+        v
+    }
+
+    #[test]
+    fn starts_showing_the_whole_card() {
+        let v = view();
+        assert_eq!(v.zoom, 1.0);
+        assert_eq!(v.centre_mm, CARD / 2.0);
+    }
+
+    #[test]
+    fn wheel_zoom_keeps_the_point_under_the_pointer() {
+        let mut v = view();
+        let anchor = egui::vec2(60.0, -30.0);
+        let at = |v: &CardView| v.centre_mm + anchor / (BASE * v.zoom);
+        let before = at(&v);
+        v.zoom_by(2.5, anchor, BASE, CARD);
+        assert_eq!(v.zoom, 2.5);
+        assert!((at(&v) - before).length() < 1e-4);
+    }
+
+    #[test]
+    fn the_card_always_covers_the_view() {
+        let mut v = view();
+        v.zoom_by(4.0, Vec2::ZERO, BASE, CARD);
+        v.pan(egui::vec2(1e6, 1e6), BASE, CARD); // far past the top left corner
+        assert_eq!(v.centre_mm, CARD / 8.0);
+        v.zoom_by(0.01, Vec2::ZERO, BASE, CARD); // back out past 100%
+        assert_eq!(v.zoom, ZOOM_MIN);
+        assert_eq!(v.centre_mm, CARD / 2.0);
+    }
 }
