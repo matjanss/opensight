@@ -33,6 +33,7 @@ static uint32_t lastSeq = 0;    // 0: no shot yet
 static uint32_t sendNext = 1;   // next shot to indicate; lastSeq + 1 when the app has them all
 static uint32_t inFlight = 0;   // the shot being indicated
 static uint32_t retryAt = 0;
+static uint32_t clearedSeq = 0; // shots up to this one were cleared by the app
 
 static bool isValidName(const char* s, size_t len) {
   if (len < 1 || len > (size_t)NAME_MAX_LEN) return false;
@@ -75,7 +76,10 @@ static void resetSecurity(uint32_t now) {
   setPairing(true);   // restarts the 60 s window, so the user can pair right away
 }
 
-static uint32_t oldestSeq() { return lastSeq >= (uint32_t)SHOT_BUFFER ? lastSeq - SHOT_BUFFER + 1 : 1; }
+static uint32_t oldestSeq() {
+  uint32_t oldest = lastSeq >= (uint32_t)SHOT_BUFFER ? lastSeq - SHOT_BUFFER + 1 : 1;
+  return oldest > clearedSeq ? oldest : clearedSeq + 1;
+}
 
 static void addShot(int32_t x, int32_t y, uint32_t now) {
   Shot& s = shots[(++lastSeq) % SHOT_BUFFER];
@@ -108,10 +112,18 @@ static void serviceShots(uint32_t now) {
 
   uint8_t req[12];
   size_t len;
-  if (bleTakeShotRequest(req, &len) && len == SHOT_REQUEST_LEN) {
-    // From the shot after the app's last one; a different boot means it has none of ours.
-    uint32_t from = get32(req) == bootId ? get32(req + 4) : 1;
-    sendNext = constrain(from, oldestSeq(), lastSeq + 1);
+  if (bleTakeShotRequest(req, &len)) {
+    if (len == SHOT_REQUEST_LEN) {
+      // From the shot after the app's last one; a different boot means it has none of ours.
+      uint32_t from = get32(req) == bootId ? get32(req + 4) : 1;
+      sendNext = constrain(from, oldestSeq(), lastSeq + 1);
+    } else if (len == SHOT_CLEAR_LEN && req[0] == SHOT_CLEAR && get32(req + 1) == bootId) {
+      // The app cleared its series: forget the shots it has (never ones it hasn't seen).
+      uint32_t upTo = get32(req + 5);
+      if (upTo > lastSeq) upTo = lastSeq;
+      if (upTo > clearedSeq) clearedSeq = upTo;
+      Serial.printf("Shots up to %u cleared\n", (unsigned)clearedSeq);
+    }
   }
 
   switch (bleTakeShotResult()) {

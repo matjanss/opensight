@@ -32,6 +32,8 @@ pub enum Command {
     SetName(String),
     /// Changes the sensor's pairing PIN (0–999 999). Unpairs all other computers.
     SetPin(u32),
+    /// Makes the sensor forget the shots the app has received, so they aren't sent again.
+    ClearShots,
 }
 
 #[derive(Clone, Debug)]
@@ -261,6 +263,14 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                         && let Err(e) = c.peripheral.write(&c.name, name.as_bytes(), WriteType::WithResponse).await {
                             events.send(Event::Error(format!("Could not rename the sensor: {e}")));
                         }
+                }
+                Some(Command::ClearShots) => {
+                    if let Some(c) = &conn && let Some(chr) = &c.shot && let Some((boot, seq)) = last_shot {
+                        let req = proto::encode_shot_clear(boot, seq);
+                        if let Err(e) = c.peripheral.write(chr, &req, WriteType::WithResponse).await {
+                            events.send(Event::Error(format!("Could not clear the sensor's shots: {e}")));
+                        }
+                    }
                 }
                 Some(Command::SetPin(pin)) => {
                     if let Some(c) = &conn && let Some(chr) = &c.pin {

@@ -25,4 +25,7 @@ const int NAME_MAX_LEN = 20;
 const size_t SHOT_LEN = 20;
 // Shot request (app → sensor): boot u32, next seq u32.
 const size_t SHOT_REQUEST_LEN = 8;
+// Clear request (app → sensor): SHOT_CLEAR, boot u32, last seq u32: forget shots up to it.
+const uint8_t SHOT_CLEAR = 0x01;
+const size_t SHOT_CLEAR_LEN = 9;
 const char* const NAME_PREFIX = "OpenSights-";

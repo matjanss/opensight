@@ -46,7 +46,7 @@ All characteristic UUIDs share the service UUID's base and differ only in the
 | `f103`      | Name      | read, write, notify  | Sensor name, 1–20 bytes of printable ASCII (0x20–0x7E), no terminator |
 | `f104`      | Version   | read                 | `u8` `PROTOCOL_VERSION`                        |
 | `f105`      | PIN       | write                | `u32` new pairing passkey, 0–999 999 (6 digits) |
-| `f106`      | Shot      | write, indicate      | Indicated: one shot (20 bytes). Written: a shot request (8 bytes) |
+| `f106`      | Shot      | write, indicate      | Indicated: one shot (20 bytes). Written: a shot request (8 bytes) or a clear request (9 bytes) |
 
 `f102` was the LED switch in version 1. It is gone (the LED only shows the sensor's
 status, see below) and its UUID is not reused.
@@ -112,6 +112,19 @@ Shot request (app → sensor, 8 bytes): `u32` boot, `u32` next seq. "Send your s
 - A request of the wrong length is ignored.
 
 Example: the app has shot 3 of boot `0x12345678` → `78 56 34 12 04 00 00 00`.
+
+Clear request (app → sensor, 9 bytes): `u8` `0x01`, `u32` boot, `u32` last seq. "Forget your
+shots of `boot` up to and including `last seq`." The app sends it when the user clears the
+series, with the newest shot it has, so the cleared shots are not sent again on a later
+connect (for example after the app restarts).
+- Shots after `last seq` are kept: a shot made while the request was on its way still
+  reaches the app.
+- If `boot` is not the sensor's current boot, the request is ignored (the sensor has none of
+  those shots any more). `last seq` beyond the newest shot means all shots.
+- Shot numbering is not reset: the next shot keeps counting from the last one.
+- A cleared shot is never sent again, also not when a shot request asks for it.
+
+Example: clear up to shot 3 of boot `0x12345678` → `01 78 56 34 12 03 00 00 00`.
 
 ## Security and pairing
 

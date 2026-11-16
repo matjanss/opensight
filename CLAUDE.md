@@ -26,7 +26,7 @@ app could misread new firmware or the reverse.
 - `main.cpp`: button (short press = test shot, 2 s hold = pairing mode, 10 s hold = PIN
   reset), heartbeat, name and PIN in NVS (namespace `"sensor"`), the status LED (pairing blink, PIN reset, shot flash; the app can't switch it), and the shot
   buffer: the last 64 shots, indicated one at a time until the app confirms each
-  (`serviceShots`). Simple 10 ms loop.
+  (`serviceShots`); a clear request from the app drops the shots it has (`clearedSeq`). Simple 10 ms loop.
 - `ble_link.cpp`: NimBLE GATT server. NimBLE callbacks run in NimBLE's task: they only store
   requests, which `loop()` picks up with `bleTake*()`. Don't touch pins, NVS or app state
   from a callback.
@@ -59,7 +59,8 @@ app could misread new firmware or the reverse.
   Plex font rather than system fonts. The built-in card is in `assets/cards/`.
   1 SVG unit = 1 mm.
 - Shots: `ble.rs` asks for missed shots on every connect and drops duplicates by
-  (boot, seq). The app keeps the series in memory.
+  (boot, seq). The app keeps the series in memory. "Clear series" also sends a clear
+  request, so the sensor forgets those shots and doesn't resend them after an app restart.
 - `main.rs`: egui UI. While connected, the main window shows the target card with the
   series' shots (the newest in the UI's only color; clicking one opens a small info popup; zoom with the wheel or the zoom bar (bottom right), drag to pan; the replay bar (bottom left) shows the series again shot by shot; both bars can be hidden in settings; a close-call notice at the top left lists every shot of the series within the close-call margin (0.5 mm by default) of a higher score (`Card::higher`, same rule as scoring) for manual review; zoomed in, a sharp render of just the visible part replaces the stretched card once the view stops moving) and the series list with a shots-per-score chart below it (bars per ring, or points per tenth when decimal; painted by hand in `score_chart`); everything else
   (dark mode, decimal scoring (off by default: whole rings, X = inner ten), the target card's zoom/replay bars, default replay speed, close-call notice and margin, sensor list and pairing, and one "Sensor settings" panel with name, PIN, heartbeat and disconnect/forget) is in a settings window,

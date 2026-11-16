@@ -1268,7 +1268,7 @@ impl SensorApp {
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                     clear = ui
                         .add(egui::Button::new("Clear series").frame(false))
-                        .on_hover_text("Start a new series. Only clears this app's list.")
+                        .on_hover_text("Start a new series. Also clears the sensor's stored shots.")
                         .clicked();
                     ui.separator();
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
@@ -1304,6 +1304,7 @@ impl SensorApp {
             });
         }
         if clear {
+            self.send(Command::ClearShots);
             self.series.clear();
         }
     }

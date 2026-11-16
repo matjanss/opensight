@@ -122,6 +122,19 @@ pub fn encode_shot_request(boot: u32, next_seq: u32) -> [u8; 8] {
     out
 }
 
+/// First byte of a clear request.
+pub const SHOT_CLEAR: u8 = 0x01;
+
+/// Clear request: "forget your buffered shots of boot `boot` up to and including `last_seq`",
+/// so a later connect doesn't send them again. Shots after `last_seq` are kept.
+pub fn encode_shot_clear(boot: u32, last_seq: u32) -> [u8; 9] {
+    let mut out = [0; 9];
+    out[0] = SHOT_CLEAR;
+    out[1..5].copy_from_slice(&boot.to_le_bytes());
+    out[5..].copy_from_slice(&last_seq.to_le_bytes());
+    out
+}
+
 /// What the sensor puts in its advertisement's manufacturer data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AdvInfo {
@@ -212,6 +225,10 @@ mod tests {
         assert_eq!(
             encode_shot_request(0x1234_5678, 4),
             [0x78, 0x56, 0x34, 0x12, 0x04, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            encode_shot_clear(0x1234_5678, 3),
+            [0x01, 0x78, 0x56, 0x34, 0x12, 0x03, 0x00, 0x00, 0x00]
         );
     }
 
