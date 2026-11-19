@@ -12,3 +12,11 @@ firmware/compile_commands.json
 **/.vscode/ipch
 # VS Code workspace file: the pioarduino extension writes machine-specific paths into it
 opensights.code-workspace
+# KiCad (local history, backups, caches, per-user view state)
+hardware/**/.history/
+hardware/**/*-backups/
+hardware/**/fp-info-cache
+hardware/**/*.lck
+hardware/**/~*.lck
+hardware/**/_autosave-*
+hardware/**/*.kicad_prl
