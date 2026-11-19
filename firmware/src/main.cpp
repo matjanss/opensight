@@ -7,12 +7,14 @@
 // - Shots are numbered, buffered and indicated to the app until it confirms them
 // - The onboard LED shows status only: pairing mode, a PIN reset, shots
 // - Sensor name and pairing PIN stored in flash, changeable over BLE
+// - Capture of the comparator lines (capture.cpp): events and commands on the serial port
 #include <Arduino.h>
 #include <Preferences.h>
 #include <math.h>
 #include "config.h"
 #include "protocol.h"
 #include "ble_link.h"
+#include "capture.h"
 
 static Preferences prefs;
 static char sensorName[NAME_MAX_LEN + 1];
@@ -201,7 +203,22 @@ static void handleBleWrites() {
   }
 }
 
+// Serial commands, one per line (see captureCommand).
+static void pollSerial() {
+  static char line[64];
+  static size_t len = 0;
+  while (Serial.available()) {
+    int c = Serial.read();
+    if (c == '\r' || c == '\n') {
+      if (len) { line[len] = 0; captureCommand(line); len = 0; }
+    } else if (len < sizeof line - 1) {
+      line[len++] = (char)c;
+    }
+  }
+}
+
 void setup() {
+  Serial.setTxBufferSize(2048);   // event lines go out without blocking loop()
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
@@ -218,6 +235,7 @@ void setup() {
     prefs.putString("gatt", GATT_BUILD_ID);
     Serial.println("New firmware: told bonded computers to re-read the services");
   }
+  captureBegin();   // after BLE: the DMA ring takes 64 KB
 }
 
 void loop() {
@@ -227,6 +245,8 @@ void loop() {
   pollButton(now);
   handleBleWrites();
   serviceShots(now);
+  captureService(now);
+  pollSerial();
 
   if (pairing && (bleTakeNewBond() || (int32_t)(now - pairingEnd) >= 0)) setPairing(false);
 

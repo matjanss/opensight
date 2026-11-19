@@ -23,6 +23,13 @@ app could misread new firmware or the reverse.
 
 ## Firmware
 
+- Measuring shots: `firmware/MEASUREMENT.md` is the plan (steps, each ending in a bench
+  test) and the record of bench results. Read it before working on measurement; update its
+  step status and results in the same commit as the code.
+- `capture.cpp`: I2S0 in camera mode samples the 16 comparator lines into a DMA ring
+  (register level: IDF 5 has no driver for it); an IRAM interrupt scans each finished
+  block, a task on core 1 extracts the edges, and `loop()` prints them. Serial commands
+  (`help`) set the channel mask and dead time and run the self-test on CH8's pins.
 - `main.cpp`: button (short press = test shot, 2 s hold = pairing mode, 10 s hold = PIN
   reset), heartbeat, name and PIN in NVS (namespace `"sensor"`), the status LED (pairing blink, PIN reset, shot flash; the app can't switch it), and the shot
   buffer: the last 64 shots, indicated one at a time until the app confirms each
