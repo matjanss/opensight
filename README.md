@@ -5,6 +5,7 @@ An ESP32 (NodeMCU-32S) that talks Bluetooth LE to a desktop app written in Rust.
 - **firmware/** — PlatformIO project for the ESP32
 - **app/** — Rust/egui desktop app (Linux, macOS, Windows)
 - **protocol/PROTOCOL.md** — the BLE protocol both sides implement
+- **hardware/** — KiCad projects for the sensor hardware
 
 Open `opensights.code-workspace` in VS Code: PlatformIO picks up `firmware/` and
 rust-analyzer picks up `app/`.
@@ -23,6 +24,15 @@ rust-analyzer picks up `app/`.
 - The app remembers the sensor and reconnects to it automatically.
 - Pairing needs the sensor's 6-digit PIN (`000000` at first), which you can change from
   the app. Forgot it? Hold BOOT for 10 s: the PIN is reset and all computers are unpaired.
+
+## Hardware
+
+[hardware/acoustic-sensor/](hardware/acoustic-sensor/) is the first measuring board: one
+acoustic channel with a MEMS microphone, a preamp, and two comparator thresholds,
+connected to the host board through a 5-pin JST XH connector. Its
+[README](hardware/acoustic-sensor/README.md) describes the board, the files and the checks
+to do before ordering. The [schematic PDF](hardware/acoustic-sensor/mic_board_schematic.pdf)
+can be read without KiCad. Open the project with KiCad 10 or newer.
 
 ## Getting started
 

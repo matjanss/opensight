@@ -1,4 +1,4 @@
-# Mic sensor board v0.2 (one acoustic channel)
+# Mic sensor board v0.3 (one acoustic channel)
 
 GTA2718B-3 bottom-port MEMS mic → TLV9062 two-stage preamp (×6.3–17.7, ×12 at RV1 mid-travel, three 16 kHz high-pass poles) → TLV3202 dual comparator (VTH_L / VTH_H) → J1 to the host board.
 
