@@ -44,8 +44,6 @@ setup uses the same map, so nothing changes when the host board arrives.
 
 | Stage | Runs on | Does | Output |
 |---|---|---|---|
-| 2026-11-20 | 1 | Break-it: `mask 03` floating, then CH1 jumpered, then a finger on CH1 with `verbose on`, app connected | Floating inputs alone stay quiet (no events). Jumper GPIO 19 → CH1: CH1 had edges with CH8, PASS (other lines are a note, not a failure). Finger: a stream of events, heartbeat kept coming, **test shots didn't**: `loop()` printed every queued event and blocked on the UART once the 2 KB buffer was full, so the button was sampled too rarely to see a short press. Events are now printed only while they fit in the serial buffer (the rest wait in the queue, or count as not printed), transitions only with room to spare. Retest 15. |
-| 2026-11-20 | 1 | `selftest 1050 100` | PASS: 54 at 1000 ns, 46 at 1100, mean 1046.0 (rounding alone: ±5 ns over 100), L in all four quarters, 0 split across blocks (expected 0.5). Correct, but the summary read as wrong ("0 exact", mean ≠ set). It now says that a gap between two samples can only read as either, gives the expected share, the mean's rounding error (flags a mean more than 3× off: pulses locked to the sample clock) and the expected number of split pairs. |
 | I2S parallel capture | DMA | Samples the 16 lines at ~10 MHz into a ring of ~64 KB (~3 ms) | 16-bit samples |
 | Activity scan | DMA end-of-block interrupt (IRAM) | ORs each finished block; on activity, marks the event window and freezes the ring around it | Event window |
 | Edge extraction | Measurement task, core 1 | First rising edge per line in the window, plus pulse length | t1 (L), t2 (H) per channel |
@@ -70,7 +68,7 @@ so a problem shows up in the step that caused it.
 
 | # | Step | Status |
 |---|---|---|
-| 1 | Capture and raw dump | done (bench test 5); extra tests (block boundaries, long gaps, short pulses) pending |
+| 1 | Capture and raw dump | done: bench tests 1-8, extra tests 9-13 and break-it tests 14-15 pass |
 | 2 | Arrival times | planned |
 | 3 | Solver and calibration | planned |
 | 4 | Validity checks | planned |
@@ -251,6 +249,9 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-20 | 1 | Extra and break-it tests after the boundary, summary and serial fixes | All pass (user report). Pin map of CH1/CH2 (GPIO 36, 39, 34, 35) confirmed with jumpers from GPIO 19, so all 16 lines are now checked except CH5-CH7, which go through the same routing. Flood with a finger on CH1, `deadtime 1`, `verbose on`: test shots and heartbeat reach the app, commands work. Step 1 closed; step 2 waits for the sensor boards. |
+| 2026-11-20 | 1 | Break-it: `mask 03` floating, then CH1 jumpered, then a finger on CH1 with `verbose on`, app connected | Floating inputs alone stay quiet (no events). Jumper GPIO 19 → CH1: CH1 had edges with CH8, PASS (other lines are a note, not a failure). Finger: a stream of events, heartbeat kept coming, **test shots didn't**: `loop()` printed every queued event and blocked on the UART once the 2 KB buffer was full, so the button was sampled too rarely to see a short press. Events are now printed only while they fit in the serial buffer (the rest wait in the queue, or count as not printed), transitions only with room to spare. Retest 15. |
+| 2026-11-20 | 1 | `selftest 1050 100` | PASS: 54 at 1000 ns, 46 at 1100, mean 1046.0 (rounding alone: ±5 ns over 100), L in all four quarters, 0 split across blocks (expected 0.5). Correct, but the summary read as wrong ("0 exact", mean ≠ set). It now says that a gap between two samples can only read as either, gives the expected share, the mean's rounding error (flags a mean more than 3× off: pulses locked to the sample clock) and the expected number of split pairs. |
 | 2026-11-20 | 1 | Span 600, long gap | **Capture bug found:** `CH8 -/0, CH8 L was already high at window start`. The activity scan looked at each block on its own, so an edge exactly between two blocks (low all through one, high all through the next) was invisible; the window then opened at the next activity (H, ≥ 2 blocks later) and started after L. About 1 in 2000 edges; only possible to hit once pulses landed at random points in a block. The scan now folds in the previous block's last sample. `stat` counts events with a line already high at window start (should stay 0). |
 | 2026-11-20 | 1 | Extra test 11 (long gaps) | 500 µs and 750 µs (12.5 ns ticks): 20 of 20 each, exact, all pairs split across blocks, L in all four quarters: PASS. 1 ms (25 ns ticks): only the first pulse pair of each run came out (1 of 20, 1 of 100), and that one was exact: the MCPWM one-shot restart from the peak failed at that prescale, not the capture. The count is now reset to 0 (soft sync) before each start. Retest 11. |
 | 2026-11-20 | 1 | Phase check, app connected, 20 + 100 + 300 pulses, 2 renames, 31 test shots | 1000 ns: 20 exact. 1050 ns with the random start: 37 % then 51 % rounded up (189 of 400 = 47 %), mean 1050.7 over 300: the capture resolves gaps finer than a sample when averaged. All within one sample, nothing missed. But every pulse landed at the same point in its DMA block (timestamps …4698): block boundaries, the trigger block's end and long gaps were untested; extra tests 9-13 added. |
