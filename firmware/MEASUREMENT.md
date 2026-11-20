@@ -68,7 +68,7 @@ so a problem shows up in the step that caused it.
 
 | # | Step | Status |
 |---|---|---|
-| 1 | Capture and raw dump | **done** (bench test 5) |
+| 1 | Capture and raw dump | done (bench test 5); extra tests (block boundaries, long gaps, short pulses) pending |
 | 2 | Arrival times | planned |
 | 3 | Solver and calibration | planned |
 | 4 | Validity checks | planned |
@@ -142,6 +142,18 @@ Bench test (bare NodeMCU, no sensor boards needed). Flash, then open the monitor
    pulses 50 ms apart show up 50 ms apart). Note the interrupt load, the longest freeze
    and the free DMA memory in Bench results.
 8. `span 600` then `selftest 1000 3`: the window covers 2.4 ms; `span 300` back.
+
+Extra tests (each pulse pair lands at a random point in its DMA block; the summary counts
+L per quarter of the block and pairs with L and H in different blocks):
+9. `selftest 1000 400`: L spread over all four quarters, PASS.
+10. `selftest 150000 200`: L and H in different blocks in most pairs (H 150 µs later),
+    PASS.
+11. Long gaps up to the window: `selftest 1000000 100`, then the largest gap `selftest`
+    accepts (it prints the limit when asked for more, e.g. `selftest 2000000`). PASS.
+12. Short pulses: `selftest 0 200 100`, `selftest 300 200 200`, `selftest 1000 200 500`
+    (gap, count, H pulse length in ns). Every pair seen, lengths right, PASS.
+13. Soak with the app connected: `selftest 1050 1000` (about 50 s) with renames and test
+    shots during it. About 50 % rounded up, PASS; `stat` after.
 
 Done when: every pulse shows up once, at the right time, on the right line, with BLE busy.
 
@@ -225,6 +237,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-20 | 1 | Phase check, app connected, 20 + 100 + 300 pulses, 2 renames, 31 test shots | 1000 ns: 20 exact. 1050 ns with the random start: 37 % then 51 % rounded up (189 of 400 = 47 %), mean 1050.7 over 300: the capture resolves gaps finer than a sample when averaged. All within one sample, nothing missed. But every pulse landed at the same point in its DMA block (timestamps …4698): block boundaries, the trigger block's end and long gaps were untested; extra tests 9-13 added. |
 | 2026-11-20 | 1 | Retest 4 (MCPWM generator), app connected, 20 + 300 pulses, 2 renames, 30 test shots | **Pass.** 1000 ns: 20 of 20 exact. 1050 ns: 300 of 300 at 1000 or 1100, none further off, nothing missed, through heartbeats, renames and shots; the 4100 ns pulses are gone, so they were the CPU generator, not the capture. Mean 1018 instead of ~1050: the generator, sample clock and CPU share one crystal, so the pulses started at almost the same point within a sample (timestamps all …856); random 0-200 ns start delay added. Step 1 done. |
 | 2026-11-20 | 1 | Retest 3, app connected, 200 pulses, 2 renames, 3 test shots | With `memw` the read-back ranges were narrow (≤ 267 ns), and showed the CPU generator really making ~150 ns gaps for a set 1000 ns while it read its pins back; the capture agreed (100/200 ns). At three heartbeat times the read-back said ~150 ns and the capture 4100 ns: undecided which is wrong. A CPU generator that changes when checked can't settle that, so the self-test now uses MCPWM (hardware-timed gap). Retest. |
 | 2026-11-20 | 1 | Retest 2, app connected, 400 pulses, 2 renames, 18 test shots | Checker passed a broken generator: gaps captured 100-200 ns for a set 1000 ns, yet PASS. Without a barrier, the read-back loop held the write of L up by ~0.85 µs, and each edge's range was then ~1 µs wide, so every gap fit. Fixed with `memw` after each pin write; ranges over 300 ns no longer count as verified, and ≥ 95 % must be. Every 40th pulse (2 s: the heartbeat's BLE notification) the generator is ~3 µs late. Time base still right: 10.000 MHz, 420 events, interrupt 9.0 %, longest freeze 1.0 ms. Retest. |

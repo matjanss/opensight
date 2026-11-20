@@ -295,7 +295,9 @@ static void measureTask(void*) {
 // is set by hardware in 12.5 ns steps and BLE, flash writes or the CPU's write buffer
 // can't change it (a CPU-driven generator could, bench tests 1-4). The CPU only starts
 // the timer once per pulse pair.
-static const uint32_t GEN_HZ = 80000000;   // 12.5 ns per tick
+// Tick rate: the finest of these whose 16-bit period still holds the pulse pair.
+static const uint32_t GEN_HZ_CHOICES[] = {80000000, 40000000, 20000000, 10000000};
+static const uint32_t SELFTEST_PULSE_MIN_NS = NS_PER_SAMPLE;   // shorter can fall between samples
 
 static struct {
   bool     active;
@@ -304,7 +306,12 @@ static struct {
   int32_t  effGapNs;         // the gap the hardware makes: gapNs rounded to whole ticks
   int32_t  gapMin, gapMax;
   int64_t  gapSum;
+  uint32_t genHz;            // MCPWM tick rate for this run
+  uint32_t pulseNs;          // OUT_H pulse length; OUT_L is gapNs longer
   uint32_t timed;            // events with both rising edges
+  uint32_t straddle;         // events with L and H in different DMA blocks
+  uint32_t badLength;        // events whose pulse lengths were off
+  uint32_t blockPos[4];      // L's position within its block, in quarters
   uint32_t exact, roundedDown, roundedUp, outside;
   uint32_t otherLines[LINES];
 } st;
@@ -334,13 +341,12 @@ static void genDelete() {
 // One timer, one operator per line. L rises at tick 1, H gapTicks later; both fall
 // together at the end of the pulse, like a comparator pair on a real edge. Each
 // MCPWM_TIMER_START_STOP_FULL runs the timer through one period: one pulse pair.
-static bool genCreate(uint32_t gapTicks) {
-  const uint32_t pulseTicks = (uint64_t)SELFTEST_PULSE_US * GEN_HZ / 1000000;
+static bool genCreate(uint32_t hz, uint32_t gapTicks, uint32_t pulseTicks) {
   const uint32_t riseL = 1, riseH = 1 + gapTicks, fall = riseH + pulseTicks;
   mcpwm_timer_config_t tc = {};
   tc.group_id = 0;
   tc.clk_src = MCPWM_TIMER_CLK_SRC_DEFAULT;
-  tc.resolution_hz = GEN_HZ;
+  tc.resolution_hz = hz;
   tc.count_mode = MCPWM_TIMER_COUNT_MODE_UP;
   tc.period_ticks = fall + 100;
   if (mcpwm_new_timer(&tc, &genTimer) != ESP_OK) return false;
@@ -384,14 +390,31 @@ static void selftestPinsToInputs() {
   }
 }
 
-static void selftestStart(uint32_t gapNs, uint32_t count) {
+static uint32_t toTicks(uint32_t ns, uint32_t hz) {
+  return (uint32_t)(((uint64_t)ns * hz + 500000000) / 1000000000);
+}
+
+static void selftestStart(uint32_t gapNs, uint32_t count, uint32_t pulseNs) {
   if (st.active) { Serial.println("selftest: already running"); return; }
-  if (gapNs > 100000 || count < 1 || count > 1000) {
-    Serial.println("selftest: gap 0..100000 ns, count 1..1000");
+  if (count < 1 || count > 1000 || pulseNs < SELFTEST_PULSE_MIN_NS || pulseNs > 100000) {
+    Serial.printf("selftest: count 1..1000, pulse %u..100000 ns\n",
+                  (unsigned)SELFTEST_PULSE_MIN_NS);
     return;
   }
-  const uint32_t gapTicks = (uint32_t)(((uint64_t)gapNs * GEN_HZ + 500000000) / 1000000000);
-  if (!genCreate(gapTicks)) {
+  // The whole H pulse must be inside the window wherever L falls in the trigger block.
+  const uint32_t maxGapNs = coveredUs(postBlocks) * 1000 - pulseNs - NS_PER_SAMPLE;
+  if (gapNs > maxGapNs) {
+    Serial.printf("selftest: gap 0..%u ns with this pulse length and mic span (the window)\n",
+                  (unsigned)maxGapNs);
+    return;
+  }
+  uint32_t hz = 0, gapTicks = 0, pulseTicks = 0;
+  for (uint32_t c : GEN_HZ_CHOICES) {
+    gapTicks = toTicks(gapNs, c);
+    pulseTicks = toTicks(pulseNs, c);
+    if (1 + gapTicks + pulseTicks + 100 <= 65535 && pulseTicks >= 1) { hz = c; break; }
+  }
+  if (!hz || !genCreate(hz, gapTicks, pulseTicks)) {
     genDelete();
     selftestPinsToInputs();
     Serial.println("selftest: could not set up the MCPWM pulse generator");
@@ -400,7 +423,9 @@ static void selftestStart(uint32_t gapNs, uint32_t count) {
   memset(&st, 0, sizeof st);
   st.active = true;
   st.gapNs = gapNs;
-  st.effGapNs = (int32_t)((uint64_t)gapTicks * 1000000000 / GEN_HZ);
+  st.genHz = hz;
+  st.effGapNs = (int32_t)((uint64_t)gapTicks * 1000000000 / hz);
+  st.pulseNs = (uint32_t)((uint64_t)pulseTicks * 1000000000 / hz);
   st.count = count;
   st.gapMin = INT32_MAX;
   st.gapMax = INT32_MIN;
@@ -410,8 +435,9 @@ static void selftestStart(uint32_t gapNs, uint32_t count) {
   savedMask = channelMask;
   applyMask(channelMask | 0x80);   // CH8 for the duration, not stored
   Serial.printf("selftest: %u pulse pairs from MCPWM on CH8 (GPIO %d L, %d H), H %d ns after "
-                "L, every %u ms\n", (unsigned)count, SELFTEST_PIN_L, SELFTEST_PIN_H,
-                (int)st.effGapNs, (unsigned)st.spacingMs);
+                "L, H %u ns long, %.1f ns ticks, every %u ms, at random points in the DMA "
+                "blocks\n", (unsigned)count, SELFTEST_PIN_L, SELFTEST_PIN_H, (int)st.effGapNs,
+                (unsigned)st.pulseNs, 1e9 / hz, (unsigned)st.spacingMs);
 }
 
 static void selftestRecord(const EventResult& r) {
@@ -419,9 +445,21 @@ static void selftestRecord(const EventResult& r) {
   const LineResult& L = r.line[LINE_ST_L];
   const LineResult& H = r.line[LINE_ST_H];
   if (L.edges != 2 || H.edges != 2) st.glitches++;
+  // Both fall together: H lasts pulseNs, L gap + pulseNs, to within one sample.
+  if (L.rise >= 0 && L.fall >= 0 && H.rise >= 0 && H.fall >= 0) {
+    int32_t lenH = (int32_t)(H.fall - H.rise) * (int32_t)NS_PER_SAMPLE;
+    int32_t fallD = (int32_t)(H.fall - L.fall) * (int32_t)NS_PER_SAMPLE;
+    if (abs(lenH - (int32_t)st.pulseNs) > (int32_t)NS_PER_SAMPLE || abs(fallD) > (int32_t)NS_PER_SAMPLE) {
+      st.badLength++;
+      Serial.printf("selftest: evt %u: H %d ns long (set %u), falls %d ns from L\n",
+                    (unsigned)r.number, (int)lenH, (unsigned)st.pulseNs, (int)fallD);
+    }
+  }
   if (L.rise >= 0 && H.rise >= 0) {
     int32_t gap = (int32_t)(H.rise - L.rise) * (int32_t)NS_PER_SAMPLE;
     st.timed++;
+    if (L.rise / SAMPLES_PER_BLOCK != H.rise / SAMPLES_PER_BLOCK) st.straddle++;
+    st.blockPos[(L.rise % SAMPLES_PER_BLOCK) * 4 / SAMPLES_PER_BLOCK]++;
     st.gapSum += gap;
     if (gap < st.gapMin) st.gapMin = gap;
     if (gap > st.gapMax) st.gapMax = gap;
@@ -462,6 +500,10 @@ static void selftestFinish() {
                   (unsigned)st.roundedDown, (unsigned)st.roundedUp,
                   100.0 * st.roundedUp / st.timed, (int)(frac * 100 / (int32_t)NS_PER_SAMPLE),
                   (unsigned)st.outside);
+    Serial.printf("selftest: L in the 1st/2nd/3rd/4th quarter of its DMA block: %u/%u/%u/%u; "
+                  "%u with L and H in different blocks\n", (unsigned)st.blockPos[0],
+                  (unsigned)st.blockPos[1], (unsigned)st.blockPos[2], (unsigned)st.blockPos[3],
+                  (unsigned)st.straddle);
   }
   if (st.glitches)
     Serial.printf("selftest: %u events with extra or missing transitions on CH8\n",
@@ -473,8 +515,10 @@ static void selftestFinish() {
                   (l & 1) ? 'H' : 'L', (unsigned)st.otherLines[l]);
     others = true;
   }
+  if (st.badLength)
+    Serial.printf("selftest: %u events with wrong pulse lengths\n", (unsigned)st.badLength);
   bool pass = st.seen == st.count && st.timed == st.seen && missed == 0 && st.glitches == 0 &&
-              st.outside == 0;
+              st.outside == 0 && st.badLength == 0;
   Serial.printf("selftest: %s%s\n", pass ? "PASS" : "FAIL",
                 others ? " (other lines had edges: a jumper, or floating inputs)" : "");
 }
@@ -486,6 +530,9 @@ static void selftestService(uint32_t now) {
     if (evState != EV_IDLE) return;   // wait for the previous event to finish
     // CPU, MCPWM and sample clock all run off one crystal, so without this every pulse
     // would start at the same point within a sample (bench test 5); real sound doesn't.
+    // ... and so that it lands anywhere in a DMA block, not at the same point every time
+    // (loop() runs on a 10 ms tick, a whole number of blocks).
+    delayMicroseconds(esp_random() % (2 * BLOCK_US));
     uint32_t wait = esp_random() % (2 * NS_PER_SAMPLE * getCpuFrequencyMhz() / 1000);
     uint32_t c0 = esp_cpu_get_cycle_count();
     while (esp_cpu_get_cycle_count() - c0 < wait) {}
@@ -730,8 +777,9 @@ void captureCommand(const char* line) {
                    "  span <mm>            largest distance between two mics; sets the event\n"
                    "                       window (stored)\n"
                    "  verbose on|off       list every transition of every line\n"
-                   "  selftest [ns] [n]    n pulses on CH8 (unplugged!), OUT_H ns after OUT_L\n"
-                   "                       (default 1000 ns, 20 pulses)");
+                   "  selftest [ns] [n] [pulse]  n pulse pairs on CH8 (unplugged!), OUT_H ns\n"
+                   "                       after OUT_L, OUT_H pulse ns long (default 1000 ns,\n"
+                   "                       20 pairs, 10000 ns)");
   } else if (!running) {
     Serial.println("capture is not running (see the start-up messages)");
   } else if (!strcmp(cmd, "stat")) {
@@ -766,8 +814,9 @@ void captureCommand(const char* line) {
     Serial.printf("verbose %s\n", verbose ? "on" : "off");
   } else if (!strcmp(cmd, "selftest")) {
     a = 1000; b = 20;
-    sscanf(line, "%*s %lu %lu", &a, &b);
-    selftestStart(a, b);
+    unsigned long c = SELFTEST_PULSE_US * 1000;
+    sscanf(line, "%*s %lu %lu %lu", &a, &b, &c);
+    selftestStart(a, b, c);
   } else {
     Serial.printf("unknown command '%s', type 'help'\n", cmd);
   }
