@@ -317,6 +317,7 @@ static struct {
 } st;
 
 static mcpwm_timer_handle_t genTimer = nullptr;
+static mcpwm_sync_handle_t  genSync = nullptr;   // resets the count to 0 before each pulse pair
 static mcpwm_oper_handle_t  genOper[2] = {};
 static mcpwm_cmpr_handle_t  genCmpr[2][2] = {};
 static mcpwm_gen_handle_t   genGen[2] = {};
@@ -325,6 +326,12 @@ static const int LINE_ST_L = 14, LINE_ST_H = 15;   // CH8 L, CH8 H
 
 static void genDelete() {
   if (genTimer) mcpwm_timer_disable(genTimer);
+  if (genTimer && genSync) {
+    mcpwm_timer_sync_phase_config_t ph = {};   // sync_src null: detach
+    mcpwm_timer_set_phase_on_sync(genTimer, &ph);
+  }
+  if (genSync) mcpwm_del_sync_src(genSync);
+  genSync = nullptr;
   for (int i = 0; i < 2; i++) {
     if (genGen[i]) mcpwm_del_generator(genGen[i]);
     for (int j = 0; j < 2; j++)
@@ -350,6 +357,15 @@ static bool genCreate(uint32_t hz, uint32_t gapTicks, uint32_t pulseTicks) {
   tc.count_mode = MCPWM_TIMER_COUNT_MODE_UP;
   tc.period_ticks = fall + 100;
   if (mcpwm_new_timer(&tc, &genTimer) != ESP_OK) return false;
+  // A one-shot start from where the last one stopped (the peak) only made a pulse pair the
+  // first time at 25 ns ticks (bench); reset the count to 0 before each start instead.
+  mcpwm_soft_sync_config_t sc = {};
+  if (mcpwm_new_soft_sync_src(&sc, &genSync) != ESP_OK) return false;
+  mcpwm_timer_sync_phase_config_t ph = {};
+  ph.sync_src = genSync;
+  ph.count_value = 0;
+  ph.direction = MCPWM_TIMER_DIRECTION_UP;
+  if (mcpwm_timer_set_phase_on_sync(genTimer, &ph) != ESP_OK) return false;
   const int pins[2] = {SELFTEST_PIN_L, SELFTEST_PIN_H};
   const uint32_t rise[2] = {riseL, riseH};
   for (int i = 0; i < 2; i++) {
@@ -536,6 +552,7 @@ static void selftestService(uint32_t now) {
     uint32_t wait = esp_random() % (2 * NS_PER_SAMPLE * getCpuFrequencyMhz() / 1000);
     uint32_t c0 = esp_cpu_get_cycle_count();
     while (esp_cpu_get_cycle_count() - c0 < wait) {}
+    mcpwm_soft_sync_activate(genSync);                               // count to 0
     mcpwm_timer_start_stop(genTimer, MCPWM_TIMER_START_STOP_FULL);   // one pulse pair
     st.sent++;
     st.nextAt = now + st.spacingMs;
