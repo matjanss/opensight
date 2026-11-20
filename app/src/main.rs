@@ -6,7 +6,7 @@ mod ble;
 mod card;
 mod protocol;
 
-use std::sync::mpsc;
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
@@ -39,16 +39,44 @@ const KEY_CLOSE_CALLS: &str = "close_calls";
 const KEY_CLOSE_CALL_MM: &str = "close_call_mm";
 const KEY_REPLAY_DELAY: &str = "replay_delay_s";
 
+/// The window and taskbar icon (assets/icon/). None if the PNG can't be read: the
+/// window then gets the system's default icon.
+fn app_icon() -> Option<Arc<egui::IconData>> {
+    static ICON: OnceLock<Option<Arc<egui::IconData>>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/png/opensights-icon-256.png"))
+            .ok()
+            .map(Arc::new)
+    })
+    .clone()
+}
+
+/// The app's name for the system: eframe's storage directory, and on Linux the window's
+/// app id (Wayland) and class (X11). Wayland ignores window icons: the dock takes the icon
+/// from the .desktop file of the same name (linux/opensights-app.desktop).
+const APP_ID: &str = "opensights-app";
+
+/// A viewport with the app id and the app icon, if there is one.
+fn with_app_icon(builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+    let builder = builder.with_app_id(APP_ID);
+    match app_icon() {
+        Some(icon) => builder.with_icon(icon),
+        None => builder,
+    }
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([900.0, 640.0])
-            .with_min_inner_size([360.0, 420.0])
-            .with_title("OpenSights"),
+        viewport: with_app_icon(
+            egui::ViewportBuilder::default()
+                .with_inner_size([900.0, 640.0])
+                .with_min_inner_size([360.0, 420.0])
+                .with_title("OpenSights"),
+        ),
         ..Default::default()
     };
     eframe::run_native(
-        "opensights-app",
+        APP_ID,
         options,
         Box::new(|cc| {
             install_fonts(&cc.egui_ctx);
@@ -842,10 +870,12 @@ impl eframe::App for SensorApp {
         if self.settings_open {
             ctx.show_viewport_immediate(
                 egui::ViewportId::from_hash_of("settings"),
-                egui::ViewportBuilder::default()
-                    .with_title("OpenSights · Settings")
-                    .with_inner_size([460.0, 640.0])
-                    .with_min_inner_size([360.0, 420.0]),
+                with_app_icon(
+                    egui::ViewportBuilder::default()
+                        .with_title("OpenSights · Settings")
+                        .with_inner_size([460.0, 640.0])
+                        .with_min_inner_size([360.0, 420.0]),
+                ),
                 |ui, _| {
                     if ui.input(|i| i.viewport().close_requested()) {
                         self.settings_open = false;
@@ -2233,5 +2263,12 @@ mod tests {
         assert_eq!(nice_step(40.0, 4), 10.0);
         assert_eq!(nice_step(10.0, 8), 2.0); // one ring in tenths: 0.2 apart
         assert_eq!(nice_step(60.0, 8), 10.0); // six rings: one apart
+    }
+
+    #[test]
+    fn app_icon_loads() {
+        let icon = app_icon().expect("the embedded icon PNG decodes");
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
     }
 }

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=OpenSights
+Comment=Electronic target: shows your shots
+Exec=opensights-app
+Icon=opensights-app
+Terminal=false
+Categories=Utility;
+StartupWMClass=opensights-app
