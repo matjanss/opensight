@@ -23,7 +23,11 @@
   ```sh
   install -Dm644 opensights-app.desktop ~/.local/share/applications/opensights-app.desktop
   install -Dm644 opensights-icon-256.png ~/.local/share/icons/hicolor/256x256/apps/opensights-app.png
+  # only if ~/.local/share/icons/hicolor/icon-theme.cache exists (another app made it):
+  gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor
   ```
+
+  A stale `icon-theme.cache` hides the new icon: GTK and GNOME Shell trust the cache as long as it is newer than the `hicolor` folder itself, and adding a file to a subfolder doesn't change that folder's time. Then log out and in.
 
   `Exec=opensights-app` expects the binary on `PATH` (e.g. `~/.local/bin`); for a build from source, point it at `app/target/release/opensights-app`.
 
