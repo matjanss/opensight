@@ -13,13 +13,11 @@
 | `opensights.icns` | macOS, made from the inset master |
 | `make.py` | Regenerates everything (needs fontTools, cairosvg, Pillow, and fonts-ibm-plex for IBMPlexSans-Bold.ttf) |
 
-## Hooking it up in the app (for Claude Code)
+## Where it is used
 
-Suggested place: `app/assets/icon/`.
+- **Window and taskbar icon (all platforms):** `app_icon()` in `src/main.rs` loads `png/opensights-icon-256.png` (compiled in) for the main window and the settings window. If the PNG can't be decoded the windows get the system's default icon; a test checks that it decodes.
+- **macOS bundle:** `.github/workflows/build.yml` copies `opensights.icns` to `OpenSights.app/Contents/Resources/` before `codesign`; `macos/Info.plist` has `CFBundleIconFile` = `opensights`.
+- **Windows .exe icon:** `build.rs` embeds `opensights.ico` with `winresource` (a Windows-only build dependency), so Explorer and shortcuts show it.
+- **Linux:** the window icon covers the taskbar. A `.desktop` file with the 256 or 512 px PNG would only be needed for a menu entry; there is none yet.
 
-- **Window and taskbar icon (all platforms):** in `main.rs`, add `.with_icon(...)` to the main `ViewportBuilder`. Use `eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/png/opensights-icon-256.png"))`, which returns a `Result`; unwrap it or fall back to no icon.
-- **macOS bundle:**
-  - In `.github/workflows/build.yml`, copy `opensights.icns` to `OpenSights.app/Contents/Resources/` before `codesign`.
-  - In `app/macos/Info.plist`, add `CFBundleIconFile` = `opensights`.
-- **Windows .exe icon:** add a `build.rs` that embeds `opensights.ico` with the `winresource` crate, as a Windows-only build dependency. Without it, Explorer shows the default icon, although the window icon still works.
-- **Linux:** the window icon covers the taskbar. A `.desktop` file with the 256 or 512 px PNG is only needed for a menu entry.
+After changing the icon, run `make.py`; the app picks up the new PNG and .ico on the next build.

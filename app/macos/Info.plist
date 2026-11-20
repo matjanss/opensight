@@ -10,6 +10,8 @@
     <string>OpenSights</string>
     <key>CFBundleIdentifier</key>
     <string>io.github.matjanss.opensight</string>
+    <key>CFBundleIconFile</key>
+    <string>opensights</string>
     <key>CFBundleExecutable</key>
     <string>opensights-app</string>
     <key>CFBundlePackageType</key>

@@ -23,3 +23,7 @@ libdbus-sys = { version = "0.2", features = ["vendored"] }
 # The pairing agent (src/agent.rs). Same versions btleplug already uses.
 dbus = "0.9"
 dbus-tokio = "0.7"
+
+# Embeds assets/icon/opensights.ico in the .exe (build.rs), so Explorer shows the icon.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

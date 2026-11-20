@@ -79,3 +79,6 @@ app could misread new firmware or the reverse.
   saved with eframe's storage.
   Grayscale styling, IBM Plex Sans embedded from `assets/fonts/`; emoji come from egui's
   monochrome emoji fonts (`monochrome_emoji_fonts`), not the system's color emoji.
+- App icon: `assets/icon/` (see its README): the PNG is the window icon of every viewport
+  (`with_app_icon` in `main.rs`), `build.rs` embeds the .ico in the Windows .exe, and the
+  release workflow puts the .icns in the macOS bundle.

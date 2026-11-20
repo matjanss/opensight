@@ -83,6 +83,8 @@ jobs:
             target/aarch64-apple-darwin/release/opensights-app \
             target/x86_64-apple-darwin/release/opensights-app
           sed "s/VERSION/${VERSION#v}/g" macos/Info.plist > "$app/Contents/Info.plist"
+          mkdir -p "$app/Contents/Resources"
+          cp assets/icon/opensights.icns "$app/Contents/Resources/"
           # Ad-hoc signature (no Apple developer account): seals Info.plist, which macOS
           # needs to ask for the Bluetooth permission.
           codesign --force --deep --sign - "$app"
