@@ -42,7 +42,15 @@ const int      CAPTURE_CLK_PIN        = 5;
 const uint32_t CAPTURE_SAMPLE_HZ      = 10000000;   // 100 ns per sample
 const int      CAPTURE_BLOCK_BYTES    = 4000;       // per DMA descriptor: 2000 samples, 200 us
 const int      CAPTURE_RING_BLOCKS    = 16;         // ring: 64 KB, 3.2 ms
-const uint32_t CAPTURE_WINDOW_US      = 1200;       // event window after the first activity
+// The event window must hold every mic's first edge. Sound reaches two mics at most
+// (distance between them) / (speed of sound) apart, wherever the shot lands, so the window
+// follows from the largest distance between two mics (the diagonal for corner mics). It is
+// a setting (serial `span`, stored in NVS; later an app setting, see MEASUREMENT.md step 5).
+// Default: corner mics just outside a 200 x 200 mm card, about 210 mm apart: 300 mm.
+const uint32_t CAPTURE_SPAN_MM_DEFAULT = 300;
+const uint32_t SOUND_SPEED_MIN_M_S     = 331;   // at 0 degC: the slowest the window allows for
+const uint32_t CAPTURE_WINDOW_MARGIN_PCT = 20;  // on top of span / speed of sound
+const uint32_t CAPTURE_WINDOW_EXTRA_US = 100;   // comparator delay on a quiet far mic, pulse end
 // The I2S FIFO packs two 16-bit samples per 32-bit word. esp32-camera reads the earlier
 // sample from the high half; the self-test shows extra transitions if this is wrong.
 const bool     CAPTURE_HIGH_HALF_FIRST = true;

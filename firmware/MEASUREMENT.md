@@ -45,7 +45,7 @@ setup uses the same map, so nothing changes when the host board arrives.
 | Stage | Runs on | Does | Output |
 |---|---|---|---|
 | I2S parallel capture | DMA | Samples the 16 lines at ~10 MHz into a ring of ~64 KB (~3 ms) | 16-bit samples |
-| Activity scan | DMA end-of-block interrupt (IRAM) | ORs each finished block; on activity, marks a 1.2 ms window | Event window |
+| Activity scan | DMA end-of-block interrupt (IRAM) | ORs each finished block; on activity, marks the event window and freezes the ring around it | Event window |
 | Edge extraction | Measurement task, core 1 | First rising edge per line in the window, plus pulse length | t1 (L), t2 (H) per channel |
 | Arrival times | Measurement task | t0 = t1 − k·(t2 − t1) − offset per channel | t0 per channel |
 | Position solver | Measurement task | Time-difference fit over 4–8 mics, speed of sound from the DS18B20 | x, y in mm, residual |
@@ -83,8 +83,22 @@ Build:
   is register level, as esp32-camera and the ESP32 logic-analyzer projects do it. The
   sample clock comes from LEDC on GPIO 5 (spare, leave it unconnected) and is read back
   from the same pad as the I2S clock input.
-- Activity scan in the end-of-block interrupt; on activity, the measurement task copies a
-  1.2 ms window that starts a little before the first edge.
+- Activity scan in the end-of-block interrupt; on activity, the measurement task reads an
+  event window that starts one block (200 µs) before the first activity.
+- Window length from the **mic span**, the largest distance between two mics (the diagonal
+  for corner mics): sound reaches two mics at most span / speed of sound apart, wherever
+  the shot lands. The window covers span / 331 m/s (0 °C) + 20 % + 100 µs after the first
+  edge, rounded up to whole blocks; the first edge can be at the end of its block, so the
+  trigger block doesn't count. Serial `span <mm>`, stored in NVS. Default 300 mm: corner
+  mics just outside a 200 × 200 mm card (frame 250 × 250 mm), window 1.2 ms after the
+  first edge, 1.6 ms in all. Up to about 690 mm fits in the ring.
+- The ring freezes around each event, so a window can't be overwritten however long the
+  task is held up (a flash write stalls every task, but not the IRAM interrupt or the
+  DMA). At the trigger, the interrupt links the window's last descriptor to two spare
+  blocks that point to each other; the DMA keeps sampling into them until the task has
+  read the window and links the ring back in. Spare blocks still count as time. Activity
+  in a spare block after the dead time is printed as `MISSED`: a shot that came while
+  the previous event was still being read.
 - Edge extraction: XOR with the previous sample, then the changed bits; stop once every
   line has its first rising edge. Times in ns from the window start; block numbers from
   the DMA descriptors.
@@ -114,8 +128,12 @@ Bench test (bare NodeMCU, no sensor boards needed). Flash, then open the monitor
    only CH8 and the jumpered input have edges, at the same time as CH8 L. The floating
    inputs 34-39 may show noise unless they are tied to GND with a resistor or jumper.
 6. With the app connected: `selftest 1000 200` while changing the sensor name in the app
-   (an NVS write) and while shots go to the app. No lost events (`stat`).
-7. `stat`: note the interrupt load and the free DMA memory in Bench results.
+   (an NVS write) and while shots go to the app. 200 of 200 pulses, nothing `MISSED`.
+   `stat` shows how long the ring was frozen at most: normally under 1 ms, longer while
+   flash was written.
+7. `stat`: note the interrupt load, the longest freeze and the free DMA memory in Bench
+   results.
+8. `span 600` then `selftest 1000 3`: the window covers 2.4 ms; `span 300` back.
 
 Done when: every pulse shows up once, at the right time, on the right line, with BLE busy.
 
@@ -159,7 +177,7 @@ Done when: positions are within 0.2–0.5 mm after calibration.
 
 ### 4. Validity checks
 
-Build: in order, all channels within 1.2 ms; acoustic pulse shape (t2 − t1 in range, not
+Build: in order, all channels inside the window (a channel with no edge: reject); acoustic pulse shape (t2 − t1 in range, not
 identical on all channels); fit residual ≤ ~1.5 µs; inside the scoring area; loudness
 matches distance; edge sharpness; outside dead time. Every event is logged with its reject
 reason.
@@ -169,8 +187,11 @@ or electrical spikes, and real shots are accepted.
 
 ### 5. Protocol and app
 
-Raw-event message (t1/t2 or t0 per channel, fit residual, accept/reject reason),
-calibration-mode switch, reading and writing calibration data. Follows the repo's protocol
+Raw-event message (t1/t2 or t0 per channel, fit residual, accept/reject reason, and
+`MISSED` events so the shooter is told), calibration-mode switch, reading and writing
+calibration data. **The mic span becomes an app setting** (now serial `span`), with the
+frame geometry; once the calibration (step 3) knows the mic positions, the app can fill
+it in from them. Follows the repo's protocol
 rule (PROTOCOL.md, `protocol.h`, `protocol.rs` in one commit). The shot message stays as it
 is.
 
@@ -182,6 +203,9 @@ FUTURE_ARCHITECTURE.md step 2. Check the GPIO 36/39 erratum here (see Risks).
 
 - **I2S parallel capture on IDF 5:** register-level, untested here; settled by the step 1
   self-test. Fallback: MCPWM capture.
+- **Relinking descriptors while the DMA runs (ring freeze):** assumes the DMA reads a
+  descriptor's next link when it gets to it, as esp32-camera relies on. If not, the
+  self-test shows wrong or repeated windows; fallback: stop and restart the DMA.
 - **GPIO 36/39 (CH1):** ESP32 erratum: spurious pulses on these pins while Wi-Fi or ADC1
   is active. Not an issue with BLE only; check again in step 6.
 - **Edge shape, mic polarity, half-cycle-late trips, range noise:** can't be settled on

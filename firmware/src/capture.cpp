@@ -5,9 +5,13 @@
 //   --DMA--> ring of CAPTURE_RING_BLOCKS blocks --ISR--> activity scan per finished block
 //   --task notify--> measureTask: first edges of the event window --queue--> loop(): serial
 //
-// The ISR and everything it touches are in IRAM/DRAM, so it keeps running while flash is
-// written (NVS). The measurement task does not: a long flash write can stall it until the
-// ring has wrapped, and the event is then reported as lost.
+// The ring is frozen around each event: at the trigger the ISR links the window's last
+// descriptor to two spare blocks that point to each other, so once the window is full the
+// DMA keeps sampling into the spares and the window can't be overwritten, however long
+// the task takes (a flash write stalls it: the ISR and everything it touches are in
+// IRAM/DRAM and keep running, the task doesn't). The task links the ring back in when it
+// is done. Blocks into the spares still count as time; activity in them after the dead
+// time is reported as a possibly missed shot.
 #include "capture.h"
 #include <Preferences.h>
 #include "config.h"
@@ -34,13 +38,27 @@ static const int      SAMPLES_PER_BLOCK = CAPTURE_BLOCK_BYTES / 2;
 static const uint32_t NS_PER_SAMPLE     = 1000000000UL / CAPTURE_SAMPLE_HZ;
 static const uint32_t BLOCK_US          = (uint32_t)((uint64_t)SAMPLES_PER_BLOCK * 1000000 / CAPTURE_SAMPLE_HZ);
 static const int      PRE_BLOCKS        = 1;   // the block before the first activity
-static const int      POST_BLOCKS       = (CAPTURE_WINDOW_US + BLOCK_US - 1) / BLOCK_US;
-static const int      WINDOW_BLOCKS     = PRE_BLOCKS + POST_BLOCKS;
+// Blocks from the trigger block on. The window's last block must be at least 4 blocks after
+// the trigger (time for the ISR to relink it) and the window at most the ring.
+static const uint32_t POST_MIN          = 5;
+static const uint32_t POST_MAX          = CAPTURE_RING_BLOCKS - PRE_BLOCKS - 1;
 static const int      MAX_TRANSITIONS   = 16;  // per line and event, kept for verbose output
 
 static_assert(CAPTURE_BLOCK_BYTES % 4 == 0 && CAPTURE_BLOCK_BYTES <= 4092, "DMA block size");
-static_assert(CAPTURE_RING_BLOCKS >= WINDOW_BLOCKS + 4, "ring too short for the event window");
-static_assert(WINDOW_BLOCKS * SAMPLES_PER_BLOCK < 32768, "window indexes must fit 15 bits");
+static_assert(POST_MAX >= POST_MIN, "ring too short");
+static_assert((PRE_BLOCKS + POST_MAX) * SAMPLES_PER_BLOCK < 32768, "window indexes must fit 15 bits");
+
+// Time the window covers after the first edge for a mic span. The first edge can be at the
+// very end of the trigger block, so only the blocks after it count.
+static uint32_t neededUs(uint32_t spanMm) {
+  uint32_t us = spanMm * 1000 / SOUND_SPEED_MIN_M_S;   // mm / (m/s) = ms; * 1000 = us
+  return us + us * CAPTURE_WINDOW_MARGIN_PCT / 100 + CAPTURE_WINDOW_EXTRA_US;
+}
+static uint32_t postBlocksFor(uint32_t spanMm) {
+  uint32_t post = (neededUs(spanMm) + BLOCK_US - 1) / BLOCK_US + 1;
+  return post < POST_MIN ? POST_MIN : post;
+}
+static uint32_t coveredUs(uint32_t post) { return (post - 1) * BLOCK_US; }
 
 // ---- Event results (measureTask -> loop) ----
 
@@ -54,10 +72,10 @@ struct LineResult {
 
 struct EventResult {
   uint32_t number;
-  uint32_t firstBlock;   // absolute block number of window sample 0
+  uint32_t firstTime;    // window sample 0, in blocks since start (spare blocks included)
+  uint16_t blocks;       // window length in blocks
   uint16_t lines;        // line mask used for this event
   uint16_t highAtStart;  // lines already high at window start
-  bool     lost;         // the ring overwrote the window while it was read
   LineResult line[LINES];
 };
 
@@ -67,12 +85,24 @@ enum : uint8_t { EV_IDLE, EV_COLLECTING, EV_PROCESSING };
 
 static lldesc_t  desc[CAPTURE_RING_BLOCKS];
 static uint32_t* ring[CAPTURE_RING_BLOCKS];
-static volatile uint32_t blocksDone = 0;     // blocks completed since start (absolute)
-static uint32_t          lastDesc = CAPTURE_RING_BLOCKS - 1;
+static lldesc_t  spare[2];                   // the DMA's target while the ring is frozen
+static uint32_t* spareBuf[2];
+static uint32_t  descAddr0, spareAddr[2];    // as in_eof_des_addr reports them
+static volatile uint32_t blocksDone = 0;     // all blocks since start, spares included: time
+static volatile uint32_t ringDone = 0;       // ring blocks done; ring block k is ring[k % RING]
+static uint32_t          lastDesc = CAPTURE_RING_BLOCKS - 1;   // last ring descriptor counted
+static volatile uint32_t contigFrom = 0;     // ring blocks are continuous in time from here
 static volatile uint32_t lineMask32 = 0;     // fitted lines, in both 16-bit halves
+static volatile uint32_t postBlocks = POST_MIN;   // from the mic span setting
 static volatile uint8_t  evState = EV_IDLE;
-static volatile uint32_t trigBlock = 0;      // block with the first activity
-static volatile uint32_t quietUntil = 0;     // no new event before this block (dead time)
+static volatile uint32_t trigRing = 0;       // ring block with the first activity
+static volatile uint32_t trigTime = 0;       // ... and its time in blocks
+static volatile uint32_t evPost = 0;         // postBlocks of this event
+static volatile uint32_t endDesc = 0;        // ring descriptor of the window's last block
+static volatile uint32_t quietUntil = 0;     // no new event before this time (dead time)
+static volatile uint32_t spareBlocks = 0;    // blocks into the spares (frozen ring)
+static volatile uint32_t missedCount = 0;    // activity in the spares after the dead time
+static volatile bool     missedThisFreeze = false;
 static volatile uint32_t isrMaxCycles = 0;
 static volatile uint64_t isrCycles = 0;
 static TaskHandle_t      measureTaskHandle = nullptr;
@@ -85,10 +115,12 @@ static uint16_t channelMask = CAPTURE_MASK_DEFAULT;      // bit n = CH(n+1)
 static uint16_t savedMask = CAPTURE_MASK_DEFAULT;        // stored mask, during a self-test
 static uint32_t deadtimeMs = CAPTURE_DEADTIME_DEFAULT;
 static volatile uint32_t deadBlocks = 0;
+static uint32_t spanMm = CAPTURE_SPAN_MM_DEFAULT;
 static bool     verbose = false;
 static bool     running = false;
 static QueueHandle_t results = nullptr;
-static uint32_t eventCount = 0, lostCount = 0, droppedCount = 0;
+static uint32_t eventCount = 0, droppedCount = 0, missedReported = 0;
+static uint32_t frozenMax = 0;   // longest freeze, in blocks
 static int64_t  startUs = 0;
 
 static uint16_t linesOf(uint16_t channels) {
@@ -126,27 +158,55 @@ static void IRAM_ATTR captureIsr(void*) {
   I2S0.int_clr.val = st;
 
   // Which descriptor ended: from the DMA's own record, so a late interrupt that covers two
-  // blocks still counts both.
+  // ring blocks still counts both. A spare block means the window is complete: count the
+  // window blocks not counted yet, then the spare.
   uint32_t addr = I2S0.in_eof_des_addr & 0xFFFFF;
-  uint32_t base = (uint32_t)&desc[0] & 0xFFFFF;
-  uint32_t idx = (addr - base) / sizeof(lldesc_t);
-  if (addr < base || idx >= (uint32_t)CAPTURE_RING_BLOCKS) return;
+  int sp = addr == spareAddr[0] ? 0 : addr == spareAddr[1] ? 1 : -1;
+  uint32_t idx;
+  if (sp >= 0) {
+    if (evState == EV_IDLE) return;   // can't happen: spares are only linked in for an event
+    idx = endDesc;
+  } else {
+    idx = (addr - descAddr0) / sizeof(lldesc_t);
+    if (addr < descAddr0 || idx >= (uint32_t)CAPTURE_RING_BLOCKS) return;
+  }
   uint32_t n = (idx + CAPTURE_RING_BLOCKS - lastDesc) % CAPTURE_RING_BLOCKS;
   lastDesc = idx;
 
   uint32_t mask = lineMask32;
   for (uint32_t k = 0; k < n; k++) {
-    uint32_t b = blocksDone;
-    if (evState == EV_IDLE && b >= PRE_BLOCKS && (int32_t)(b - quietUntil) >= 0 &&
-        blockActive(ring[b % CAPTURE_RING_BLOCKS], mask)) {
-      trigBlock = b;
+    uint32_t rb = ringDone, t = blocksDone;
+    if (evState == EV_IDLE && rb >= contigFrom + PRE_BLOCKS && (int32_t)(t - quietUntil) >= 0 &&
+        blockActive(ring[rb % CAPTURE_RING_BLOCKS], mask)) {
+      // Freeze: the window's last descriptor leads into the spares, which loop.
+      uint32_t post = postBlocks;
+      uint32_t end = (rb + post - 1) % CAPTURE_RING_BLOCKS;
+      spare[0].qe.stqe_next = &spare[1];
+      spare[1].qe.stqe_next = &spare[0];
+      desc[end].qe.stqe_next = &spare[0];
+      trigRing = rb;
+      trigTime = t;
+      evPost = post;
+      endDesc = end;
+      quietUntil = t + deadBlocks;
+      missedThisFreeze = false;
       evState = EV_COLLECTING;
     }
-    blocksDone = b + 1;
+    ringDone = rb + 1;
+    blocksDone = t + 1;
+  }
+  if (sp >= 0) {
+    uint32_t t = blocksDone;
+    blocksDone = t + 1;
+    spareBlocks = spareBlocks + 1;
+    if (!missedThisFreeze && (int32_t)(t - quietUntil) >= 0 && blockActive(spareBuf[sp], mask)) {
+      missedThisFreeze = true;
+      missedCount = missedCount + 1;
+    }
   }
 
   BaseType_t woken = pdFALSE;
-  if (evState == EV_COLLECTING && blocksDone >= trigBlock + POST_BLOCKS) {
+  if (evState == EV_COLLECTING && ringDone >= trigRing + evPost) {
     evState = EV_PROCESSING;
     vTaskNotifyGiveFromISR(measureTaskHandle, &woken);
   }
@@ -159,7 +219,7 @@ static void IRAM_ATTR captureIsr(void*) {
 
 // ---- Edge extraction (measureTask) ----
 
-static void extract(EventResult& r, uint32_t first) {
+static void extract(EventResult& r, uint32_t first, uint32_t blocks) {
   const uint16_t mask = lineMask32 & 0xFFFF;
   r.lines = mask;
   for (int l = 0; l < LINES; l++) {
@@ -175,7 +235,7 @@ static void extract(EventResult& r, uint32_t first) {
   uint32_t idle = prev | ((uint32_t)prev << 16);
   int idx = 0;
 
-  for (int j = 0; j < WINDOW_BLOCKS; j++) {
+  for (uint32_t j = 0; j < blocks; j++) {
     const uint32_t* w = ring[(first + j) % CAPTURE_RING_BLOCKS];
     for (int k = 0; k < WORDS_PER_BLOCK; k++, idx += 2) {
       uint32_t v = w[k] & (mask | ((uint32_t)mask << 16));
@@ -207,15 +267,21 @@ static void measureTask(void*) {
   static EventResult r;   // static: too big for this task's stack
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    uint32_t first = trigBlock - PRE_BLOCKS;
+    uint32_t blocks = PRE_BLOCKS + evPost;
     r.number = ++eventCount;
-    r.firstBlock = first;
-    extract(r, first);
-    // The block the DMA is filling now is number blocksDone. It reuses the window's first
-    // descriptor once it reaches first + ring length.
-    r.lost = blocksDone >= first + CAPTURE_RING_BLOCKS;
-    if (r.lost) lostCount++;
-    quietUntil = trigBlock + deadBlocks;
+    r.firstTime = trigTime - PRE_BLOCKS;
+    r.blocks = blocks;
+    extract(r, trigRing - PRE_BLOCKS, blocks);
+
+    // Unfreeze: the DMA is in the spares; link the ring back in after the window's last
+    // block. Ring first, so the descriptor is right before the DMA can come round to it.
+    uint32_t frozen = blocksDone - (trigTime + evPost);
+    if (frozen > frozenMax) frozenMax = frozen;
+    lldesc_t* next = &desc[(endDesc + 1) % CAPTURE_RING_BLOCKS];
+    desc[endDesc].qe.stqe_next = next;
+    spare[0].qe.stqe_next = next;
+    spare[1].qe.stqe_next = next;
+    contigFrom = trigRing + evPost;   // the next ring block follows a gap in time
     evState = EV_IDLE;
     if (xQueueSend(results, &r, 0) != pdTRUE) droppedCount++;
   }
@@ -225,7 +291,7 @@ static void measureTask(void*) {
 
 static struct {
   bool     active;
-  uint32_t gapNs, count, sent, seen, glitches, lost;
+  uint32_t gapNs, count, sent, seen, glitches, missedAtStart;
   uint32_t spacingMs, nextAt;
   int32_t  gapMin, gapMax;
   int64_t  gapSum;
@@ -270,6 +336,7 @@ static void selftestStart(uint32_t gapNs, uint32_t count) {
   st.gapMax = INT32_MIN;
   st.spacingMs = deadtimeMs + 20 > 50 ? deadtimeMs + 20 : 50;
   st.nextAt = millis() + 100;
+  st.missedAtStart = missedCount;
   savedMask = channelMask;
   applyMask(channelMask | 0x80);   // CH8 for the duration, not stored
   REG_WRITE(GPIO_OUT_W1TC_REG, (1u << SELFTEST_PIN_L) | (1u << SELFTEST_PIN_H));
@@ -282,7 +349,6 @@ static void selftestStart(uint32_t gapNs, uint32_t count) {
 
 static void selftestRecord(const EventResult& r) {
   st.seen++;
-  if (r.lost) { st.lost++; return; }
   const LineResult& L = r.line[LINE_ST_L];
   const LineResult& H = r.line[LINE_ST_H];
   if (L.edges != 2 || H.edges != 2) st.glitches++;
@@ -302,12 +368,12 @@ static void selftestFinish() {
   applyMask(savedMask);
   st.active = false;
 
-  uint32_t timed = st.seen - st.lost;
-  Serial.printf("selftest: %u of %u pulses seen, %u lost\n",
-                (unsigned)st.seen, (unsigned)st.count, (unsigned)st.lost);
+  uint32_t missed = missedCount - st.missedAtStart;
+  Serial.printf("selftest: %u of %u pulses seen, %u possibly missed\n",
+                (unsigned)st.seen, (unsigned)st.count, (unsigned)missed);
   bool gapOk = false;
-  if (timed > 0 && st.gapMin != INT32_MAX) {
-    int32_t mean = (int32_t)(st.gapSum / (int64_t)timed);
+  if (st.seen > 0 && st.gapMin != INT32_MAX) {
+    int32_t mean = (int32_t)(st.gapSum / (int64_t)st.seen);
     gapOk = abs(mean - (int32_t)st.gapNs) <= (int32_t)NS_PER_SAMPLE &&
             st.gapMax - st.gapMin <= 2 * (int32_t)NS_PER_SAMPLE;
     Serial.printf("selftest: gap set %u ns, measured mean %d, min %d, max %d ns\n",
@@ -323,7 +389,7 @@ static void selftestFinish() {
                   (l & 1) ? 'H' : 'L', (unsigned)st.otherLines[l]);
     others = true;
   }
-  bool pass = st.seen == st.count && st.lost == 0 && st.glitches == 0 && gapOk;
+  bool pass = st.seen == st.count && missed == 0 && st.glitches == 0 && gapOk;
   Serial.printf("selftest: %s%s\n", pass ? "PASS" : "FAIL",
                 others ? " (other lines had edges: a jumper, or floating inputs)" : "");
 }
@@ -344,17 +410,12 @@ static void selftestService(uint32_t now) {
 // ---- Output ----
 
 static void printEvent(const EventResult& r) {
-  if (r.lost) {
-    Serial.printf("evt %u LOST: the ring was overwritten before the window was read\n",
-                  (unsigned)r.number);
-    return;
-  }
   int ref = INT16_MAX;
   for (int l = 0; l < LINES; l++)
     if ((r.lines & (1 << l)) && r.line[l].rise >= 0 && r.line[l].rise < ref) ref = r.line[l].rise;
   if (ref == INT16_MAX) ref = 0;   // only falling edges
 
-  uint64_t t = (uint64_t)r.firstBlock * SAMPLES_PER_BLOCK + ref;   // samples since start
+  uint64_t t = (uint64_t)r.firstTime * SAMPLES_PER_BLOCK + ref;   // samples since start
   uint64_t perSec = CAPTURE_SAMPLE_HZ;
   char line[256];
   int n = snprintf(line, sizeof line, "evt %u at %llu.%07llu s, ns from first edge (L/H):",
@@ -404,10 +465,13 @@ static void printStatus() {
                 CAPTURE_SAMPLE_HZ / 1e6);
   Serial.printf("capture: interrupt %.1f %% of core 1, longest %.1f us\n", load,
                 (double)isrMaxCycles / getCpuFrequencyMhz());
-  Serial.printf("capture: %u events, %u lost (ring overwritten), %u not printed (queue full)\n",
-                (unsigned)eventCount, (unsigned)lostCount, (unsigned)droppedCount);
-  Serial.printf("capture: channel mask %02X, dead time %u ms, verbose %s\n", channelMask,
-                (unsigned)deadtimeMs, verbose ? "on" : "off");
+  Serial.printf("capture: %u events, %u possibly missed (while frozen), %u not printed (queue full)\n",
+                (unsigned)eventCount, (unsigned)missedCount, (unsigned)droppedCount);
+  Serial.printf("capture: ring frozen %.1f ms in all, longest %.1f ms\n",
+                spareBlocks * BLOCK_US / 1000.0, frozenMax * BLOCK_US / 1000.0);
+  Serial.printf("capture: channel mask %02X, dead time %u ms, mic span %u mm (window covers "
+                "%u us after the first edge), verbose %s\n", channelMask, (unsigned)deadtimeMs,
+                (unsigned)spanMm, (unsigned)coveredUs(postBlocks), verbose ? "on" : "off");
   Serial.printf("memory: %u bytes free, %u DMA-capable, largest DMA block %u\n",
                 (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
@@ -421,6 +485,9 @@ bool captureBegin() {
   savedMask = channelMask;
   deadtimeMs = prefs.getUInt("deadtime", CAPTURE_DEADTIME_DEFAULT);
   deadBlocks = deadtimeMs * 1000 / BLOCK_US;
+  spanMm = prefs.getUInt("span", CAPTURE_SPAN_MM_DEFAULT);
+  if (postBlocksFor(spanMm) > POST_MAX) spanMm = CAPTURE_SPAN_MM_DEFAULT;
+  postBlocks = postBlocksFor(spanMm);
 
   pinMode(IR_EN_PIN, OUTPUT);
   digitalWrite(IR_EN_PIN, LOW);
@@ -439,22 +506,32 @@ bool captureBegin() {
     esp_rom_gpio_connect_in_signal(pin, I2S0I_DATA_IN0_IDX + i, false);
   }
 
-  // DMA ring: one buffer per descriptor, linked in a circle.
-  for (int i = 0; i < CAPTURE_RING_BLOCKS; i++) {
-    ring[i] = (uint32_t*)heap_caps_calloc(1, CAPTURE_BLOCK_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!ring[i]) {
+  // DMA ring: one buffer per descriptor, linked in a circle; plus the two spares, which
+  // are only linked in while the ring is frozen.
+  for (int i = 0; i < CAPTURE_RING_BLOCKS + 2; i++) {
+    uint32_t* b = (uint32_t*)heap_caps_calloc(1, CAPTURE_BLOCK_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!b) {
       Serial.printf("capture: out of DMA memory at block %d\n", i);
       return false;
     }
+    if (i < CAPTURE_RING_BLOCKS) ring[i] = b;
+    else spareBuf[i - CAPTURE_RING_BLOCKS] = b;
   }
-  for (int i = 0; i < CAPTURE_RING_BLOCKS; i++) {
-    desc[i] = {};
-    desc[i].size = CAPTURE_BLOCK_BYTES;
-    desc[i].length = CAPTURE_BLOCK_BYTES;
-    desc[i].owner = 1;
-    desc[i].buf = (const uint8_t*)ring[i];
-    desc[i].qe.stqe_next = &desc[(i + 1) % CAPTURE_RING_BLOCKS];
-  }
+  auto setup = [](lldesc_t& d, uint32_t* buf, lldesc_t* next) {
+    d = {};
+    d.size = CAPTURE_BLOCK_BYTES;
+    d.length = CAPTURE_BLOCK_BYTES;
+    d.owner = 1;
+    d.buf = (const uint8_t*)buf;
+    d.qe.stqe_next = next;
+  };
+  for (int i = 0; i < CAPTURE_RING_BLOCKS; i++)
+    setup(desc[i], ring[i], &desc[(i + 1) % CAPTURE_RING_BLOCKS]);
+  setup(spare[0], spareBuf[0], &spare[1]);
+  setup(spare[1], spareBuf[1], &spare[0]);
+  descAddr0 = (uint32_t)&desc[0] & 0xFFFFF;
+  spareAddr[0] = (uint32_t)&spare[0] & 0xFFFFF;
+  spareAddr[1] = (uint32_t)&spare[1] & 0xFFFFF;
 
   // Sample clock: LEDC at the sample rate, 50 % duty, read back from the same pad as the
   // I2S word-select (pixel clock) input.
@@ -522,11 +599,12 @@ bool captureBegin() {
   I2S0.conf.rx_start = 1;
   running = true;
 
-  Serial.printf("capture: %.1f MHz, 16 lines, ring %d KB (%u ms), window %u us, channel mask "
-                "%02X, dead time %u ms. Type 'help' for commands.\n",
+  Serial.printf("capture: %.1f MHz, 16 lines, ring %d KB (%u ms), mic span %u mm: window "
+                "covers %u us after the first edge, channel mask %02X, dead time %u ms. Type "
+                "'help' for commands.\n",
                 CAPTURE_SAMPLE_HZ / 1e6, CAPTURE_RING_BLOCKS * CAPTURE_BLOCK_BYTES / 1000,
-                (unsigned)(CAPTURE_RING_BLOCKS * BLOCK_US / 1000), (unsigned)(POST_BLOCKS * BLOCK_US),
-                channelMask, (unsigned)deadtimeMs);
+                (unsigned)(CAPTURE_RING_BLOCKS * BLOCK_US / 1000), (unsigned)spanMm,
+                (unsigned)coveredUs(postBlocks), channelMask, (unsigned)deadtimeMs);
   return true;
 }
 
@@ -536,6 +614,12 @@ void captureService(uint32_t nowMs) {
   while (xQueueReceive(results, &r, 0) == pdTRUE) {
     if (st.active) selftestRecord(r);
     printEvent(r);
+  }
+  uint32_t missed = missedCount;
+  if (missed != missedReported) {
+    Serial.printf("MISSED: activity after the dead time while the previous event was still "
+                  "being read (%u in all): a shot may not have been measured\n", (unsigned)missed);
+    missedReported = missed;
   }
   selftestService(nowMs);
 }
@@ -552,6 +636,8 @@ void captureCommand(const char* line) {
                    "  stat                 capture status, sample rate, interrupt load, memory\n"
                    "  mask <hex>           fitted channels, bit 0 = CH1 ... bit 7 = CH8 (stored)\n"
                    "  deadtime <ms>        no new event for this long after one (stored)\n"
+                   "  span <mm>            largest distance between two mics; sets the event\n"
+                   "                       window (stored)\n"
                    "  verbose on|off       list every transition of every line\n"
                    "  selftest [ns] [n]    n pulses on CH8 (unplugged!), OUT_H ns after OUT_L\n"
                    "                       (default 1000 ns, 20 pulses)");
@@ -572,6 +658,18 @@ void captureCommand(const char* line) {
     deadBlocks = deadtimeMs * 1000 / BLOCK_US;
     prefs.putUInt("deadtime", deadtimeMs);
     Serial.printf("dead time %u ms\n", (unsigned)deadtimeMs);
+  } else if (!strcmp(cmd, "span")) {
+    if (n < 2 || sscanf(arg, "%lu", &a) != 1 || a < 50 || postBlocksFor(a) > POST_MAX) {
+      uint32_t max = 50;
+      while (postBlocksFor(max + 10) <= POST_MAX) max += 10;
+      Serial.printf("span <50..%u mm>\n", (unsigned)max);
+      return;
+    }
+    spanMm = a;
+    postBlocks = postBlocksFor(spanMm);
+    prefs.putUInt("span", spanMm);
+    Serial.printf("mic span %u mm: the window covers %u us after the first edge (needs %u)\n",
+                  (unsigned)spanMm, (unsigned)coveredUs(postBlocks), (unsigned)neededUs(spanMm));
   } else if (!strcmp(cmd, "verbose")) {
     verbose = !strcmp(arg, "on");
     Serial.printf("verbose %s\n", verbose ? "on" : "off");
