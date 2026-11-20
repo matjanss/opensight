@@ -113,10 +113,13 @@ Build:
   I2S reads them back on the same pins, so no jumpers are needed; CH8 must have no sensor
   board plugged in. A jumper from GPIO 19 to another input checks that input.
   BLE traffic and flash writes can still hold up the CPU's pin writes by microseconds
-  (bench test 1), so the generator reads its pins back: each edge lies between the last
-  read that saw the pin low and the first that saw it high (a read takes about 60 ns).
-  The captured gap must lie in that range, give or take one sample. Pulses where the
-  generator itself was off are listed, and pass if the capture agrees.
+  (bench test 1), so the generator reads its pins back: each edge lies between the write
+  (after a `memw` barrier) or the last read that saw the pin low, and the first read
+  that saw it high. The captured gap must lie in that range, give or take one sample. A
+  range wider than 300 ns proves nothing: such pulses are listed as not verified, and at
+  least 95 % must be verified. Pulses where the generator itself was off are listed, and
+  pass if the capture agrees. Without the barrier the read-back loop held the pin write
+  up by ~0.85 µs (Xtensa lets loads overtake a pending store).
 
 Bench test (bare NodeMCU, no sensor boards needed). Flash, then open the monitor with
 `pio device monitor -d firmware --echo` and type the commands:
@@ -224,6 +227,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-20 | 1 | Retest 2, app connected, 400 pulses, 2 renames, 18 test shots | Checker passed a broken generator: gaps captured 100-200 ns for a set 1000 ns, yet PASS. Without a barrier, the read-back loop held the write of L up by ~0.85 µs, and each edge's range was then ~1 µs wide, so every gap fit. Fixed with `memw` after each pin write; ranges over 300 ns no longer count as verified, and ≥ 95 % must be. Every 40th pulse (2 s: the heartbeat's BLE notification) the generator is ~3 µs late. Time base still right: 10.000 MHz, 420 events, interrupt 9.0 %, longest freeze 1.0 ms. Retest. |
 | 2026-11-20 | 1 | Retest, app connected, 400 pulses, 2 renames, 11 test shots | Time base fixed: 10.000 MHz after 420 events, timestamps 50.0 ms apart. Interrupt 9.3 %, longest freeze 1.0 ms, nothing missed. Generator held up 3 times (5000 ns at the pins): captured 5000 ns each time. One FAIL from the checker, not the capture: timing H from L's read-back made the pin gap ~1060 ns, captured as a 40/60 mix of 1000 and 1100 (mean ~1060, sub-sample consistent); one read-back 60 ns late under BLE gave "pins 1058, captured 900". The check now brackets each edge between reads and times H from L's write again. Retest. |
 | 2026-11-20 | 1 | Bare NodeMCU-32S, USB, app connected for item 6 | Sample rate 10.000 MHz; interrupt 9.8 % of core 1, longest 22 µs. Self-test exact to the sample at 0, 500, 1000, 10 000 and 100 000 ns; pulses 11.0/10.0 µs. Pin map: jumpers on GPIO 32 (CH3 L) and 25 (CH4 L) at the same sample as CH8 L. Span 600 mm: 2400 µs. Freeze: no wrong windows, longest 1.6 ms, nothing missed. 119 KB heap, 104 KB DMA free. **Two faults, both outside the sampling:** (1) gaps of 0-7200 ns instead of 1000 on the first pulse of a run and right after BLE indications and renames: the generator ran from flash (cache misses) and its pin writes waited behind bus traffic; moved to IRAM, and the capture is now checked against the pins' read-back. (2) Time base lost ~3 blocks per event (9.996 MHz after 849 events; pulses 50 ms apart read 49.4 ms): spare blocks finished after unfreezing weren't counted; fixed. Retest. |
 

@@ -304,6 +304,8 @@ static struct {
   uint32_t genOff;           // pulses whose generated gap was off the set gap by > 1 sample
   uint32_t genStuckCount;    // pulses where a pin did not read high
   uint32_t mismatch;         // events whose captured gap disagreed with the generated one
+  uint32_t verified;         // events checked against a narrow enough read-back range
+  int32_t  rangeMax;         // widest read-back range seen, ns
   int32_t  diffMin, diffMax; // captured - generated gap
   uint32_t otherLines[LINES];
 } st;
@@ -315,6 +317,18 @@ static const int LINE_ST_L = 14, LINE_ST_H = 15;   // CH8 L, CH8 H
 static const int32_t SELFTEST_TOLERANCE_NS = NS_PER_SAMPLE;
 
 struct Edge { uint32_t lo, hi; };   // the pin rose between these cycle counts
+// A pulse whose read-back range is wider than this proves nothing about the capture.
+static const int32_t SELFTEST_MAX_RANGE_NS = 3 * NS_PER_SAMPLE;
+static const uint32_t SELFTEST_MIN_VERIFIED_PCT = 95;
+
+// Xtensa lets loads overtake a store still in the write buffer: without a barrier, the
+// read-back loop held the pin write up by ~0.85 us (bench test 3). Returns the cycle count
+// once the write has left the CPU.
+static inline uint32_t IRAM_ATTR pinWrite(uint32_t reg, uint32_t bits) {
+  REG_WRITE(reg, bits);
+  __asm__ __volatile__("memw" ::: "memory");
+  return esp_cpu_get_cycle_count();
+}
 
 // Waits until the pins in `bits` all read high: the edge lies between the start of the
 // last read that saw them low (or `from`) and the end of the read that saw them high.
@@ -345,19 +359,18 @@ static bool IRAM_ATTR selftestPulse(uint32_t gapCyc, uint32_t pulseCyc, uint32_t
   portENTER_CRITICAL(&mux);
   uint32_t c0 = esp_cpu_get_cycle_count();
   if (gapCyc == 0) {
-    REG_WRITE(GPIO_OUT_W1TS_REG, bL | bH);
-    ok = waitHigh(bL | bH, c0, limit, eL);
+    uint32_t w = pinWrite(GPIO_OUT_W1TS_REG, bL | bH);
+    ok = waitHigh(bL | bH, w, limit, eL);
     eH = eL;
   } else {
-    REG_WRITE(GPIO_OUT_W1TS_REG, bL);
-    ok = waitHigh(bL, c0, limit, eL);
+    uint32_t w = pinWrite(GPIO_OUT_W1TS_REG, bL);
+    ok = waitHigh(bL, w, limit, eL);
     while (esp_cpu_get_cycle_count() - c0 < gapCyc) {}
-    uint32_t c1 = esp_cpu_get_cycle_count();
-    REG_WRITE(GPIO_OUT_W1TS_REG, bH);
-    ok = waitHigh(bH, c1, limit, eH) && ok;
+    w = pinWrite(GPIO_OUT_W1TS_REG, bH);
+    ok = waitHigh(bH, w, limit, eH) && ok;
   }
   while (esp_cpu_get_cycle_count() - c0 < pulseCyc) {}
-  REG_WRITE(GPIO_OUT_W1TC_REG, bL | bH);
+  pinWrite(GPIO_OUT_W1TC_REG, bL | bH);
   portEXIT_CRITICAL(&mux);
   return ok;
 }
@@ -417,7 +430,10 @@ static void selftestRecord(const EventResult& r) {
     st.gapSum += gap;
     if (gap < st.gapMin) st.gapMin = gap;
     if (gap > st.gapMax) st.gapMax = gap;
-    if (pending && !st.genStuck) {
+    int32_t range = st.genHiNs - st.genLoNs;
+    if (pending && !st.genStuck && range > st.rangeMax) st.rangeMax = range;
+    if (pending && !st.genStuck && range <= SELFTEST_MAX_RANGE_NS) {
+      st.verified++;
       // How far the captured gap is outside the bracket the pins gave (0: inside).
       int32_t d = gap < st.genLoNs ? gap - st.genLoNs : gap > st.genHiNs ? gap - st.genHiNs : 0;
       if (d < st.diffMin) st.diffMin = d;
@@ -433,6 +449,10 @@ static void selftestRecord(const EventResult& r) {
                       "%d ns: agrees\n", (unsigned)r.number, (int)st.genLoNs, (int)st.genHiNs,
                       (int)gap);
       }
+    } else if (pending && !st.genStuck) {
+      Serial.printf("selftest: evt %u: not verified, the pins' read-back range %d..%d ns is "
+                    "too wide (captured %d ns)\n", (unsigned)r.number, (int)st.genLoNs,
+                    (int)st.genHiNs, (int)gap);
     }
   }
   for (int l = 0; l < LINES; l++)
@@ -456,6 +476,9 @@ static void selftestFinish() {
     Serial.printf("selftest: captured gap outside the pins' read-back range by min %d, max "
                   "%d ns (allowed +-%d), %u events outside\n", (int)st.diffMin, (int)st.diffMax,
                   (int)SELFTEST_TOLERANCE_NS, (unsigned)st.mismatch);
+  Serial.printf("selftest: %u of %u events verified against the pins' read-back (range at "
+                "most %d ns; widest seen %d ns)\n", (unsigned)st.verified, (unsigned)st.seen,
+                (int)SELFTEST_MAX_RANGE_NS, (int)st.rangeMax);
   if (st.genOff)
     Serial.printf("selftest: the generator itself was off in %u pulses (CPU held up by BLE or "
                   "flash); those are checked against what the pins really did\n",
@@ -474,7 +497,8 @@ static void selftestFinish() {
     others = true;
   }
   bool pass = st.seen == st.count && missed == 0 && st.glitches == 0 && st.mismatch == 0 &&
-              st.genStuckCount == 0 && st.diffMin != INT32_MAX;
+              st.genStuckCount == 0 &&
+              st.verified * 100 >= st.seen * SELFTEST_MIN_VERIFIED_PCT && st.verified > 0;
   Serial.printf("selftest: %s%s\n", pass ? "PASS" : "FAIL",
                 others ? " (other lines had edges: a jumper, or floating inputs)" : "");
 }
