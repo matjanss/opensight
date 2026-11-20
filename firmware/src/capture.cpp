@@ -164,8 +164,9 @@ static void IRAM_ATTR captureIsr(void*) {
   int sp = addr == spareAddr[0] ? 0 : addr == spareAddr[1] ? 1 : -1;
   uint32_t idx;
   if (sp >= 0) {
-    if (evState == EV_IDLE) return;   // can't happen: spares are only linked in for an event
-    idx = endDesc;
+    // Also after the task has linked the ring back in: the DMA finishes the spare it is in
+    // (and maybe the next one, already loaded). Those blocks are time too.
+    idx = evState == EV_IDLE ? lastDesc : endDesc;
   } else {
     idx = (addr - descAddr0) / sizeof(lldesc_t);
     if (addr < descAddr0 || idx >= (uint32_t)CAPTURE_RING_BLOCKS) return;
@@ -295,31 +296,78 @@ static struct {
   uint32_t spacingMs, nextAt;
   int32_t  gapMin, gapMax;
   int64_t  gapSum;
+  // The generator reads its pins back, so each captured gap is checked against the gap
+  // the pins really had: BLE traffic or a flash write can delay the CPU's pin writes.
+  bool     pending;          // a pulse was sent and its event not seen yet
+  bool     genStuck;         // the last pulse: a pin did not read high
+  int32_t  genGapNs;         // the last pulse: H rise - L rise, as the pins read back
+  uint32_t genOff;           // pulses whose generated gap was off the set gap by > 1 sample
+  uint32_t genStuckCount;    // pulses where a pin did not read high
+  uint32_t mismatch;         // events whose captured gap disagreed with the generated one
+  int32_t  diffMin, diffMax; // captured - generated gap
   uint32_t otherLines[LINES];
 } st;
 
 static const int LINE_ST_L = 14, LINE_ST_H = 15;   // CH8 L, CH8 H
+// Captured vs generated gap: each edge is quantised to one sample, so up to one sample
+// apart, plus the pin read-back jitter.
+static const int32_t SELFTEST_TOLERANCE_NS = NS_PER_SAMPLE + 50;
 
-// Both lines rise (OUT_L first, OUT_H gapNs later) and fall together, like a comparator
-// pair on a real edge.
-static void selftestPulse() {
+// Cycle count at which the pins in `bits` all read high, or 0 after `limit` cycles.
+static inline uint32_t IRAM_ATTR waitHigh(uint32_t bits, uint32_t c0, uint32_t limit) {
+  for (;;) {
+    uint32_t c = esp_cpu_get_cycle_count();
+    if ((REG_READ(GPIO_IN_REG) & bits) == bits) return c ? c : 1;
+    if (c - c0 > limit) return 0;
+  }
+}
+
+// Both lines rise (OUT_L first, OUT_H gapCyc after OUT_L really is high) and fall
+// together, like a comparator pair on a real edge. In IRAM with interrupts off, so a
+// cache miss can't stretch it. Returns the read-back gap in cycles, or -1 if a pin
+// did not go high.
+static int32_t IRAM_ATTR selftestPulse(uint32_t gapCyc, uint32_t pulseCyc, uint32_t limit) {
   static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
   const uint32_t bL = 1u << SELFTEST_PIN_L, bH = 1u << SELFTEST_PIN_H;
-  const uint32_t mhz = getCpuFrequencyMhz();
-  const uint32_t gapCyc = (uint64_t)st.gapNs * mhz / 1000;
-  const uint32_t endCyc = gapCyc + SELFTEST_PULSE_US * mhz;
+  int32_t gap = -1;
   portENTER_CRITICAL(&mux);
   uint32_t c0 = esp_cpu_get_cycle_count();
+  uint32_t tL, tH;
   if (gapCyc == 0) {
     REG_WRITE(GPIO_OUT_W1TS_REG, bL | bH);
+    tL = tH = waitHigh(bL | bH, c0, limit);
   } else {
     REG_WRITE(GPIO_OUT_W1TS_REG, bL);
-    while (esp_cpu_get_cycle_count() - c0 < gapCyc) {}
-    REG_WRITE(GPIO_OUT_W1TS_REG, bH);
+    tL = waitHigh(bL, c0, limit);
+    if (tL) {
+      while (esp_cpu_get_cycle_count() - tL < gapCyc) {}
+      REG_WRITE(GPIO_OUT_W1TS_REG, bH);
+      tH = waitHigh(bH, tL, gapCyc + limit);
+    } else {
+      tH = 0;
+    }
   }
-  while (esp_cpu_get_cycle_count() - c0 < endCyc) {}
+  if (tL && tH) {
+    gap = (int32_t)(tH - tL);
+    while (esp_cpu_get_cycle_count() - tL < pulseCyc) {}
+  }
   REG_WRITE(GPIO_OUT_W1TC_REG, bL | bH);
   portEXIT_CRITICAL(&mux);
+  return gap;
+}
+
+static void selftestSend() {
+  const uint32_t mhz = getCpuFrequencyMhz();
+  const uint32_t gapCyc = (uint64_t)st.gapNs * mhz / 1000;
+  int32_t gap = selftestPulse(gapCyc, gapCyc + SELFTEST_PULSE_US * mhz, 5 * mhz);   // 5 us
+  st.pending = true;
+  st.genStuck = gap < 0;
+  if (st.genStuck) {
+    st.genStuckCount++;
+    return;
+  }
+  st.genGapNs = (int32_t)((int64_t)gap * 1000 / mhz);
+  if (abs(st.genGapNs - (int32_t)st.gapNs) > (int32_t)NS_PER_SAMPLE) st.genOff++;
 }
 
 static void selftestStart(uint32_t gapNs, uint32_t count) {
@@ -332,8 +380,8 @@ static void selftestStart(uint32_t gapNs, uint32_t count) {
   st.active = true;
   st.gapNs = gapNs;
   st.count = count;
-  st.gapMin = INT32_MAX;
-  st.gapMax = INT32_MIN;
+  st.gapMin = st.diffMin = INT32_MAX;
+  st.gapMax = st.diffMax = INT32_MIN;
   st.spacingMs = deadtimeMs + 20 > 50 ? deadtimeMs + 20 : 50;
   st.nextAt = millis() + 100;
   st.missedAtStart = missedCount;
@@ -349,6 +397,8 @@ static void selftestStart(uint32_t gapNs, uint32_t count) {
 
 static void selftestRecord(const EventResult& r) {
   st.seen++;
+  bool pending = st.pending;
+  st.pending = false;
   const LineResult& L = r.line[LINE_ST_L];
   const LineResult& H = r.line[LINE_ST_H];
   if (L.edges != 2 || H.edges != 2) st.glitches++;
@@ -357,6 +407,19 @@ static void selftestRecord(const EventResult& r) {
     st.gapSum += gap;
     if (gap < st.gapMin) st.gapMin = gap;
     if (gap > st.gapMax) st.gapMax = gap;
+    if (pending && !st.genStuck) {
+      int32_t d = gap - st.genGapNs;
+      if (d < st.diffMin) st.diffMin = d;
+      if (d > st.diffMax) st.diffMax = d;
+      if (abs(d) > SELFTEST_TOLERANCE_NS) {
+        st.mismatch++;
+        Serial.printf("selftest: evt %u: pins had %d ns, captured %d ns\n",
+                      (unsigned)r.number, (int)st.genGapNs, (int)gap);
+      } else if (abs(st.genGapNs - (int32_t)st.gapNs) > (int32_t)NS_PER_SAMPLE) {
+        Serial.printf("selftest: evt %u: generator was off (pins had %d ns), captured "
+                      "%d ns: agrees\n", (unsigned)r.number, (int)st.genGapNs, (int)gap);
+      }
+    }
   }
   for (int l = 0; l < LINES; l++)
     if (l != LINE_ST_L && l != LINE_ST_H && r.line[l].edges) st.otherLines[l]++;
@@ -371,17 +434,24 @@ static void selftestFinish() {
   uint32_t missed = missedCount - st.missedAtStart;
   Serial.printf("selftest: %u of %u pulses seen, %u possibly missed\n",
                 (unsigned)st.seen, (unsigned)st.count, (unsigned)missed);
-  bool gapOk = false;
-  if (st.seen > 0 && st.gapMin != INT32_MAX) {
-    int32_t mean = (int32_t)(st.gapSum / (int64_t)st.seen);
-    gapOk = abs(mean - (int32_t)st.gapNs) <= (int32_t)NS_PER_SAMPLE &&
-            st.gapMax - st.gapMin <= 2 * (int32_t)NS_PER_SAMPLE;
-    Serial.printf("selftest: gap set %u ns, measured mean %d, min %d, max %d ns\n",
-                  (unsigned)st.gapNs, (int)mean, (int)st.gapMin, (int)st.gapMax);
-  }
+  if (st.seen > 0 && st.gapMin != INT32_MAX)
+    Serial.printf("selftest: gap set %u ns, captured mean %d, min %d, max %d ns\n",
+                  (unsigned)st.gapNs, (int)(st.gapSum / (int64_t)st.seen), (int)st.gapMin,
+                  (int)st.gapMax);
+  if (st.diffMin != INT32_MAX)
+    Serial.printf("selftest: captured - generated gap: min %d, max %d ns (allowed +-%d), "
+                  "%u events outside\n", (int)st.diffMin, (int)st.diffMax,
+                  (int)SELFTEST_TOLERANCE_NS, (unsigned)st.mismatch);
+  if (st.genOff)
+    Serial.printf("selftest: the generator itself was off in %u pulses (CPU held up by BLE or "
+                  "flash); those are checked against what the pins really did\n",
+                  (unsigned)st.genOff);
+  if (st.genStuckCount)
+    Serial.printf("selftest: a CH8 pin did not go high in %u pulses: is something plugged "
+                  "into CH8?\n", (unsigned)st.genStuckCount);
   if (st.glitches)
-    Serial.printf("selftest: %u events with extra transitions on CH8 (sample order? see "
-                  "CAPTURE_HIGH_HALF_FIRST)\n", (unsigned)st.glitches);
+    Serial.printf("selftest: %u events with extra or missing transitions on CH8\n",
+                  (unsigned)st.glitches);
   bool others = false;
   for (int l = 0; l < LINES; l++) {
     if (!st.otherLines[l]) continue;
@@ -389,7 +459,8 @@ static void selftestFinish() {
                   (l & 1) ? 'H' : 'L', (unsigned)st.otherLines[l]);
     others = true;
   }
-  bool pass = st.seen == st.count && missed == 0 && st.glitches == 0 && gapOk;
+  bool pass = st.seen == st.count && missed == 0 && st.glitches == 0 && st.mismatch == 0 &&
+              st.genStuckCount == 0 && st.diffMin != INT32_MAX;
   Serial.printf("selftest: %s%s\n", pass ? "PASS" : "FAIL",
                 others ? " (other lines had edges: a jumper, or floating inputs)" : "");
 }
@@ -399,7 +470,7 @@ static void selftestService(uint32_t now) {
   if ((int32_t)(now - st.nextAt) < 0) return;
   if (st.sent < st.count) {
     if (evState != EV_IDLE) return;   // wait for the previous event to finish
-    selftestPulse();
+    selftestSend();
     st.sent++;
     st.nextAt = now + st.spacingMs;
   } else {
@@ -628,6 +699,7 @@ void captureCommand(const char* line) {
   char cmd[16] = "";
   char arg[24] = "";
   unsigned long a = 0, b = 0;
+  if ((unsigned char)line[0] < 0x20) return;   // arrow keys and other escape sequences
   int n = sscanf(line, "%15s %23s", cmd, arg);
   if (n < 1) return;
 

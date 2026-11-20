@@ -68,7 +68,7 @@ so a problem shows up in the step that caused it.
 
 | # | Step | Status |
 |---|---|---|
-| 1 | Capture and raw dump | built, bench test pending |
+| 1 | Capture and raw dump | bench test 1 done (capture good); self-test and time fixes, retest pending |
 | 2 | Arrival times | planned |
 | 3 | Solver and calibration | planned |
 | 4 | Validity checks | planned |
@@ -109,9 +109,13 @@ Build:
 - Serial commands (type `help`): `stat`, `mask <hex>`, `deadtime <ms>` (both stored in
   NVS, namespace `"measure"`), `verbose on|off`, `selftest [ns] [n]`.
 - Self-test: the CPU drives two pulses out on CH8's own pins (GPIO 19 = L, 18 = H), OUT_H
-  a set gap after OUT_L, with interrupts off and timed by the cycle counter. The I2S reads
-  them back on the same pins, so no jumpers are needed; CH8 must have no sensor board
-  plugged in. A jumper from GPIO 19 to another input checks that input.
+  a set gap after OUT_L, from IRAM with interrupts off and timed by the cycle counter. The
+  I2S reads them back on the same pins, so no jumpers are needed; CH8 must have no sensor
+  board plugged in. A jumper from GPIO 19 to another input checks that input.
+  BLE traffic and flash writes can still hold up the CPU's pin writes by microseconds
+  (bench test 1), so the generator reads its pins back and notes when each really went
+  high; every captured gap is checked against that, within one sample + 50 ns. Pulses
+  where the generator itself was off are listed, and pass if the capture agrees.
 
 Bench test (bare NodeMCU, no sensor boards needed). Flash, then open the monitor with
 `pio device monitor -d firmware --echo` and type the commands:
@@ -119,8 +123,8 @@ Bench test (bare NodeMCU, no sensor boards needed). Flash, then open the monitor
    pull-downs, so they float. The self-test adds CH8 by itself.
 2. `stat` twice, a few seconds apart: the sample rate reads 10.000 MHz and the block count
    grows. 0 blocks: the I2S doesn't run. 5 MHz: each DMA block is only half filled.
-3. `selftest`: 20 of 20 pulses, gap mean within 100 ns of 1000 ns, min and max within
-   200 ns of each other, no extra transitions, PASS. Then `selftest 0` (no skew between
+3. `selftest`: 20 of 20 pulses, captured gap 1000 ns, captured − generated within ±150 ns
+   for every pulse, no extra transitions, PASS. Then `selftest 0` (no skew between
    lines: gap 0), `selftest 500`, `selftest 10000`, `selftest 100000`.
 4. `verbose on`, `selftest 1000 3`: each CH8 line shows one + and one -, pulse lengths
    about 11 µs (L) and 10 µs (H).
@@ -128,11 +132,13 @@ Bench test (bare NodeMCU, no sensor boards needed). Flash, then open the monitor
    only CH8 and the jumpered input have edges, at the same time as CH8 L. The floating
    inputs 34-39 may show noise unless they are tied to GND with a resistor or jumper.
 6. With the app connected: `selftest 1000 200` while changing the sensor name in the app
-   (an NVS write) and while shots go to the app. 200 of 200 pulses, nothing `MISSED`.
+   (an NVS write) and while shots go to the app. 200 of 200 pulses, nothing `MISSED`,
+   PASS; pulses where the generator was held up are listed and agree with the capture.
    `stat` shows how long the ring was frozen at most: normally under 1 ms, longer while
    flash was written.
-7. `stat`: note the interrupt load, the longest freeze and the free DMA memory in Bench
-   results.
+7. `stat`: the sample rate still reads 10.000 MHz after many events (event timestamps:
+   pulses 50 ms apart show up 50 ms apart). Note the interrupt load, the longest freeze
+   and the free DMA memory in Bench results.
 8. `span 600` then `selftest 1000 3`: the window covers 2.4 ms; `span 300` back.
 
 Done when: every pulse shows up once, at the right time, on the right line, with BLE busy.
@@ -217,7 +223,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
-| | | | |
+| 2026-11-20 | 1 | Bare NodeMCU-32S, USB, app connected for item 6 | Sample rate 10.000 MHz; interrupt 9.8 % of core 1, longest 22 µs. Self-test exact to the sample at 0, 500, 1000, 10 000 and 100 000 ns; pulses 11.0/10.0 µs. Pin map: jumpers on GPIO 32 (CH3 L) and 25 (CH4 L) at the same sample as CH8 L. Span 600 mm: 2400 µs. Freeze: no wrong windows, longest 1.6 ms, nothing missed. 119 KB heap, 104 KB DMA free. **Two faults, both outside the sampling:** (1) gaps of 0-7200 ns instead of 1000 on the first pulse of a run and right after BLE indications and renames: the generator ran from flash (cache misses) and its pin writes waited behind bus traffic; moved to IRAM, and the capture is now checked against the pins' read-back. (2) Time base lost ~3 blocks per event (9.996 MHz after 849 events; pulses 50 ms apart read 49.4 ms): spare blocks finished after unfreezing weren't counted; fixed. Retest. |
 
 ## Open questions
 
