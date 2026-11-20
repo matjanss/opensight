@@ -83,8 +83,10 @@ Build:
   is register level, as esp32-camera and the ESP32 logic-analyzer projects do it. The
   sample clock comes from LEDC on GPIO 5 (spare, leave it unconnected) and is read back
   from the same pad as the I2S clock input.
-- Activity scan in the end-of-block interrupt; on activity, the measurement task reads an
-  event window that starts one block (200 µs) before the first activity.
+- Activity scan in the end-of-block interrupt: a fitted line that changes level inside the
+  block, or between the previous block's last sample and this block's first (an edge
+  exactly on a block boundary). On activity, the measurement task reads an event window
+  that starts one block (200 µs) before.
 - Window length from the **mic span**, the largest distance between two mics (the diagonal
   for corner mics): sound reaches two mics at most span / speed of sound apart, wherever
   the shot lands. The window covers span / 331 m/s (0 °C) + 20 % + 100 µs after the first
@@ -237,6 +239,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-20 | 1 | Span 600, long gap | **Capture bug found:** `CH8 -/0, CH8 L was already high at window start`. The activity scan looked at each block on its own, so an edge exactly between two blocks (low all through one, high all through the next) was invisible; the window then opened at the next activity (H, ≥ 2 blocks later) and started after L. About 1 in 2000 edges; only possible to hit once pulses landed at random points in a block. The scan now folds in the previous block's last sample. `stat` counts events with a line already high at window start (should stay 0). |
 | 2026-11-20 | 1 | Extra test 11 (long gaps) | 500 µs and 750 µs (12.5 ns ticks): 20 of 20 each, exact, all pairs split across blocks, L in all four quarters: PASS. 1 ms (25 ns ticks): only the first pulse pair of each run came out (1 of 20, 1 of 100), and that one was exact: the MCPWM one-shot restart from the peak failed at that prescale, not the capture. The count is now reset to 0 (soft sync) before each start. Retest 11. |
 | 2026-11-20 | 1 | Phase check, app connected, 20 + 100 + 300 pulses, 2 renames, 31 test shots | 1000 ns: 20 exact. 1050 ns with the random start: 37 % then 51 % rounded up (189 of 400 = 47 %), mean 1050.7 over 300: the capture resolves gaps finer than a sample when averaged. All within one sample, nothing missed. But every pulse landed at the same point in its DMA block (timestamps …4698): block boundaries, the trigger block's end and long gaps were untested; extra tests 9-13 added. |
 | 2026-11-20 | 1 | Retest 4 (MCPWM generator), app connected, 20 + 300 pulses, 2 renames, 30 test shots | **Pass.** 1000 ns: 20 of 20 exact. 1050 ns: 300 of 300 at 1000 or 1100, none further off, nothing missed, through heartbeats, renames and shots; the 4100 ns pulses are gone, so they were the CPU generator, not the capture. Mean 1018 instead of ~1050: the generator, sample clock and CPU share one crystal, so the pulses started at almost the same point within a sample (timestamps all …856); random 0-200 ns start delay added. Step 1 done. |

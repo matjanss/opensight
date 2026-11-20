@@ -121,6 +121,7 @@ static bool     verbose = false;
 static bool     running = false;
 static QueueHandle_t results = nullptr;
 static uint32_t eventCount = 0, droppedCount = 0, missedReported = 0;
+static uint32_t startHighCount = 0;   // events with a line already high at window start
 static uint32_t frozenMax = 0;   // longest freeze, in blocks
 static int64_t  startUs = 0;
 
@@ -139,10 +140,13 @@ static void applyMask(uint16_t channels) {
 
 // ---- ISR ----
 
-// True if a fitted line changes level inside the block. Pulses last 5-50 us and a block
-// 200 us, so every pulse has at least one edge inside some block.
-static inline bool IRAM_ATTR blockActive(const uint32_t* w, uint32_t mask) {
-  uint32_t orAll = 0, andAll = 0xFFFFFFFF;
+// True if a fitted line changes level inside the block or from the block before into it.
+// `before` is the last word of the block before (or this block's first word if there is
+// none): folding it in catches an edge that falls exactly between two blocks, where each
+// block on its own is constant (bench, span 600: an OUT_L edge on a block boundary was
+// missed, and the window opened only at OUT_H, 1 ms later).
+static inline bool IRAM_ATTR blockActive(const uint32_t* w, uint32_t mask, uint32_t before) {
+  uint32_t orAll = before, andAll = before;
   for (int i = 0; i < WORDS_PER_BLOCK; i += 4) {
     uint32_t a = w[i], b = w[i + 1], c = w[i + 2], d = w[i + 3];
     orAll |= a | b | c | d;
@@ -179,7 +183,8 @@ static void IRAM_ATTR captureIsr(void*) {
   for (uint32_t k = 0; k < n; k++) {
     uint32_t rb = ringDone, t = blocksDone;
     if (evState == EV_IDLE && rb >= contigFrom + PRE_BLOCKS && (int32_t)(t - quietUntil) >= 0 &&
-        blockActive(ring[rb % CAPTURE_RING_BLOCKS], mask)) {
+        blockActive(ring[rb % CAPTURE_RING_BLOCKS], mask,
+                    ring[(rb - 1) % CAPTURE_RING_BLOCKS][WORDS_PER_BLOCK - 1])) {
       // Freeze: the window's last descriptor leads into the spares, which loop.
       uint32_t post = postBlocks;
       uint32_t end = (rb + post - 1) % CAPTURE_RING_BLOCKS;
@@ -201,7 +206,7 @@ static void IRAM_ATTR captureIsr(void*) {
     uint32_t t = blocksDone;
     blocksDone = t + 1;
     spareBlocks = spareBlocks + 1;
-    if (!missedThisFreeze && (int32_t)(t - quietUntil) >= 0 && blockActive(spareBuf[sp], mask)) {
+    if (!missedThisFreeze && (int32_t)(t - quietUntil) >= 0 && blockActive(spareBuf[sp], mask, spareBuf[sp][0])) {
       missedThisFreeze = true;
       missedCount = missedCount + 1;
     }
@@ -274,6 +279,7 @@ static void measureTask(void*) {
     r.firstTime = trigTime - PRE_BLOCKS;
     r.blocks = blocks;
     extract(r, trigRing - PRE_BLOCKS, blocks);
+    if (r.highAtStart) startHighCount++;
 
     // Unfreeze: the DMA is in the spares; link the ring back in after the window's last
     // block. Ring first, so the descriptor is right before the DMA can come round to it.
@@ -621,6 +627,8 @@ static void printStatus() {
                 (double)isrMaxCycles / getCpuFrequencyMhz());
   Serial.printf("capture: %u events, %u possibly missed (while frozen), %u not printed (queue full)\n",
                 (unsigned)eventCount, (unsigned)missedCount, (unsigned)droppedCount);
+  Serial.printf("capture: %u events with a line already high at window start (should be 0 "
+                "with nothing floating)\n", (unsigned)startHighCount);
   Serial.printf("capture: ring frozen %.1f ms in all, longest %.1f ms\n",
                 spareBlocks * BLOCK_US / 1000.0, frozenMax * BLOCK_US / 1000.0);
   Serial.printf("capture: channel mask %02X, dead time %u ms, mic span %u mm (window covers "
