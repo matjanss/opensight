@@ -106,7 +106,8 @@ Build:
   the DMA descriptors.
 - Dead time after an event, 30 ms to start (a setting).
 - Serial output, one line per event: event number, then per channel t1 and t2 in ns and
-  the pulse length of each line; quiet lines marked `-`. A verbose mode lists every
+  the pulse length of each line; quiet lines marked `-`, a line already high at the window
+  start `<x` (it rose more than x ns before the first edge). A verbose mode lists every
   transition of every line in the window (ringing, double trips).
 - Serial commands (type `help`): `stat`, `mask <hex>`, `deadtime <ms>` (both stored in
   NVS, namespace `"measure"`), `verbose on|off`, `selftest [ns] [n]`.

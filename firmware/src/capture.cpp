@@ -586,6 +586,8 @@ static void printEvent(const EventResult& r) {
     for (int h = 0; h < 2; h++) {
       const LineResult& L = r.line[2 * c + h];
       if (L.rise >= 0) n += snprintf(line + n, sizeof line - n, "%d", (L.rise - ref) * (int)NS_PER_SAMPLE);
+      else if (r.highAtStart & (1 << (2 * c + h)))   // rose before the window: earlier than its start
+        n += snprintf(line + n, sizeof line - n, "<%d", -ref * (int)NS_PER_SAMPLE);
       else n += snprintf(line + n, sizeof line - n, "-");
       if (h == 0) n += snprintf(line + n, sizeof line - n, "/");
     }
