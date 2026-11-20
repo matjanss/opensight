@@ -30,8 +30,9 @@ app could misread new firmware or the reverse.
   (register level: IDF 5 has no driver for it); an IRAM interrupt scans each finished
   block and freezes the ring around an event (spare DMA blocks), a task on core 1 extracts
   the edges, and `loop()` prints them. The window length follows from the mic span. Serial
-  commands (`help`) set the channel mask, dead time and mic span and run the self-test on
-  CH8's pins.
+  commands (`help`) set the channel mask, dead time and mic span and run the self-test:
+  MCPWM drives a pulse pair with a hardware-timed gap out on CH8's pins (a CPU-driven
+  generator is not exact under BLE load).
 - `main.cpp`: button (short press = test shot, 2 s hold = pairing mode, 10 s hold = PIN
   reset), heartbeat, name and PIN in NVS (namespace `"sensor"`), the status LED (pairing blink, PIN reset, shot flash; the app can't switch it), and the shot
   buffer: the last 64 shots, indicated one at a time until the app confirms each

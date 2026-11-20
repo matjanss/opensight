@@ -16,6 +16,7 @@
 #include <Preferences.h>
 #include "config.h"
 #include "driver/gpio.h"
+#include "driver/mcpwm_prelude.h"
 #include "esp_cpu.h"
 #include "esp_heap_caps.h"
 #include "esp_intr_alloc.h"
@@ -290,107 +291,97 @@ static void measureTask(void*) {
 
 // ---- Self-test ----
 
+// The pulse pair comes from MCPWM, not the CPU: two generators on one timer, so the gap
+// is set by hardware in 12.5 ns steps and BLE, flash writes or the CPU's write buffer
+// can't change it (a CPU-driven generator could, bench tests 1-4). The CPU only starts
+// the timer once per pulse pair.
+static const uint32_t GEN_HZ = 80000000;   // 12.5 ns per tick
+
 static struct {
   bool     active;
   uint32_t gapNs, count, sent, seen, glitches, missedAtStart;
   uint32_t spacingMs, nextAt;
+  int32_t  effGapNs;         // the gap the hardware makes: gapNs rounded to whole ticks
   int32_t  gapMin, gapMax;
   int64_t  gapSum;
-  // The generator reads its pins back, so each captured gap is checked against the gap
-  // the pins really had: BLE traffic or a flash write can delay the CPU's pin writes.
-  bool     pending;          // a pulse was sent and its event not seen yet
-  bool     genStuck;         // the last pulse: a pin did not read high
-  int32_t  genLoNs, genHiNs; // the last pulse: H rise - L rise lies in this range
-  uint32_t genOff;           // pulses whose generated gap was off the set gap by > 1 sample
-  uint32_t genStuckCount;    // pulses where a pin did not read high
-  uint32_t mismatch;         // events whose captured gap disagreed with the generated one
-  uint32_t verified;         // events checked against a narrow enough read-back range
-  int32_t  rangeMax;         // widest read-back range seen, ns
-  int32_t  diffMin, diffMax; // captured - generated gap
+  uint32_t timed;            // events with both rising edges
+  uint32_t exact, offBySample, outside;
   uint32_t otherLines[LINES];
 } st;
 
+static mcpwm_timer_handle_t genTimer = nullptr;
+static mcpwm_oper_handle_t  genOper[2] = {};
+static mcpwm_cmpr_handle_t  genCmpr[2][2] = {};
+static mcpwm_gen_handle_t   genGen[2] = {};
+
 static const int LINE_ST_L = 14, LINE_ST_H = 15;   // CH8 L, CH8 H
-// Captured vs generated gap: the pins' read-back brackets each edge between the last read
-// that saw it low and the first that saw it high; the capture quantises each edge to one
-// sample, so its gap may be up to one sample outside that bracket.
-static const int32_t SELFTEST_TOLERANCE_NS = NS_PER_SAMPLE;
 
-struct Edge { uint32_t lo, hi; };   // the pin rose between these cycle counts
-// A pulse whose read-back range is wider than this proves nothing about the capture.
-static const int32_t SELFTEST_MAX_RANGE_NS = 3 * NS_PER_SAMPLE;
-static const uint32_t SELFTEST_MIN_VERIFIED_PCT = 95;
-
-// Xtensa lets loads overtake a store still in the write buffer: without a barrier, the
-// read-back loop held the pin write up by ~0.85 us (bench test 3). Returns the cycle count
-// once the write has left the CPU.
-static inline uint32_t IRAM_ATTR pinWrite(uint32_t reg, uint32_t bits) {
-  REG_WRITE(reg, bits);
-  __asm__ __volatile__("memw" ::: "memory");
-  return esp_cpu_get_cycle_count();
+static void genDelete() {
+  if (genTimer) mcpwm_timer_disable(genTimer);
+  for (int i = 0; i < 2; i++) {
+    if (genGen[i]) mcpwm_del_generator(genGen[i]);
+    for (int j = 0; j < 2; j++)
+      if (genCmpr[i][j]) mcpwm_del_comparator(genCmpr[i][j]);
+    if (genOper[i]) mcpwm_del_operator(genOper[i]);
+    genGen[i] = nullptr;
+    genCmpr[i][0] = genCmpr[i][1] = nullptr;
+    genOper[i] = nullptr;
+  }
+  if (genTimer) mcpwm_del_timer(genTimer);
+  genTimer = nullptr;
 }
 
-// Waits until the pins in `bits` all read high: the edge lies between the start of the
-// last read that saw them low (or `from`) and the end of the read that saw them high.
-// False after `limit` cycles.
-static inline bool IRAM_ATTR waitHigh(uint32_t bits, uint32_t from, uint32_t limit, Edge& e) {
-  uint32_t lo = from;
-  for (;;) {
-    uint32_t c = esp_cpu_get_cycle_count();
-    bool high = (REG_READ(GPIO_IN_REG) & bits) == bits;
-    if (high) {
-      e.lo = lo;
-      e.hi = esp_cpu_get_cycle_count();
-      return true;
-    }
-    lo = c;
-    if (c - from > limit) return false;
+// One timer, one operator per line. L rises at tick 1, H gapTicks later; both fall
+// together at the end of the pulse, like a comparator pair on a real edge. Each
+// MCPWM_TIMER_START_STOP_FULL runs the timer through one period: one pulse pair.
+static bool genCreate(uint32_t gapTicks) {
+  const uint32_t pulseTicks = (uint64_t)SELFTEST_PULSE_US * GEN_HZ / 1000000;
+  const uint32_t riseL = 1, riseH = 1 + gapTicks, fall = riseH + pulseTicks;
+  mcpwm_timer_config_t tc = {};
+  tc.group_id = 0;
+  tc.clk_src = MCPWM_TIMER_CLK_SRC_DEFAULT;
+  tc.resolution_hz = GEN_HZ;
+  tc.count_mode = MCPWM_TIMER_COUNT_MODE_UP;
+  tc.period_ticks = fall + 100;
+  if (mcpwm_new_timer(&tc, &genTimer) != ESP_OK) return false;
+  const int pins[2] = {SELFTEST_PIN_L, SELFTEST_PIN_H};
+  const uint32_t rise[2] = {riseL, riseH};
+  for (int i = 0; i < 2; i++) {
+    mcpwm_operator_config_t oc = {};
+    oc.group_id = 0;
+    if (mcpwm_new_operator(&oc, &genOper[i]) != ESP_OK) return false;
+    if (mcpwm_operator_connect_timer(genOper[i], genTimer) != ESP_OK) return false;
+    mcpwm_comparator_config_t cc = {};   // no update flags: new values apply at once
+    for (int j = 0; j < 2; j++)
+      if (mcpwm_new_comparator(genOper[i], &cc, &genCmpr[i][j]) != ESP_OK) return false;
+    if (mcpwm_comparator_set_compare_value(genCmpr[i][0], rise[i]) != ESP_OK) return false;
+    if (mcpwm_comparator_set_compare_value(genCmpr[i][1], fall) != ESP_OK) return false;
+    mcpwm_generator_config_t gc = {};
+    gc.gen_gpio_num = pins[i];
+    gc.flags.io_loop_back = 1;   // keep the pad's input on: the I2S reads it
+    if (mcpwm_new_generator(genOper[i], &gc, &genGen[i]) != ESP_OK) return false;
+    if (mcpwm_generator_set_action_on_compare_event(genGen[i],
+          MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, genCmpr[i][0],
+                                         MCPWM_GEN_ACTION_HIGH)) != ESP_OK) return false;
+    if (mcpwm_generator_set_action_on_compare_event(genGen[i],
+          MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, genCmpr[i][1],
+                                         MCPWM_GEN_ACTION_LOW)) != ESP_OK) return false;
   }
+  return mcpwm_timer_enable(genTimer) == ESP_OK;
 }
 
-// Both lines rise (OUT_L first, OUT_H gapCyc later) and fall together, like a comparator
-// pair on a real edge. In IRAM with interrupts off, so a cache miss can't stretch it; the
-// pins are read back, because BLE traffic or a flash write can still hold up the writes.
-static bool IRAM_ATTR selftestPulse(uint32_t gapCyc, uint32_t pulseCyc, uint32_t limit,
-                                    Edge& eL, Edge& eH) {
-  static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
-  const uint32_t bL = 1u << SELFTEST_PIN_L, bH = 1u << SELFTEST_PIN_H;
-  bool ok;
-  portENTER_CRITICAL(&mux);
-  uint32_t c0 = esp_cpu_get_cycle_count();
-  if (gapCyc == 0) {
-    uint32_t w = pinWrite(GPIO_OUT_W1TS_REG, bL | bH);
-    ok = waitHigh(bL | bH, w, limit, eL);
-    eH = eL;
-  } else {
-    uint32_t w = pinWrite(GPIO_OUT_W1TS_REG, bL);
-    ok = waitHigh(bL, w, limit, eL);
-    while (esp_cpu_get_cycle_count() - c0 < gapCyc) {}
-    w = pinWrite(GPIO_OUT_W1TS_REG, bH);
-    ok = waitHigh(bH, w, limit, eH) && ok;
+// Back to plain inputs into the I2S, as captureBegin set them up.
+static void selftestPinsToInputs() {
+  const int pins[2] = {SELFTEST_PIN_L, SELFTEST_PIN_H};
+  const int lines[2] = {LINE_ST_L, LINE_ST_H};
+  for (int i = 0; i < 2; i++) {
+    gpio_config_t io = {};
+    io.pin_bit_mask = 1ULL << pins[i];
+    io.mode = GPIO_MODE_INPUT;
+    io.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    gpio_config(&io);
+    esp_rom_gpio_connect_in_signal(pins[i], I2S0I_DATA_IN0_IDX + lines[i], false);
   }
-  while (esp_cpu_get_cycle_count() - c0 < pulseCyc) {}
-  pinWrite(GPIO_OUT_W1TC_REG, bL | bH);
-  portEXIT_CRITICAL(&mux);
-  return ok;
-}
-
-static void selftestSend() {
-  const uint32_t mhz = getCpuFrequencyMhz();
-  const uint32_t gapCyc = (uint64_t)st.gapNs * mhz / 1000;
-  Edge eL, eH;
-  bool ok = selftestPulse(gapCyc, gapCyc + SELFTEST_PULSE_US * mhz, 5 * mhz, eL, eH);   // 5 us
-  st.pending = true;
-  st.genStuck = !ok;
-  if (!ok) {
-    st.genStuckCount++;
-    return;
-  }
-  st.genLoNs = (int32_t)((int64_t)(int32_t)(eH.lo - eL.hi) * 1000 / (int32_t)mhz);
-  st.genHiNs = (int32_t)((int64_t)(int32_t)(eH.hi - eL.lo) * 1000 / (int32_t)mhz);
-  if (st.genLoNs > (int32_t)st.gapNs + (int32_t)NS_PER_SAMPLE ||
-      st.genHiNs < (int32_t)st.gapNs - (int32_t)NS_PER_SAMPLE)
-    st.genOff++;
 }
 
 static void selftestStart(uint32_t gapNs, uint32_t count) {
@@ -399,60 +390,50 @@ static void selftestStart(uint32_t gapNs, uint32_t count) {
     Serial.println("selftest: gap 0..100000 ns, count 1..1000");
     return;
   }
+  const uint32_t gapTicks = (uint32_t)(((uint64_t)gapNs * GEN_HZ + 500000000) / 1000000000);
+  if (!genCreate(gapTicks)) {
+    genDelete();
+    selftestPinsToInputs();
+    Serial.println("selftest: could not set up the MCPWM pulse generator");
+    return;
+  }
   memset(&st, 0, sizeof st);
   st.active = true;
   st.gapNs = gapNs;
+  st.effGapNs = (int32_t)((uint64_t)gapTicks * 1000000000 / GEN_HZ);
   st.count = count;
-  st.gapMin = st.diffMin = INT32_MAX;
-  st.gapMax = st.diffMax = INT32_MIN;
+  st.gapMin = INT32_MAX;
+  st.gapMax = INT32_MIN;
   st.spacingMs = deadtimeMs + 20 > 50 ? deadtimeMs + 20 : 50;
   st.nextAt = millis() + 100;
   st.missedAtStart = missedCount;
   savedMask = channelMask;
   applyMask(channelMask | 0x80);   // CH8 for the duration, not stored
-  REG_WRITE(GPIO_OUT_W1TC_REG, (1u << SELFTEST_PIN_L) | (1u << SELFTEST_PIN_H));
-  gpio_set_direction((gpio_num_t)SELFTEST_PIN_L, GPIO_MODE_INPUT_OUTPUT);
-  gpio_set_direction((gpio_num_t)SELFTEST_PIN_H, GPIO_MODE_INPUT_OUTPUT);
-  Serial.printf("selftest: %u pulses on CH8 (GPIO %d L, %d H), H %u ns after L, every %u ms\n",
-                (unsigned)count, SELFTEST_PIN_L, SELFTEST_PIN_H, (unsigned)gapNs,
-                (unsigned)st.spacingMs);
+  Serial.printf("selftest: %u pulse pairs from MCPWM on CH8 (GPIO %d L, %d H), H %d ns after "
+                "L, every %u ms\n", (unsigned)count, SELFTEST_PIN_L, SELFTEST_PIN_H,
+                (int)st.effGapNs, (unsigned)st.spacingMs);
 }
 
 static void selftestRecord(const EventResult& r) {
   st.seen++;
-  bool pending = st.pending;
-  st.pending = false;
   const LineResult& L = r.line[LINE_ST_L];
   const LineResult& H = r.line[LINE_ST_H];
   if (L.edges != 2 || H.edges != 2) st.glitches++;
   if (L.rise >= 0 && H.rise >= 0) {
     int32_t gap = (int32_t)(H.rise - L.rise) * (int32_t)NS_PER_SAMPLE;
+    st.timed++;
     st.gapSum += gap;
     if (gap < st.gapMin) st.gapMin = gap;
     if (gap > st.gapMax) st.gapMax = gap;
-    int32_t range = st.genHiNs - st.genLoNs;
-    if (pending && !st.genStuck && range > st.rangeMax) st.rangeMax = range;
-    if (pending && !st.genStuck && range <= SELFTEST_MAX_RANGE_NS) {
-      st.verified++;
-      // How far the captured gap is outside the bracket the pins gave (0: inside).
-      int32_t d = gap < st.genLoNs ? gap - st.genLoNs : gap > st.genHiNs ? gap - st.genHiNs : 0;
-      if (d < st.diffMin) st.diffMin = d;
-      if (d > st.diffMax) st.diffMax = d;
-      bool off = st.genLoNs > (int32_t)st.gapNs + (int32_t)NS_PER_SAMPLE ||
-                 st.genHiNs < (int32_t)st.gapNs - (int32_t)NS_PER_SAMPLE;
-      if (abs(d) > SELFTEST_TOLERANCE_NS) {
-        st.mismatch++;
-        Serial.printf("selftest: evt %u: pins had %d..%d ns, captured %d ns\n",
-                      (unsigned)r.number, (int)st.genLoNs, (int)st.genHiNs, (int)gap);
-      } else if (off) {
-        Serial.printf("selftest: evt %u: generator was off (pins had %d..%d ns), captured "
-                      "%d ns: agrees\n", (unsigned)r.number, (int)st.genLoNs, (int)st.genHiNs,
-                      (int)gap);
-      }
-    } else if (pending && !st.genStuck) {
-      Serial.printf("selftest: evt %u: not verified, the pins' read-back range %d..%d ns is "
-                    "too wide (captured %d ns)\n", (unsigned)r.number, (int)st.genLoNs,
-                    (int)st.genHiNs, (int)gap);
+    // Each edge is sampled every 100 ns, so the captured gap is the true one rounded down
+    // or up to whole samples: never a full sample or more away.
+    int32_t d = gap - st.effGapNs;
+    if (d == 0) st.exact++;
+    else if (abs(d) <= (int32_t)NS_PER_SAMPLE) st.offBySample++;
+    else {
+      st.outside++;
+      Serial.printf("selftest: evt %u: captured %d ns, set %d ns\n", (unsigned)r.number,
+                    (int)gap, (int)st.effGapNs);
     }
   }
   for (int l = 0; l < LINES; l++)
@@ -460,32 +441,19 @@ static void selftestRecord(const EventResult& r) {
 }
 
 static void selftestFinish() {
-  gpio_set_direction((gpio_num_t)SELFTEST_PIN_L, GPIO_MODE_INPUT);
-  gpio_set_direction((gpio_num_t)SELFTEST_PIN_H, GPIO_MODE_INPUT);
+  genDelete();
+  selftestPinsToInputs();
   applyMask(savedMask);
   st.active = false;
 
   uint32_t missed = missedCount - st.missedAtStart;
-  Serial.printf("selftest: %u of %u pulses seen, %u possibly missed\n",
+  Serial.printf("selftest: %u of %u pulse pairs seen, %u possibly missed\n",
                 (unsigned)st.seen, (unsigned)st.count, (unsigned)missed);
-  if (st.seen > 0 && st.gapMin != INT32_MAX)
-    Serial.printf("selftest: gap set %u ns, captured mean %d, min %d, max %d ns\n",
-                  (unsigned)st.gapNs, (int)(st.gapSum / (int64_t)st.seen), (int)st.gapMin,
-                  (int)st.gapMax);
-  if (st.diffMin != INT32_MAX)
-    Serial.printf("selftest: captured gap outside the pins' read-back range by min %d, max "
-                  "%d ns (allowed +-%d), %u events outside\n", (int)st.diffMin, (int)st.diffMax,
-                  (int)SELFTEST_TOLERANCE_NS, (unsigned)st.mismatch);
-  Serial.printf("selftest: %u of %u events verified against the pins' read-back (range at "
-                "most %d ns; widest seen %d ns)\n", (unsigned)st.verified, (unsigned)st.seen,
-                (int)SELFTEST_MAX_RANGE_NS, (int)st.rangeMax);
-  if (st.genOff)
-    Serial.printf("selftest: the generator itself was off in %u pulses (CPU held up by BLE or "
-                  "flash); those are checked against what the pins really did\n",
-                  (unsigned)st.genOff);
-  if (st.genStuckCount)
-    Serial.printf("selftest: a CH8 pin did not go high in %u pulses: is something plugged "
-                  "into CH8?\n", (unsigned)st.genStuckCount);
+  if (st.timed)
+    Serial.printf("selftest: gap set %d ns, captured mean %.1f, min %d, max %d ns; %u exact, "
+                  "%u one sample off, %u further off\n", (int)st.effGapNs,
+                  (double)st.gapSum / st.timed, (int)st.gapMin, (int)st.gapMax,
+                  (unsigned)st.exact, (unsigned)st.offBySample, (unsigned)st.outside);
   if (st.glitches)
     Serial.printf("selftest: %u events with extra or missing transitions on CH8\n",
                   (unsigned)st.glitches);
@@ -496,9 +464,8 @@ static void selftestFinish() {
                   (l & 1) ? 'H' : 'L', (unsigned)st.otherLines[l]);
     others = true;
   }
-  bool pass = st.seen == st.count && missed == 0 && st.glitches == 0 && st.mismatch == 0 &&
-              st.genStuckCount == 0 &&
-              st.verified * 100 >= st.seen * SELFTEST_MIN_VERIFIED_PCT && st.verified > 0;
+  bool pass = st.seen == st.count && st.timed == st.seen && missed == 0 && st.glitches == 0 &&
+              st.outside == 0;
   Serial.printf("selftest: %s%s\n", pass ? "PASS" : "FAIL",
                 others ? " (other lines had edges: a jumper, or floating inputs)" : "");
 }
@@ -508,7 +475,7 @@ static void selftestService(uint32_t now) {
   if ((int32_t)(now - st.nextAt) < 0) return;
   if (st.sent < st.count) {
     if (evState != EV_IDLE) return;   // wait for the previous event to finish
-    selftestSend();
+    mcpwm_timer_start_stop(genTimer, MCPWM_TIMER_START_STOP_FULL);   // one pulse pair
     st.sent++;
     st.nextAt = now + st.spacingMs;
   } else {
