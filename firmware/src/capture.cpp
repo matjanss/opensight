@@ -310,7 +310,6 @@ static struct {
   uint32_t gapNs, count, sent, seen, glitches, missedAtStart;
   uint32_t spacingMs, nextAt;
   int32_t  effGapNs;         // the gap the hardware makes: gapNs rounded to whole ticks
-  int32_t  gapMin, gapMax;
   int64_t  gapSum;
   uint32_t genHz;            // MCPWM tick rate for this run
   uint32_t pulseNs;          // OUT_H pulse length; OUT_L is gapNs longer
@@ -318,7 +317,8 @@ static struct {
   uint32_t straddle;         // events with L and H in different DMA blocks
   uint32_t badLength;        // events whose pulse lengths were off
   uint32_t blockPos[4];      // L's position within its block, in quarters
-  uint32_t exact, roundedDown, roundedUp, outside;
+  uint32_t atLow, atHigh;    // gaps captured as effGapNs rounded down / up to whole samples
+  uint32_t oneOff, outside;  // ... one sample beyond that (input skew) / further off
   uint32_t otherLines[LINES];
 } st;
 
@@ -449,8 +449,6 @@ static void selftestStart(uint32_t gapNs, uint32_t count, uint32_t pulseNs) {
   st.effGapNs = (int32_t)((uint64_t)gapTicks * 1000000000 / hz);
   st.pulseNs = (uint32_t)((uint64_t)pulseTicks * 1000000000 / hz);
   st.count = count;
-  st.gapMin = INT32_MAX;
-  st.gapMax = INT32_MIN;
   st.spacingMs = deadtimeMs + 20 > 50 ? deadtimeMs + 20 : 50;
   st.nextAt = millis() + 100;
   st.missedAtStart = missedCount;
@@ -458,8 +456,9 @@ static void selftestStart(uint32_t gapNs, uint32_t count, uint32_t pulseNs) {
   applyMask(channelMask | 0x80);   // CH8 for the duration, not stored
   Serial.printf("selftest: %u pulse pairs from MCPWM on CH8 (GPIO %d L, %d H), H %d ns after "
                 "L, H %u ns long, %.1f ns ticks, every %u ms, at random points in the DMA "
-                "blocks\n", (unsigned)count, SELFTEST_PIN_L, SELFTEST_PIN_H, (int)st.effGapNs,
-                (unsigned)st.pulseNs, 1e9 / hz, (unsigned)st.spacingMs);
+                "blocks; captured in whole samples (%u ns)\n", (unsigned)count, SELFTEST_PIN_L, SELFTEST_PIN_H, (int)st.effGapNs,
+                (unsigned)st.pulseNs, 1e9 / hz, (unsigned)st.spacingMs,
+                (unsigned)NS_PER_SAMPLE);
 }
 
 static void selftestRecord(const EventResult& r) {
@@ -483,14 +482,15 @@ static void selftestRecord(const EventResult& r) {
     if (L.rise / SAMPLES_PER_BLOCK != H.rise / SAMPLES_PER_BLOCK) st.straddle++;
     st.blockPos[(L.rise % SAMPLES_PER_BLOCK) * 4 / SAMPLES_PER_BLOCK]++;
     st.gapSum += gap;
-    if (gap < st.gapMin) st.gapMin = gap;
-    if (gap > st.gapMax) st.gapMax = gap;
-    // Each edge is sampled every 100 ns, so the captured gap is the true one rounded down
-    // or up to whole samples: never a full sample or more away.
-    int32_t d = gap - st.effGapNs;
-    if (d == 0) st.exact++;
-    else if (d < 0 && d >= -(int32_t)NS_PER_SAMPLE) st.roundedDown++;
-    else if (d > 0 && d <= (int32_t)NS_PER_SAMPLE) st.roundedUp++;
+    // Each edge is sampled every 100 ns, so the captured gap is the set one rounded down
+    // or up to whole samples (the same value both ways when it is a whole number). A few
+    // ns of skew between the two inputs can add one sample when an edge sits right on a
+    // sample; more than one sample away is an error.
+    const int32_t S = (int32_t)NS_PER_SAMPLE;
+    int32_t low = st.effGapNs / S * S, high = (st.effGapNs + S - 1) / S * S;
+    if (gap == low) st.atLow++;
+    else if (gap == high) st.atHigh++;
+    else if (gap == low - S || gap == high + S) st.oneOff++;
     else {
       st.outside++;
       Serial.printf("selftest: evt %u: captured %d ns, set %d ns\n", (unsigned)r.number,
@@ -510,22 +510,44 @@ static void selftestFinish() {
   uint32_t missed = missedCount - st.missedAtStart;
   Serial.printf("selftest: %u of %u pulse pairs seen, %u possibly missed\n",
                 (unsigned)st.seen, (unsigned)st.count, (unsigned)missed);
+  if (st.timed < st.seen)
+    Serial.printf("selftest: %u events without both rising edges\n",
+                  (unsigned)(st.seen - st.timed));
   if (st.timed) {
-    Serial.printf("selftest: gap set %d ns, captured mean %.1f, min %d, max %d ns\n",
-                  (int)st.effGapNs, (double)st.gapSum / st.timed, (int)st.gapMin,
-                  (int)st.gapMax);
     // With the pulse pair at a random position against the samples, a gap of n samples
-    // plus a fraction f is captured as n + 1 samples in a share f of the pulses.
-    int32_t frac = st.effGapNs % (int32_t)NS_PER_SAMPLE;
-    Serial.printf("selftest: %u exact, %u rounded down, %u rounded up (%.0f %% up; expected "
-                  "about %d %%), %u further off\n", (unsigned)st.exact,
-                  (unsigned)st.roundedDown, (unsigned)st.roundedUp,
-                  100.0 * st.roundedUp / st.timed, (int)(frac * 100 / (int32_t)NS_PER_SAMPLE),
-                  (unsigned)st.outside);
-    Serial.printf("selftest: L in the 1st/2nd/3rd/4th quarter of its DMA block: %u/%u/%u/%u; "
-                  "%u with L and H in different blocks\n", (unsigned)st.blockPos[0],
-                  (unsigned)st.blockPos[1], (unsigned)st.blockPos[2], (unsigned)st.blockPos[3],
-                  (unsigned)st.straddle);
+    // plus a fraction p is captured as n + 1 samples in a share p of the pulses: the mean
+    // tends to the set gap, within a standard error of S * sqrt(p (1 - p) / count).
+    const int32_t S = (int32_t)NS_PER_SAMPLE;
+    int32_t low = st.effGapNs / S * S, high = (st.effGapNs + S - 1) / S * S;
+    double p = (double)(st.effGapNs - low) / S;
+    double mean = (double)st.gapSum / st.timed;
+    double se = S * sqrt(p * (1 - p) / st.timed);
+    if (low == high) {
+      Serial.printf("selftest: gap set %d ns (a whole number of samples): captured as %d ns "
+                    "%u times, one sample off %u times, further off %u times\n",
+                    (int)st.effGapNs, (int)low, (unsigned)st.atLow, (unsigned)st.oneOff,
+                    (unsigned)st.outside);
+    } else {
+      Serial.printf("selftest: gap set %d ns, between two samples (%d ns each): captured as "
+                    "%d ns %u times, %d ns %u times (%.0f %% at %d; expected about %.0f %%), "
+                    "one sample beyond %u, further off %u\n",
+                    (int)st.effGapNs, (int)S, (int)low, (unsigned)st.atLow, (int)high,
+                    (unsigned)st.atHigh, 100.0 * st.atHigh / st.timed, (int)high, 100.0 * p,
+                    (unsigned)st.oneOff, (unsigned)st.outside);
+      bool off = fabs(mean - st.effGapNs) > 3 * se + 1;
+      Serial.printf("selftest: captured mean %.1f ns, set %d ns: %.1f ns off; the rounding "
+                    "alone gives about +-%.1f ns over %u pairs%s\n",
+                    mean, (int)st.effGapNs, mean - st.effGapNs, se, (unsigned)st.timed,
+                    off ? " (more than 3x that: the pulses are not at random points in a "
+                          "sample)" : "");
+    }
+    // L and H fall in different DMA blocks in a share gap / block of the pulses.
+    double straddleExp = st.timed * fmin(1.0, st.effGapNs / (BLOCK_US * 1000.0));
+    Serial.printf("selftest: L in the 1st/2nd/3rd/4th quarter of its DMA block: %u/%u/%u/%u "
+                  "(expected about equal); L and H in different blocks: %u (expected about "
+                  "%.1f)\n", (unsigned)st.blockPos[0], (unsigned)st.blockPos[1],
+                  (unsigned)st.blockPos[2], (unsigned)st.blockPos[3], (unsigned)st.straddle,
+                  straddleExp);
   }
   if (st.glitches)
     Serial.printf("selftest: %u events with extra or missing transitions on CH8\n",

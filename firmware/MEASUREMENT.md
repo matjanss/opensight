@@ -44,6 +44,7 @@ setup uses the same map, so nothing changes when the host board arrives.
 
 | Stage | Runs on | Does | Output |
 |---|---|---|---|
+| 2026-11-20 | 1 | `selftest 1050 100` | PASS: 54 at 1000 ns, 46 at 1100, mean 1046.0 (rounding alone: ±5 ns over 100), L in all four quarters, 0 split across blocks (expected 0.5). Correct, but the summary read as wrong ("0 exact", mean ≠ set). It now says that a gap between two samples can only read as either, gives the expected share, the mean's rounding error (flags a mean more than 3× off: pulses locked to the sample clock) and the expected number of split pairs. |
 | I2S parallel capture | DMA | Samples the 16 lines at ~10 MHz into a ring of ~64 KB (~3 ms) | 16-bit samples |
 | Activity scan | DMA end-of-block interrupt (IRAM) | ORs each finished block; on activity, marks the event window and freezes the ring around it | Event window |
 | Edge extraction | Measurement task, core 1 | First rising edge per line in the window, plus pulse length | t1 (L), t2 (H) per channel |
@@ -127,9 +128,10 @@ Bench test (bare NodeMCU, no sensor boards needed). Flash, then open the monitor
 2. `stat` twice, a few seconds apart: the sample rate reads 10.000 MHz and the block count
    grows. 0 blocks: the I2S doesn't run. 5 MHz: each DMA block is only half filled.
 3. `selftest`: 20 of 20 pulse pairs, captured gap 1000 ns (within one sample on every
-   pulse), no extra transitions, PASS. `selftest 1050 200`: a mix of 1000 and 1100,
-   about half rounded up, mean close to 1050 (each pulse starts at a random point
-   within a sample, as real sound does). Then `selftest 0` (no skew between
+   pulse), no extra transitions, PASS. `selftest 1050 200`: a mix of 1000 and 1100
+   (one sample is 100 ns, so no single pulse can read 1050), about half at 1100, and
+   the mean within the printed rounding error of 1050 (each pulse starts at a random
+   point within a sample, as real sound does). Then `selftest 0` (no skew between
    lines: gap 0), `selftest 500`, `selftest 10000`, `selftest 100000`.
 4. `verbose on`, `selftest 1000 3`: each CH8 line shows one + and one -, pulse lengths
    about 11 µs (L) and 10 µs (H).
