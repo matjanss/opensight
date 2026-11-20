@@ -406,7 +406,7 @@ static void selftestPinsToInputs() {
     gpio_config_t io = {};
     io.pin_bit_mask = 1ULL << pins[i];
     io.mode = GPIO_MODE_INPUT;
-    io.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    io.pull_down_en = pins[i] < 34 ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE;
     gpio_config(&io);
     esp_rom_gpio_connect_in_signal(pins[i], I2S0I_DATA_IN0_IDX + lines[i], false);
   }

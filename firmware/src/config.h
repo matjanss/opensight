@@ -22,19 +22,21 @@ const uint32_t SHOT_RETRY_MS        = 500;    // wait after a failed indication 
 const float    TEST_SHOT_SIGMA_MM   = 15.0f;
 
 // --- Measurement (see ../MEASUREMENT.md) ---
-// Comparator lines of host board v0.2, in I2S data-bit order: bit 2n = CH(n+1) OUT_L,
-// bit 2n+1 = CH(n+1) OUT_H. Lines idle low and go high while SIG is above the threshold.
-const int CAPTURE_LINE_PINS[16] = {
-  36, 39,   // CH1
-  34, 35,   // CH2
-  32, 33,   // CH3
-  25, 26,   // CH4
-  27, 14,   // CH5
-   4, 23,   // CH6
-  22, 21,   // CH7
-  19, 18,   // CH8
+// Comparator lines of host board v0.3 (hardware/host-board/README.md), in I2S data-bit
+// order: bit 2n = CH(n+1) OUT_L, bit 2n+1 = CH(n+1) OUT_H. Lines idle low and go high
+// while SIG is above the threshold.
+constexpr int CAPTURE_LINE_PINS[16] = {
+  39, 36,   // CH1
+  35, 34,   // CH2
+  33, 32,   // CH3
+  26, 25,   // CH4
+  22, 23,   // CH5
+  19, 21,   // CH6
+  17, 18,   // CH7
+   4, 16,   // CH8
 };
-const int IR_EN_PIN = 16;   // IR curtain LEDs, high = on; unused for now, held low
+const int IR_EN_PIN = 27;   // IR curtain LEDs, high = on; unused for now, held low
+// Also on the board, unused so far: IR_IN 13 (IR receiver), DQ 14 (DS18B20).
 
 // The I2S sample clock is made by LEDC and looped back through this pin (spare on the
 // host board; leave it unconnected).
@@ -60,6 +62,6 @@ const uint32_t CAPTURE_DEADTIME_DEFAULT = 30;     // ms after an event with no n
 
 // Self-test: pulses driven out on CH8's own pins (the I2S reads them back on the same
 // pins, so no jumpers are needed). CH8 must have no sensor board plugged in.
-const int      SELFTEST_PIN_L       = 19;   // CH8 OUT_L
-const int      SELFTEST_PIN_H       = 18;   // CH8 OUT_H
+constexpr int  SELFTEST_PIN_L       = CAPTURE_LINE_PINS[14];   // CH8 OUT_L, GPIO 4
+constexpr int  SELFTEST_PIN_H       = CAPTURE_LINE_PINS[15];   // CH8 OUT_H, GPIO 16
 const uint32_t SELFTEST_PULSE_US    = 10;   // OUT_L pulse length; OUT_H ends with it

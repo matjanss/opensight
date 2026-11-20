@@ -8,11 +8,11 @@ commit as the code, and every bench test result goes into [Bench results](#bench
 
 ## Scope
 
-- 4 corner mics to start, up to 8 channels (host board v0.2 has 8 connectors). Each
+- 4 corner mics to start, up to 8 channels (the host board has 8 connectors). Each
   channel gives two comparator lines: OUT_L (low threshold, trips first) and OUT_H (high
   threshold, a few µs later). Lines idle low and go high while SIG is above the threshold.
 - **No IR light curtain** for now; it comes later. IR_IN (GPIO 13) is unused and IR_EN
-  (GPIO 16) is held low.
+  (GPIO 27) is held low.
 - Results go out over **serial** (115200) until step 5. The BOOT test shot stays the shot
   source until step 3 has a solver. No protocol change before step 5.
 - Accuracy target after calibration: 0.2–0.5 mm (1σ). Every 1 µs of timing error is about
@@ -23,21 +23,24 @@ existing hole (almost no crack: missed), and a blast from a neighbouring lane th
 hit about 10 mm from centre on the centre lines (only absolute level and edge sharpness can
 reject it). Logging every rejected event matters more because of this.
 
-## Pins (host board v0.2)
+## Pins (host board v0.3)
+
+From `hardware/host-board/README.md`; `CAPTURE_LINE_PINS` in `config.h`. (Step 1 was
+bench-tested on the v0.2 map; v0.3 moves every line, see Bench results.)
 
 | Channel | OUT_L | OUT_H |
 |---|---|---|
-| CH1 | 36 | 39 |
-| CH2 | 34 | 35 |
-| CH3 | 32 | 33 |
-| CH4 | 25 | 26 |
-| CH5 | 27 | 14 |
-| CH6 | 4 | 23 |
-| CH7 | 22 | 21 |
-| CH8 | 19 | 18 |
+| CH1 | 39 | 36 |
+| CH2 | 35 | 34 |
+| CH3 | 33 | 32 |
+| CH4 | 26 | 25 |
+| CH5 | 22 | 23 |
+| CH6 | 19 | 21 |
+| CH7 | 17 | 18 |
+| CH8 | 4 | 16 |
 
-Other: IR_IN 13, IR_EN 16, DQ 17 (DS18B20, 4.7 k pull-up), STAT 2 (blue LED + panel LED),
-BOOT 0. Spare: 5, 12, 15. Empty connectors are held low by 100 k pull-downs. A breadboard
+Other: IR_IN 13, IR_EN 27, DQ 14 (DS18B20, 4.7 k pull-up), STAT 2 (blue LED + panel LED),
+BOOT 0. Spare: 5 (the capture clock loopback), 12, 15. Empty connectors are held low by 100 k pull-downs. A breadboard
 setup uses the same map, so nothing changes when the host board arrives.
 
 ## Pipeline
@@ -68,7 +71,7 @@ so a problem shows up in the step that caused it.
 
 | # | Step | Status |
 |---|---|---|
-| 1 | Capture and raw dump | done: bench tests 1-8, extra tests 9-13 and break-it tests 14-15 pass |
+| 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | planned |
 | 3 | Solver and calibration | planned |
 | 4 | Validity checks | planned |
@@ -111,10 +114,10 @@ Build:
   transition of every line in the window (ringing, double trips).
 - Serial commands (type `help`): `stat`, `mask <hex>`, `deadtime <ms>` (both stored in
   NVS, namespace `"measure"`), `verbose on|off`, `selftest [ns] [n]`.
-- Self-test: MCPWM drives a pulse pair out on CH8's own pins (GPIO 19 = L, 18 = H), OUT_H
+- Self-test: MCPWM drives a pulse pair out on CH8's own pins (GPIO 4 = L, 16 = H), OUT_H
   a set gap after OUT_L (12.5 ns steps), both falling together. The I2S reads them back
   on the same pins, so no jumpers are needed; CH8 must have no sensor board plugged in.
-  A jumper from GPIO 19 to another input checks that input. The gap is made by the timer
+  A jumper from GPIO 4 to another input checks that input. The gap is made by the timer
   hardware, so the captured gap must be within one sample of it on every pulse. A
   CPU-driven generator did not work (bench tests 1-4): BLE traffic, flash writes and the
   Xtensa write buffer shifted its pin writes by up to several µs, and reading the pins
@@ -134,7 +137,7 @@ Bench test (bare NodeMCU, no sensor boards needed). Flash, then open the monitor
    lines: gap 0), `selftest 500`, `selftest 10000`, `selftest 100000`.
 4. `verbose on`, `selftest 1000 3`: each CH8 line shows one + and one -, pulse lengths
    about 11 µs (L) and 10 µs (H).
-5. Pin map: `mask FF`, a jumper from GPIO 19 to one input at a time, `selftest 1000 3`:
+5. Pin map: `mask FF`, a jumper from GPIO 4 to one input at a time, `selftest 1000 3`:
    only CH8 and the jumpered input have edges, at the same time as CH8 L. The floating
    inputs 34-39 may show noise unless they are tied to GND with a resistor or jumper.
 6. With the app connected: `selftest 1000 200` while changing the sensor name in the app
@@ -160,10 +163,11 @@ L per quarter of the block and pairs with L and H in different blocks):
     shots during it. About 50 % at 1100, PASS; `stat` after.
 
 Break-it tests (past the limits: it must report what it loses and keep its time):
-14. Pin map of CH1/CH2 (GPIO 36, 39, 34, 35; only 32 and 25 were jumpered in test 5):
-    `mask 03`, a jumper from GPIO 19 to one pin at a time, `selftest 1000 5`: that line
-    has edges at the same ns as CH8 L ("also had edges"; still PASS, the test is of CH8).
-15. Flood: `mask 03`, `deadtime 1`, `verbose on`, a finger on GPIO 36 for 30 s (mains
+14. Pin map, every line: `mask 7F`, a jumper from GPIO 4 (CH8 L) to one pin at a time,
+    `selftest 1000 5`: only that line has edges besides CH8, at the same ns as CH8 L
+    ("also had edges"; still PASS, the test is of CH8). Needed again after any change
+    to the map.
+15. Flood: `mask 03`, `deadtime 1`, `verbose on`, a finger on GPIO 39 for 30 s (mains
     hum). Test shots and the heartbeat still reach the app, commands still work; `stat`:
     10.000 MHz. Back: `deadtime 30`, `verbose off`.
 
@@ -249,6 +253,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-21 | 1 | Host board v0.3 map (no test yet) | The pins moved: every channel's L and H, IR_EN 16 → 27, DQ 17 → 14 (`config.h`). CH8, and so the self-test, is now on GPIO 4 (L) and 16 (H); the self-test pins follow the map. Nothing else in the capture depends on which GPIO a line is on. Retest: test 3 (self-test on the new pins), test 14 (every line, jumper from GPIO 4), and test 15 once. |
 | 2026-11-20 | 1 | Extra and break-it tests after the boundary, summary and serial fixes | All pass (user report). Pin map of CH1/CH2 (GPIO 36, 39, 34, 35) confirmed with jumpers from GPIO 19, so all 16 lines are now checked except CH5-CH7, which go through the same routing. Flood with a finger on CH1, `deadtime 1`, `verbose on`: test shots and heartbeat reach the app, commands work. Step 1 closed; step 2 waits for the sensor boards. |
 | 2026-11-20 | 1 | Break-it: `mask 03` floating, then CH1 jumpered, then a finger on CH1 with `verbose on`, app connected | Floating inputs alone stay quiet (no events). Jumper GPIO 19 → CH1: CH1 had edges with CH8, PASS (other lines are a note, not a failure). Finger: a stream of events, heartbeat kept coming, **test shots didn't**: `loop()` printed every queued event and blocked on the UART once the 2 KB buffer was full, so the button was sampled too rarely to see a short press. Events are now printed only while they fit in the serial buffer (the rest wait in the queue, or count as not printed), transitions only with room to spare. Retest 15. |
 | 2026-11-20 | 1 | `selftest 1050 100` | PASS: 54 at 1000 ns, 46 at 1100, mean 1046.0 (rounding alone: ±5 ns over 100), L in all four quarters, 0 split across blocks (expected 0.5). Correct, but the summary read as wrong ("0 exact", mean ≠ set). It now says that a gap between two samples can only read as either, gives the expected share, the mean's rounding error (flags a mean more than 3× off: pulses locked to the sample clock) and the expected number of split pairs. |
