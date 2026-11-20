@@ -52,7 +52,7 @@ const uint32_t SOUND_SPEED_MIN_M_S     = 331;   // at 0 degC: the slowest the wi
 const uint32_t CAPTURE_WINDOW_MARGIN_PCT = 20;  // on top of span / speed of sound
 const uint32_t CAPTURE_WINDOW_EXTRA_US = 100;   // comparator delay on a quiet far mic, pulse end
 // The I2S FIFO packs two 16-bit samples per 32-bit word. esp32-camera reads the earlier
-// sample from the high half; the self-test shows extra transitions if this is wrong.
+// sample from the high half; confirmed on the bench (step 1: pulse lengths exact).
 const bool     CAPTURE_HIGH_HALF_FIRST = true;
 
 const uint16_t CAPTURE_MASK_DEFAULT     = 0x0F;   // fitted channels, bit n = CH(n+1)

@@ -305,7 +305,7 @@ static struct {
   int32_t  gapMin, gapMax;
   int64_t  gapSum;
   uint32_t timed;            // events with both rising edges
-  uint32_t exact, offBySample, outside;
+  uint32_t exact, roundedDown, roundedUp, outside;
   uint32_t otherLines[LINES];
 } st;
 
@@ -429,7 +429,8 @@ static void selftestRecord(const EventResult& r) {
     // or up to whole samples: never a full sample or more away.
     int32_t d = gap - st.effGapNs;
     if (d == 0) st.exact++;
-    else if (abs(d) <= (int32_t)NS_PER_SAMPLE) st.offBySample++;
+    else if (d < 0 && d >= -(int32_t)NS_PER_SAMPLE) st.roundedDown++;
+    else if (d > 0 && d <= (int32_t)NS_PER_SAMPLE) st.roundedUp++;
     else {
       st.outside++;
       Serial.printf("selftest: evt %u: captured %d ns, set %d ns\n", (unsigned)r.number,
@@ -449,11 +450,19 @@ static void selftestFinish() {
   uint32_t missed = missedCount - st.missedAtStart;
   Serial.printf("selftest: %u of %u pulse pairs seen, %u possibly missed\n",
                 (unsigned)st.seen, (unsigned)st.count, (unsigned)missed);
-  if (st.timed)
-    Serial.printf("selftest: gap set %d ns, captured mean %.1f, min %d, max %d ns; %u exact, "
-                  "%u one sample off, %u further off\n", (int)st.effGapNs,
-                  (double)st.gapSum / st.timed, (int)st.gapMin, (int)st.gapMax,
-                  (unsigned)st.exact, (unsigned)st.offBySample, (unsigned)st.outside);
+  if (st.timed) {
+    Serial.printf("selftest: gap set %d ns, captured mean %.1f, min %d, max %d ns\n",
+                  (int)st.effGapNs, (double)st.gapSum / st.timed, (int)st.gapMin,
+                  (int)st.gapMax);
+    // With the pulse pair at a random position against the samples, a gap of n samples
+    // plus a fraction f is captured as n + 1 samples in a share f of the pulses.
+    int32_t frac = st.effGapNs % (int32_t)NS_PER_SAMPLE;
+    Serial.printf("selftest: %u exact, %u rounded down, %u rounded up (%.0f %% up; expected "
+                  "about %d %%), %u further off\n", (unsigned)st.exact,
+                  (unsigned)st.roundedDown, (unsigned)st.roundedUp,
+                  100.0 * st.roundedUp / st.timed, (int)(frac * 100 / (int32_t)NS_PER_SAMPLE),
+                  (unsigned)st.outside);
+  }
   if (st.glitches)
     Serial.printf("selftest: %u events with extra or missing transitions on CH8\n",
                   (unsigned)st.glitches);
@@ -475,6 +484,11 @@ static void selftestService(uint32_t now) {
   if ((int32_t)(now - st.nextAt) < 0) return;
   if (st.sent < st.count) {
     if (evState != EV_IDLE) return;   // wait for the previous event to finish
+    // CPU, MCPWM and sample clock all run off one crystal, so without this every pulse
+    // would start at the same point within a sample (bench test 5); real sound doesn't.
+    uint32_t wait = esp_random() % (2 * NS_PER_SAMPLE * getCpuFrequencyMhz() / 1000);
+    uint32_t c0 = esp_cpu_get_cycle_count();
+    while (esp_cpu_get_cycle_count() - c0 < wait) {}
     mcpwm_timer_start_stop(genTimer, MCPWM_TIMER_START_STOP_FULL);   // one pulse pair
     st.sent++;
     st.nextAt = now + st.spacingMs;

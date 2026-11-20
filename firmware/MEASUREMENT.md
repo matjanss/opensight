@@ -68,7 +68,7 @@ so a problem shows up in the step that caused it.
 
 | # | Step | Status |
 |---|---|---|
-| 1 | Capture and raw dump | bench test 1 done (capture good); self-test and time fixes, retest pending |
+| 1 | Capture and raw dump | **done** (bench test 5) |
 | 2 | Arrival times | planned |
 | 3 | Solver and calibration | planned |
 | 4 | Validity checks | planned |
@@ -125,7 +125,8 @@ Bench test (bare NodeMCU, no sensor boards needed). Flash, then open the monitor
    grows. 0 blocks: the I2S doesn't run. 5 MHz: each DMA block is only half filled.
 3. `selftest`: 20 of 20 pulse pairs, captured gap 1000 ns (within one sample on every
    pulse), no extra transitions, PASS. `selftest 1050 200`: a mix of 1000 and 1100,
-   mean close to 1050. Then `selftest 0` (no skew between
+   about half rounded up, mean close to 1050 (each pulse starts at a random point
+   within a sample, as real sound does). Then `selftest 0` (no skew between
    lines: gap 0), `selftest 500`, `selftest 10000`, `selftest 100000`.
 4. `verbose on`, `selftest 1000 3`: each CH8 line shows one + and one -, pulse lengths
    about 11 µs (L) and 10 µs (H).
@@ -224,6 +225,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-20 | 1 | Retest 4 (MCPWM generator), app connected, 20 + 300 pulses, 2 renames, 30 test shots | **Pass.** 1000 ns: 20 of 20 exact. 1050 ns: 300 of 300 at 1000 or 1100, none further off, nothing missed, through heartbeats, renames and shots; the 4100 ns pulses are gone, so they were the CPU generator, not the capture. Mean 1018 instead of ~1050: the generator, sample clock and CPU share one crystal, so the pulses started at almost the same point within a sample (timestamps all …856); random 0-200 ns start delay added. Step 1 done. |
 | 2026-11-20 | 1 | Retest 3, app connected, 200 pulses, 2 renames, 3 test shots | With `memw` the read-back ranges were narrow (≤ 267 ns), and showed the CPU generator really making ~150 ns gaps for a set 1000 ns while it read its pins back; the capture agreed (100/200 ns). At three heartbeat times the read-back said ~150 ns and the capture 4100 ns: undecided which is wrong. A CPU generator that changes when checked can't settle that, so the self-test now uses MCPWM (hardware-timed gap). Retest. |
 | 2026-11-20 | 1 | Retest 2, app connected, 400 pulses, 2 renames, 18 test shots | Checker passed a broken generator: gaps captured 100-200 ns for a set 1000 ns, yet PASS. Without a barrier, the read-back loop held the write of L up by ~0.85 µs, and each edge's range was then ~1 µs wide, so every gap fit. Fixed with `memw` after each pin write; ranges over 300 ns no longer count as verified, and ≥ 95 % must be. Every 40th pulse (2 s: the heartbeat's BLE notification) the generator is ~3 µs late. Time base still right: 10.000 MHz, 420 events, interrupt 9.0 %, longest freeze 1.0 ms. Retest. |
 | 2026-11-20 | 1 | Retest, app connected, 400 pulses, 2 renames, 11 test shots | Time base fixed: 10.000 MHz after 420 events, timestamps 50.0 ms apart. Interrupt 9.3 %, longest freeze 1.0 ms, nothing missed. Generator held up 3 times (5000 ns at the pins): captured 5000 ns each time. One FAIL from the checker, not the capture: timing H from L's read-back made the pin gap ~1060 ns, captured as a 40/60 mix of 1000 and 1100 (mean ~1060, sub-sample consistent); one read-back 60 ns late under BLE gave "pins 1058, captured 900". The check now brackets each edge between reads and times H from L's write again. Retest. |
@@ -233,6 +235,4 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 - Sample rate: 10 MHz to start; 20 MHz with a bigger ring if 100 ns turns out too coarse
   on the loudest channel (t2 − t1 ≈ 0.3 µs).
-- Sample order inside a 32-bit word (`CAPTURE_HIGH_HALF_FIRST`): taken from esp32-camera;
-  the self-test shows extra transitions if it is the other way round.
 - Dead time vs rapid-fire disciplines.
