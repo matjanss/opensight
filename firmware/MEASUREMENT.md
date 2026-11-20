@@ -44,6 +44,7 @@ setup uses the same map, so nothing changes when the host board arrives.
 
 | Stage | Runs on | Does | Output |
 |---|---|---|---|
+| 2026-11-20 | 1 | Break-it: `mask 03` floating, then CH1 jumpered, then a finger on CH1 with `verbose on`, app connected | Floating inputs alone stay quiet (no events). Jumper GPIO 19 → CH1: CH1 had edges with CH8, PASS (other lines are a note, not a failure). Finger: a stream of events, heartbeat kept coming, **test shots didn't**: `loop()` printed every queued event and blocked on the UART once the 2 KB buffer was full, so the button was sampled too rarely to see a short press. Events are now printed only while they fit in the serial buffer (the rest wait in the queue, or count as not printed), transitions only with room to spare. Retest 15. |
 | 2026-11-20 | 1 | `selftest 1050 100` | PASS: 54 at 1000 ns, 46 at 1100, mean 1046.0 (rounding alone: ±5 ns over 100), L in all four quarters, 0 split across blocks (expected 0.5). Correct, but the summary read as wrong ("0 exact", mean ≠ set). It now says that a gap between two samples can only read as either, gives the expected share, the mean's rounding error (flags a mean more than 3× off: pulses locked to the sample clock) and the expected number of split pairs. |
 | I2S parallel capture | DMA | Samples the 16 lines at ~10 MHz into a ring of ~64 KB (~3 ms) | 16-bit samples |
 | Activity scan | DMA end-of-block interrupt (IRAM) | ORs each finished block; on activity, marks the event window and freezes the ring around it | Event window |
@@ -158,7 +159,15 @@ L per quarter of the block and pairs with L and H in different blocks):
 12. Short pulses: `selftest 0 200 100`, `selftest 300 200 200`, `selftest 1000 200 500`
     (gap, count, H pulse length in ns). Every pair seen, lengths right, PASS.
 13. Soak with the app connected: `selftest 1050 1000` (about 50 s) with renames and test
-    shots during it. About 50 % rounded up, PASS; `stat` after.
+    shots during it. About 50 % at 1100, PASS; `stat` after.
+
+Break-it tests (past the limits: it must report what it loses and keep its time):
+14. Pin map of CH1/CH2 (GPIO 36, 39, 34, 35; only 32 and 25 were jumpered in test 5):
+    `mask 03`, a jumper from GPIO 19 to one pin at a time, `selftest 1000 5`: that line
+    has edges at the same ns as CH8 L ("also had edges"; still PASS, the test is of CH8).
+15. Flood: `mask 03`, `deadtime 1`, `verbose on`, a finger on GPIO 36 for 30 s (mains
+    hum). Test shots and the heartbeat still reach the app, commands still work; `stat`:
+    10.000 MHz. Back: `deadtime 30`, `verbose off`.
 
 Done when: every pulse shows up once, at the right time, on the right line, with BLE busy.
 

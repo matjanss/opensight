@@ -591,6 +591,12 @@ static void selftestService(uint32_t now) {
 
 // ---- Output ----
 
+// Free serial buffer needed before printing an event (its line and the already-high lines),
+// and before its transition lists (verbose: up to 16 lines).
+static const int PRINT_ROOM = 384;
+static const int PRINT_ROOM_VERBOSE = 1536;
+static uint32_t verboseSkipped = 0;
+
 static void printEvent(const EventResult& r) {
   int ref = INT16_MAX;
   for (int l = 0; l < LINES; l++)
@@ -622,6 +628,11 @@ static void printEvent(const EventResult& r) {
         Serial.printf("  CH%d %c was already high at window start\n", l / 2 + 1, (l & 1) ? 'H' : 'L');
   }
   if (!verbose) return;
+  if (Serial.availableForWrite() < PRINT_ROOM_VERBOSE) {
+    verboseSkipped++;
+    Serial.println("  (transitions not shown: serial output busy)");
+    return;
+  }
   for (int l = 0; l < LINES; l++) {
     const LineResult& L = r.line[l];
     if (!(r.lines & (1 << l)) || !L.edges) continue;
@@ -651,6 +662,9 @@ static void printStatus() {
                 (double)isrMaxCycles / getCpuFrequencyMhz());
   Serial.printf("capture: %u events, %u possibly missed (while frozen), %u not printed (queue full)\n",
                 (unsigned)eventCount, (unsigned)missedCount, (unsigned)droppedCount);
+  if (verboseSkipped)
+    Serial.printf("capture: %u events printed without their transitions (serial output busy)\n",
+                  (unsigned)verboseSkipped);
   Serial.printf("capture: %u events with a line already high at window start (should be 0 "
                 "with nothing floating)\n", (unsigned)startHighCount);
   Serial.printf("capture: ring frozen %.1f ms in all, longest %.1f ms\n",
@@ -797,7 +811,10 @@ bool captureBegin() {
 void captureService(uint32_t nowMs) {
   if (!running) return;
   static EventResult r;
-  while (xQueueReceive(results, &r, 0) == pdTRUE) {
+  // Only as much as fits in the serial buffer: loop() must never wait on the UART, or it
+  // misses button presses (bench: a finger on a pin with verbose on, test shots lost).
+  // What doesn't fit waits in the queue; if that fills, `stat` counts it as not printed.
+  while (Serial.availableForWrite() >= PRINT_ROOM && xQueueReceive(results, &r, 0) == pdTRUE) {
     if (st.active) selftestRecord(r);
     printEvent(r);
   }
