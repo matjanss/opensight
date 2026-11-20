@@ -34,6 +34,12 @@ connected to the host board through a 5-pin JST XH connector. Its
 to do before ordering. The [schematic PDF](hardware/acoustic-sensor/mic_board_schematic.pdf)
 can be read without KiCad. Open the project with KiCad 10 or newer.
 
+[hardware/host-board/](hardware/host-board/) is the board the sensors plug into: the
+NodeMCU-32S on sockets, 8 sensor connectors, the IR curtain, a DS18B20 and the panel LED
+and button, all through-hole. Its [README](hardware/host-board/README.md) has the layout,
+the GPIO map and assembly notes; the [schematic](hardware/host-board/host_board_schematic.pdf)
+and [assembly drawing](hardware/host-board/host_board_assembly.pdf) are PDFs.
+
 ## Getting started
 
 From source:
