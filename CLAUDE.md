@@ -81,4 +81,6 @@ app could misread new firmware or the reverse.
   monochrome emoji fonts (`monochrome_emoji_fonts`), not the system's color emoji.
 - App icon: `assets/icon/` (see its README): the PNG is the window icon of every viewport
   (`with_app_icon` in `main.rs`), `build.rs` embeds the .ico in the Windows .exe, and the
-  release workflow puts the .icns in the macOS bundle.
+  release workflow puts the .icns in the macOS bundle. Wayland ignores window icons: it
+  needs `linux/opensights-app.desktop` installed, matching the app id `APP_ID`, which is
+  also the storage name (changing it loses saved settings).

@@ -62,8 +62,12 @@ jobs:
         run: |
           cargo build --release --locked
           mkdir -p ../dist
+          # With the .desktop file and icon: Wayland docks show only the icon a .desktop
+          # file names (see assets/icon/README.md).
           tar -czf ../dist/opensights-app-$VERSION-linux-x86_64.tar.gz \
-            -C target/release opensights-app
+            -C "$PWD/target/release" opensights-app \
+            -C "$PWD/linux" opensights-app.desktop \
+            -C "$PWD/assets/icon/png" opensights-icon-256.png
 
       - name: Build and package (Windows)
         if: runner.os == 'Windows'

@@ -51,8 +51,14 @@ fn app_icon() -> Option<Arc<egui::IconData>> {
     .clone()
 }
 
-/// A viewport with the app icon, if there is one.
+/// The app's name for the system: eframe's storage directory, and on Linux the window's
+/// app id (Wayland) and class (X11). Wayland ignores window icons: the dock takes the icon
+/// from the .desktop file of the same name (linux/opensights-app.desktop).
+const APP_ID: &str = "opensights-app";
+
+/// A viewport with the app id and the app icon, if there is one.
 fn with_app_icon(builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+    let builder = builder.with_app_id(APP_ID);
     match app_icon() {
         Some(icon) => builder.with_icon(icon),
         None => builder,
@@ -70,7 +76,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "opensights-app",
+        APP_ID,
         options,
         Box::new(|cc| {
             install_fonts(&cc.egui_ctx);

@@ -18,6 +18,13 @@
 - **Window and taskbar icon (all platforms):** `app_icon()` in `src/main.rs` loads `png/opensights-icon-256.png` (compiled in) for the main window and the settings window. If the PNG can't be decoded the windows get the system's default icon; a test checks that it decodes.
 - **macOS bundle:** `.github/workflows/build.yml` copies `opensights.icns` to `OpenSights.app/Contents/Resources/` before `codesign`; `macos/Info.plist` has `CFBundleIconFile` = `opensights`.
 - **Windows .exe icon:** `build.rs` embeds `opensights.ico` with `winresource` (a Windows-only build dependency), so Explorer and shortcuts show it.
-- **Linux:** the window icon covers the taskbar. A `.desktop` file with the 256 or 512 px PNG would only be needed for a menu entry; there is none yet.
+- **Linux:** the window icon covers X11. Wayland ignores window icons: the dock shows the icon of the `.desktop` file named after the window's app id (`APP_ID` = `opensights-app` in `main.rs`, which is also eframe's storage name, so don't change it lightly). `linux/opensights-app.desktop` is that file; the Linux release archive contains it and the 256 px PNG. To install for the current user:
+
+  ```sh
+  install -Dm644 opensights-app.desktop ~/.local/share/applications/opensights-app.desktop
+  install -Dm644 opensights-icon-256.png ~/.local/share/icons/hicolor/256x256/apps/opensights-app.png
+  ```
+
+  `Exec=opensights-app` expects the binary on `PATH` (e.g. `~/.local/bin`); for a build from source, point it at `app/target/release/opensights-app`.
 
 After changing the icon, run `make.py`; the app picks up the new PNG and .ico on the next build.
