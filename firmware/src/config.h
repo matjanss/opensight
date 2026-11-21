@@ -36,7 +36,7 @@ constexpr int CAPTURE_LINE_PINS[16] = {
    4, 16,   // CH8
 };
 const int IR_EN_PIN = 27;   // IR curtain LEDs, high = on; unused for now, held low
-// Also on the board, unused so far: IR_IN 13 (IR receiver), DQ 14 (DS18B20).
+// Also on the board, unused so far: IR_IN 13 (IR receiver).
 
 // The I2S sample clock is made by LEDC and looped back through this pin (spare on the
 // host board; leave it unconnected).
@@ -68,8 +68,10 @@ const uint32_t SELFTEST_PULSE_US    = 10;   // OUT_L pulse length; OUT_H ends wi
 
 // The pulse generator (self-test and simulator) starts its MCPWM units from an edge on this
 // pin, driven and read back inside the chip: leave it unconnected (spare on the host
-// board). A strapping pin, but only driven after boot.
-const int      SYNC_PIN             = 15;
+// board). A strapping pin (flash voltage: nothing may pull it up at reset), so it is only
+// driven after boot and held by a pull-down otherwise. Was GPIO 15 until step 3a; 15 is
+// the BME280's SCL now.
+const int      SYNC_PIN             = 12;
 
 // --- Step 2 (see ../MEASUREMENT.md) ---
 // Arrival time t0 = t1 - k (t2 - t1) - offset; k and the offsets are settings (NVS).
@@ -83,10 +85,13 @@ const int      SIM_CHANNELS         = 4;
 const float    SIM_MIC_MM           = 105.0f;
 const float    SIM_CARD_MM          = 100.0f; // random shots land within +-this of the centre
 
-// Air temperature: a DS18B20 on DQ, read through UART2 as a 1-Wire bus (the UART times the
-// slots, so no interrupts are held off), by a task on core 0, once a minute. 4.7 k pull-up
-// to 3V3 on the host board.
-const int      DQ_PIN               = 14;
+// The air (step 3a): J5 takes a BME280/BMP280 on I2C (SDA, SCL) or a DS18B20 on 1-Wire
+// (SDA's pin, read through UART2: the UART times the slots, so no interrupts are held off),
+// read by a task on core 0, once a minute. 4.7 k pull-ups to 3V3 on the host board.
+const int      AIR_SDA_PIN          = 14;      // also the DS18B20's DQ
+const int      AIR_SCL_PIN          = 15;
 const uint32_t AIR_TEMP_PERIOD_MS   = 60000;
-const uint32_t AIR_TEMP_STALE_MS    = 600000;  // no good reading for this long: use the default
-const float    AIR_TEMP_DEFAULT_C   = 18.0f;   // without a sensor
+const uint32_t AIR_TEMP_STALE_MS    = 600000;  // no good reading for this long: use the defaults
+const float    AIR_TEMP_DEFAULT_C   = 18.0f;   // without a reading
+const float    AIR_RH_DEFAULT       = 50.0f;   // % RH, without a BME280
+const float    AIR_HPA_DEFAULT      = 1013.25f;   // without a BME280 or BMP280

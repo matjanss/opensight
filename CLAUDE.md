@@ -141,8 +141,8 @@ hardware/host-board/          host board, KiCad 10
 - **GPIO map:** in `config.h` (`CAPTURE_LINE_PINS`) and the host board README.
   - L/H per channel: CH1 39/36, CH2 35/34, CH3 33/32, CH4 26/25, CH5 22/23, CH6 19/21,
     CH7 17/18, CH8 4/16.
-  - GPIO 5: the capture clock loopback. The pulse generator's sync loopback is GPIO 15
-    on `main`, moving to GPIO 12 in step 3a (15 becomes the BME280's SCL).
+  - GPIO 5: the capture clock loopback. The pulse generator's sync loopback is GPIO 12
+    from step 3a (GPIO 15 before; 15 is now the BME280's SCL).
   - GPIO 34–39 (CH1, CH2) are input-only and have no internal pull-downs.
 
 ## Firmware
@@ -160,14 +160,14 @@ hardware/host-board/          host board, KiCad 10
     self-test (a pulse pair on CH8's pins).
   - `event.h` holds the event result the other modules read.
 - `pulsegen.cpp`: hardware-timed pulse pairs for the self-test and the simulator.
-  - MCPWM, one operator per channel, both units started from edges on GPIO 15, by
+  - MCPWM, one operator per channel, both units started from edges on GPIO 12, by
     register from IRAM.
   - A CPU-driven generator is not exact under BLE load.
 - `arrival.cpp`: t0 = t1 − k·(t2 − t1) − offset per channel. `k` and `offset` are in NVS
   (namespace `"measure"`). `k` is still global; PLAN D3 makes it per channel.
 - `simulate.cpp` (`sim ...`): simulated shots at known positions on CH5–CH8 (the pins
   drive their own inputs), checked against the truth: the capture and t0. It stands in
-  until the sensor boards arrive. Its air temperature is a fixed 20 °C (`sim temp`).
+  until the sensor boards arrive. It takes the firmware's air by default; `sim temp` sets another temperature.
 - **No solver yet (step 3).** The tag `archive/step3-first-try` holds a first try that
   was set aside: it never ran on the board, and it predates PLAN.md. Parts of it can be
   reused with `git show archive/step3-first-try:<path>` rather than rewritten:
@@ -176,8 +176,11 @@ hardware/host-board/          host board, KiCad 10
   - `solver.cpp`: `mic` and the calibration mode's `cal evt=` lines;
   - the simulator's position check;
   - `firmware/tools/calibrate.py`: the fit, with a global k.
-- `airtemp.cpp`: a DS18B20 on GPIO 14, read through UART2 as a 1-Wire bus by a task on
-  core 0, once a minute. 18 °C (marked "assumed") without a sensor.
+- `airtemp.cpp`: the air sensor on J5, read by a task on core 0 once a minute: a BME280
+  or BMP280 on I2C (SDA 14, SCL 15; compensation in `lib/bme280/`), or a DS18B20 on
+  GPIO 14 through UART2 as a 1-Wire bus. Missing values are assumed (18 °C, 50 % RH,
+  1013.25 hPa, marked "assumed"). The speed of sound (Cramer) is in `lib/measure/air.h`,
+  the start of the portable measurement core (step 3b).
 - `main.cpp`: the main loop and the shot buffer.
   - The button: short press = a random test shot (until there are solved shots); 2 s
     hold = pairing mode; 10 s hold = PIN reset.
@@ -188,7 +191,7 @@ hardware/host-board/          host board, KiCad 10
     (`clearedSeq`).
   - Serial lines go to `captureCommand`.
   - A simple 10 ms loop.
-- **Cores:** NimBLE and the DS18B20 task run on core 0. `loop()` and the measurement task
+- **Cores:** NimBLE and the air sensor task run on core 0. `loop()` and the measurement task
   (higher priority) run on core 1, and so does the capture interrupt. Arrival times run in
   `loop()` (microseconds per event). The interrupt and the code it calls
   stay in IRAM, because NVS writes stall the flash cache.

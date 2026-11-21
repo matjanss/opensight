@@ -84,7 +84,7 @@ so a problem shows up in the step that caused it.
 |---|---|---|
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
-| 3 | Solver and calibration | planned, on `step3-solver`: 3a-3e (a first try is archived as the tag `archive/step3-first-try`) |
+| 3 | Solver and calibration | in progress on `step3-solver`: 3a-1 passes; 3a-2 (sync pin) to run; 3a-3/3a-4 (DS18B20, BME280) later, with the parts; 3b-3e planned (a first try is archived as the tag `archive/step3-first-try`) |
 | 4 | Validity checks | planned |
 | 5 | Protocol and app | planned |
 | 6 | Wi-Fi and MQTT | planned |
@@ -211,14 +211,14 @@ Build:
 - **Pulse generator** (`pulsegen.cpp`), for the self-test and the simulator: one MCPWM
   operator per channel, its two comparators set when L and H rise, both fall at the end of
   the run. Channels 0-2 on MCPWM unit 0 (one timer: exact against each other), 3-5 on unit 1.
-  Both timers take their count from edges on GPIO 15 (looped back inside the chip): a sync
-  edge sets both stopped counts to 0, both timers are started, a second edge sets both to 0
-  again at the same moment. All from IRAM with interrupts off, by register (the driver's
-  start runs from flash); the rises come ≥ 20 µs later, and every run that took longer to
+  Both timers take their count from edges on the sync pin (GPIO 15, GPIO 12 from step 3a;
+  looped back inside the chip): a sync edge sets both stopped counts to 0, both timers are
+  started, a second edge sets both to 0 again at the same moment. All from IRAM with
+  interrupts off, by register (the driver's start runs from flash); the rises come ≥ 20 µs later, and every run that took longer to
   start is counted as a late start. The self-test now runs on it (1 channel).
 - **Simulator** (`simulate.cpp`, `sim ...`): 4 mics on CH5-CH8 (GPIO 22/23, 19/21, 17/18,
   4/16; CH1/CH2 are input-only) at the corners of a 210 mm square, a speed of sound from a
-  simulated temperature (20 °C), and a trip model: the pulse rises like A·sin(πt/2T)
+  simulated temperature (20 °C; from step 3a the firmware's air), and a trip model: the pulse rises like A·sin(πt/2T)
   (`sim model sine`) or its straight start (`linear`, default), T = 12 µs, OUT_L trips at 1
   and OUT_H at 4, A = amp·100 mm / distance (`sim amp`, default 40). 25 ns ticks; all lines
   fall together 10 µs after the shot's last rise (the generator can't end them one by one,
@@ -240,7 +240,7 @@ Build:
   "(assumed)". 0.1 °C is about 0.01 mm, so once a minute is plenty. `temp` and `stat` show
   it.
 
-Bench test, simulated (bare NodeMCU, nothing on CH5-CH8 and GPIO 15), `mask 0`, `span 300`,
+Bench test, simulated (bare NodeMCU, nothing on CH5-CH8 and the sync pin, GPIO 12 from step 3a), `mask 0`, `span 300`,
 `deadtime 30` (both are stored: check with `stat`):
 - **2a, generator.** Step 1 test 3 again (`selftest`, `selftest 1050 200`, `selftest 0`,
   `selftest 100000`): PASS as before, now on the new generator, 0 late starts. Then
@@ -315,13 +315,18 @@ Build:
   portable core (`lib/measure/air.h`) so the solver and the PC share it.
 - **Output:** `temp` and `stat` show the sensor type, T, RH, p and c, each marked measured
   or assumed. Event lines end in `air 21.3 °C 45 %RH 1009.8 hPa, c 344.6 m/s`.
+- **The simulator takes the firmware's air** (and the same formula for c), so the two agree
+  by default. `sim temp <C>` sets a different temperature on purpose (to test a
+  temperature error, 3c), `sim temp air` goes back. Until 3a it had its own fixed 20 °C and
+  a linear formula.
 
 Reference values for c (Cramer, 1013.25 hPa): 0 °C dry 331.45 m/s; 18 °C 50 % 342.74;
 20 °C 50 % 343.99; 25 °C 50 % 347.13. Per °C +0.62 m/s, per % RH +0.011 (18 °C).
 
 Bench test, bare NodeMCU, nothing on GPIO 12, `mask 0`:
-- **3a-1, no sensor.** `temp`: no sensor on J5, 18.0 °C, 50 % RH, 1013.3 hPa, all
-  assumed, c 342.74 m/s. An event (`selftest`) ends in the same.
+- **3a-1, no sensor.** `temp`: "no sensor on J5", then 18.0 °C, 50 %RH and 1013.2 hPa,
+  each "(assumed)", c 342.74 m/s. A simulated shot (`sim at 0 0 1`) ends in the same air
+  line.
 - **3a-2, the sync pin.** Step 2a again: `selftest`, `selftest 1050 200`, `selftest 0`,
   `selftest 100000`, then `sim raw 0 0 0 0 200` and
   `sim raw 0 100000 200000 300000 100 1500`. PASS as before, 0 late starts.
@@ -394,8 +399,6 @@ Build:
   rms residual is under `reslimit` (default 1500 ns, stored). The rest are logged only.
   Validity proper is step 4. `testshot on|off` (stored, default on) keeps the BOOT test
   shot.
-- **While the simulator runs,** the solver takes the simulator's air instead of the
-  sensor's (`sim air`), so the two use the same c unless a test sets an error.
 - **Replay on the PC:** `tools/replay.cpp`, built with g++ against `lib/measure/`, reads a
   serial log, solves every `evt` line with the settings given, and prints the shots.
 - `stat` shows the time per solve (mean and longest, µs).
@@ -410,9 +413,9 @@ Bench test, bare NodeMCU, `mask 0`, nothing on CH5-CH8 or GPIO 12:
 - **3c-2, the height.** `mic h 0`, `sim random 100`: the error grows to about 0.5 mm mean,
   several mm in the corners (the study's "mic height not modelled"). `mic h 10.5`: back
   to 3c-1.
-- **3c-3, the air.** `sim air error 1` (the solver's temperature 1 °C off the
-  simulator's): errors about 0.15 mm rms, growing with the distance from the centre.
-  `sim air error 0`.
+- **3c-3, the air.** `sim temp` 1 °C above the firmware's air (`temp`; 19 without a
+  sensor): errors about 0.15 mm rms, growing with the distance from the centre.
+  `sim temp air`.
 - **3c-4, a late channel.** `sim fault late 7`, `sim at 30 30 20`: rms residual over
   4 µs, no shot sent to the app (logged). `sim fault none`.
 - **3c-5, replay.** Log 3c-1 with `--filter log2file`; `tools/replay` on the log gives the
@@ -484,7 +487,7 @@ Bench test, bare NodeMCU, as 3d:
   shows the record, not stale. `mic h 4 21.5`: `cal` says stale; `mic h 4 10.5` restores
   the value but it stays stale until a new `cal id` (a record is only trusted as
   written).
-- **3e-4, temperature on the PC.** `sim air error 2`, `sim random 200`, logged; replay
+- **3e-4, temperature on the PC.** `sim temp` 2 °C above the firmware's, `sim random 200`, logged; replay
   with the speed of sound fitted over all events: it recovers the 2 °C (to about 0.1 °C).
 
 The exact commands of 3d and 3e may still change as they are built; this file is updated
@@ -524,7 +527,7 @@ FUTURE_ARCHITECTURE.md step 2. Check the GPIO 36/39 erratum here (see Risks).
 - **GPIO 36/39 (CH1):** ESP32 erratum: spurious pulses on these pins while Wi-Fi or ADC1
   is active. Not an issue with BLE only; check again in step 6.
 - **The two MCPWM units starting together:** both take their count from one edge on
-  GPIO 15, but their prescalers may not line up: up to a tick (25 ns) between CH5-CH7 and
+  the sync pin, but their prescalers may not line up: up to a tick (25 ns) between CH5-CH7 and
   CH8. Settled by test 2a; if it is more, or not stable, the simulator corrects for a
   fixed offset or drops to 3 channels.
 - **Edge shape, mic polarity, half-cycle-late trips, range noise:** can't be settled on
@@ -536,6 +539,8 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-21 | 3a | 3a-1, `sim at 0 0 1`, no sensor | **PASS (user report).** The event's air line: 18.0 °C, 50 %RH, 1013.2 hPa, each "(assumed)", c 342.74 m/s, as expected. But the run's first line still showed the simulator's own air (20.0 °C, 343.4 m/s, its old linear formula), different from the firmware's. Harmless without a solver, confusing all the same: the simulator now takes the firmware's air by default (`sim temp <C>` to differ on purpose). Recheck: the first line of `sim at 0 0 1` says "air 18.0 °C (the firmware's, 342.74 m/s)". `temp` still to check. |
+| 2026-11-21 | 3a | Built, not tested yet | The air sensor: BME280/BMP280 on I2C (GPIO 14/15) or DS18B20 (GPIO 14), found at boot and once a minute while none answers; T, RH, p and the speed of sound (Cramer) on event lines and `temp`. Checked on the PC: the BMP280 datasheet example (25.08 °C exact; 100653.25 Pa, as an exact integer recomputation) and the Cramer reference values to 0.001 m/s. The sync loopback on GPIO 12. Run 3a-1 to 3a-4. |
 | 2026-11-21 | 2 | 2d without a DS18B20 | **PASS (user report).** `temp` says 18.0 °C assumed; event lines end in "air 18.0 °C (assumed)". With a sensor: when the host board arrives (real-board test 5). Step 2's simulated tests are done. |
 | 2026-11-21 | 2 | 2c retest after the relink fix: double shots at `deadtime 1`, `selftest 1050 200`, `sim random 100` | **All PASS (user report); 2c done.** No second shot lost or partial; the self-test and random shots unchanged by the fix in the capture's main path. |
 | 2026-11-21 | 2 | 2c retest, `span 300`: double shots, `deadtime 30` then `deadtime 1` | `deadtime 30`: **PASS** (20 ignored inside the dead time). `deadtime 1` (1.4 ms in effect): FAIL, 7 MISSED and **13 lost: a capture bug.** The first ring block after a relink was never scanned (its ring neighbour is from before the freeze, so it was skipped), a 200 µs blind spot after every event. Here the relink came ~2.3-2.5 ms after the first edge, so each second shot landed in the spares (MISSED) or in that block (lost). Fixed: that block is scanned against the last spare block's last sample, and a window opened there starts at it (no pre-block, the spare's sample as the state before). A shot found in a spare finished after the relink also gets its dead time. |

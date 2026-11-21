@@ -18,6 +18,7 @@
 // Trip model: the pulse rises like A sin(pi t / 2T) (or its straight start, A pi t / 2T),
 // T = 12 us; OUT_L trips at 1, OUT_H at 4 (k = 1/3); A = amp * 100 mm / distance.
 #include "simulate.h"
+#include "airtemp.h"
 #include "capture.h"
 #include "config.h"
 #include "esp_cpu.h"
@@ -39,7 +40,7 @@ static const int      MAX_COUNT  = 2000;
 
 static float micX[N], micY[N];
 static float trueOffsetNs[N] = {};
-static float simTempC = 20.0f;
+static float simTempC = NAN;   // NAN: the firmware's own air (airtemp.h); else `sim temp`
 static float simAmp = 40.0f;      // pulse amplitude at 100 mm, in units of the OUT_L threshold
 static bool  sineModel = false;
 enum Fault : uint8_t { F_NONE, F_LATE, F_MISSING, F_HONLY, F_DOUBLE };
@@ -108,13 +109,23 @@ static uint16_t simLineMask() {
   return m;
 }
 
-static double speedMmPerNs(float tempC) { return (331.3 + 0.606 * tempC) * 1e-6; }
+// The simulator's air: the firmware's (sensor or assumed), or its temperature set by
+// `sim temp` (humidity and pressure stay the firmware's).
+static Air simAir() {
+  Air a = air();
+  if (!isnan(simTempC)) {
+    a.tC = simTempC;
+    a.c = airSoundSpeed(a.tC, a.rh, a.hPa);
+  }
+  return a;
+}
+static double speedMmPerNs(const Air& a) { return a.c * 1e-6; }
 
 static uint32_t maxRiseTicks() { return run.periodTicks - HOLD_TICKS; }
 
 // The edges of a shot at (x, y). False if they don't fit in a run (the window).
 static bool makeShot(float x, float y, Shot& s) {
-  const double c = speedMmPerNs(simTempC);
+  const double c = speedMmPerNs(simAir());
   const double scale = 2 * RISE_NS / M_PI;
   double t[N][2];
   double first = 1e18;
@@ -240,11 +251,12 @@ static void startCommon(Mode m, uint32_t count) {
     return;
   }
   const char* faultText[] = {"none", "late", "missing", "honly", "double"};
+  const Air sa = simAir();
   Serial.printf("sim: %u shots %s on CH%d-CH%d (GPIO %s); %s model, amp %.0f, air %.1f °C "
-                "(%.1f m/s); firmware k %.4f; fault %s", (unsigned)count,
+                "(%s, %.2f m/s); firmware k %.4f; fault %s", (unsigned)count,
                 m == M_RANDOM ? "at random points on the card" : "at one point", F + 1, F + N,
-                pinText, sineModel ? "sine" : "linear", simAmp, simTempC,
-                speedMmPerNs(simTempC) * 1e6, k, faultText[run.fault]);
+                pinText, sineModel ? "sine" : "linear", simAmp, sa.tC,
+                isnan(simTempC) ? "the firmware's" : "sim temp", sa.c, k, faultText[run.fault]);
   if (run.fault == F_DOUBLE) Serial.printf(" (second shot %u us later)", (unsigned)run.doubleWaitUs);
   else if (run.fault != F_NONE) Serial.printf(" on CH%d", F + 1 + run.faultCh);
   Serial.printf("; every %u ms\n", (unsigned)run.spacingMs);
@@ -502,15 +514,17 @@ void simHelp() {
                  "  sim raw <a> <b> <c> <d> [n] [gap]  L of CH5-CH8 at a..d ns, H gap ns later\n"
                  "                       (default 1000), n runs (default 20)\n"
                  "  sim fault none | late <ch> | missing <ch> | honly <ch> | double <us>\n"
-                 "  sim model linear|sine, sim amp <n>, sim temp <C>, sim offset <ch> <ns>,\n"
+                 "  sim model linear|sine, sim amp <n>, sim temp <C>|air, sim offset <ch> <ns>,\n"
                  "  sim mic <ch> <x> <y>  the simulated sensors; `sim` shows them; sim stop");
 }
 
 static void printSettings() {
   if (!micsSet) defaultMics();
   const char* faultText[] = {"none", "late", "missing", "honly", "double"};
-  Serial.printf("sim: %s model, amp %.0f, air %.1f °C, fault %s", sineModel ? "sine" : "linear",
-                simAmp, simTempC, faultText[fault]);
+  const Air sa = simAir();
+  Serial.printf("sim: %s model, amp %.0f, air %.1f °C (%s, %.2f m/s), fault %s",
+                sineModel ? "sine" : "linear", simAmp, sa.tC,
+                isnan(simTempC) ? "the firmware's" : "sim temp", sa.c, faultText[fault]);
   if (fault == F_DOUBLE) Serial.printf(" %u us", (unsigned)doubleUs);
   else if (fault != F_NONE) Serial.printf(" CH%d", F + 1 + faultCh);
   Serial.println();
@@ -588,8 +602,15 @@ bool simCommand(const char* cmd, const char* line) {
     simAmp = v;
   } else if (!strcmp(sub, "temp")) {
     float v;
-    if (sscanf(line, "%*s %*s %f", &v) != 1 || v < -20 || v > 60) { Serial.println("sim temp <-20..60 C>"); return true; }
-    simTempC = v;
+    char word[8] = "";
+    if (sscanf(line, "%*s %*s %7s", word) == 1 && !strcmp(word, "air")) {
+      simTempC = NAN;
+    } else if (sscanf(line, "%*s %*s %f", &v) != 1 || v < -20 || v > 60) {
+      Serial.println("sim temp <-20..60 C>, or `sim temp air` for the firmware's air");
+      return true;
+    } else {
+      simTempC = v;
+    }
   } else if (!strcmp(sub, "offset")) {
     int ch;
     float v;

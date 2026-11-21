@@ -43,6 +43,14 @@ static mcpwm_gen_handle_t   gen[PULSEGEN_MAX_CHANNELS][2] = {};
 static mcpwm_dev_t* const DRAM_ATTR hw[GROUPS] = {&MCPWM0, &MCPWM1};
 static volatile int DRAM_ATTR fireGroups = 0;
 
+// The sync pin at rest: a plain input with a pull-down. gpio_reset_pin() turns the pull-up
+// on, which a strapping pin (GPIO 12: flash voltage) must not have.
+static void syncPinIdle() {
+  gpio_reset_pin((gpio_num_t)SYNC_PIN);
+  gpio_pullup_dis((gpio_num_t)SYNC_PIN);
+  gpio_pulldown_en((gpio_num_t)SYNC_PIN);
+}
+
 static void IRAM_ATTR spinNs(uint32_t ns) {
   uint32_t cycles = ns * (uint32_t)esp_rom_get_cpu_ticks_per_us() / 1000;
   uint32_t c0 = esp_cpu_get_cycle_count();
@@ -95,7 +103,7 @@ void pulsegenDelete() {
     if (timer[g]) mcpwm_del_timer(timer[g]);
     timer[g] = nullptr;
   }
-  if (nGroups) gpio_reset_pin((gpio_num_t)SYNC_PIN);
+  if (nGroups) syncPinIdle();
   nChannels = nGroups = 0;
   fireGroups = 0;
 }
@@ -109,7 +117,7 @@ bool pulsegenCreate(int nCh, const int pins[][2], uint32_t hz, uint32_t periodTi
   genPeriod = maxPeriod = periodTicks;
 
   // The sync pin: low before anything listens to it.
-  gpio_reset_pin((gpio_num_t)SYNC_PIN);
+  syncPinIdle();
   gpio_set_level((gpio_num_t)SYNC_PIN, 0);
 
   for (int g = 0; g < nGroups; g++) {

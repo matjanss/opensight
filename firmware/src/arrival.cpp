@@ -60,7 +60,6 @@ void arrivalPrint(const EventResult& r, const Arrival& a) {
   }
   Serial.println(line);
 
-  AirTemp t = airTemp();
   n = 0;
   if (first >= 0 && (a.valid & ~(1 << first))) {
     n = snprintf(line, sizeof line, "  t0 minus CH%d:", first + 1);
@@ -71,7 +70,7 @@ void arrivalPrint(const EventResult& r, const Arrival& a) {
   } else {
     n = snprintf(line, sizeof line, "  ");
   }
-  snprintf(line + n, sizeof line - n, "air %.1f °C%s", t.c, t.measured ? "" : " (assumed)");
+  airFormat(line + n, sizeof line - n, air());
   Serial.println(line);
 }
 

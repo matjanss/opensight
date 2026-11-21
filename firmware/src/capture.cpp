@@ -647,7 +647,7 @@ static void printStatus() {
                 "%u us after the first edge), verbose %s\n", channelMask, (unsigned)deadtimeMs,
                 captureDeadUs() / 1000.0,
                 (unsigned)spanMm, (unsigned)coveredUs(postBlocks), verbose ? "on" : "off");
-  airTempPrintStatus();
+  airPrintStatus();
   Serial.printf("memory: %u bytes free, %u DMA-capable, largest DMA block %u\n",
                 (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
@@ -829,7 +829,7 @@ void captureCommand(const char* line) {
                    "  selftest [ns] [n] [pulse]  n pulse pairs on CH8 (unplugged!), OUT_H ns\n"
                    "                       after OUT_L, OUT_H pulse ns long (default 1000 ns,\n"
                    "                       20 pairs, 10000 ns)\n"
-                   "  temp                 the air temperature (DS18B20)");
+                   "  temp                 the air: sensor, temperature, humidity, pressure, speed of sound");
     arrivalHelp();
     simHelp();
   } else if (!running) {
@@ -874,7 +874,7 @@ void captureCommand(const char* line) {
     sscanf(line, "%*s %lu %lu %lu", &a, &b, &c);
     selftestStart(a, b, c);
   } else if (!strcmp(cmd, "temp")) {
-    airTempPrintStatus();
+    airPrintStatus();
   } else if (!arrivalCommand(cmd, line) && !simCommand(cmd, line)) {
     Serial.printf("unknown command '%s', type 'help'\n", cmd);
   }
