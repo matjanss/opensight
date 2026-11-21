@@ -21,8 +21,9 @@ The web/wasm viewer is parked.
 
 | Document | What it holds | Read it when |
 |---|---|---|
-| `PLAN.md` | Decisions D1–D11 (mic layout, model, who does what, calibration, firmware structure, messages, temperature, curtain, frame limits, ground truth), open questions Q1–Q3, phases 0–5 with their tests | Always, before choosing what to work on |
+| `PLAN.md` | Decisions D1–D12 (mic layout, model, who does what, calibration, firmware structure, messages, the air, curtain, frame limits, ground truth, the solver), open questions Q1–Q3, phases 0–5 with their tests | Always, before choosing what to work on |
 | `firmware/MEASUREMENT.md` | The measurement firmware's steps 1–6, each with its build list and bench test, the step status table, and every bench result (newest first) | Before any measurement work; update it in the same commit as the code |
+| `firmware/MODEL.md` | The measurement model: units, mics, arrival time, speed of sound, propagation, the solver and its outputs, drop-one, the test vector format | Before touching `lib/measure/` or `tools/model.py` (see the model rule) |
 | `FUTURE_ARCHITECTURE.md` | The target system: target, range server, viewers, management, network per lane, updates, its steps 1–4 | Before anything network, server, viewer or fleet |
 | `protocol/PROTOCOL.md` | The BLE protocol, v2: advertising, GATT, shots, security, buttons and LED | Before touching the link (see the protocol rule) |
 | `hardware/acoustic-sensor/README.md` | Sensor board v0.3: one mic channel, files, checks before ordering | Hardware questions |
@@ -63,7 +64,13 @@ CLAUDE.md, PLAN.md, FUTURE_ARCHITECTURE.md, README.md
 protocol/PROTOCOL.md          the BLE protocol (source of truth)
 firmware/                     PlatformIO, Arduino-ESP32 3.x on pioarduino (IDF 5), NimBLE-Arduino 2.3
   MEASUREMENT.md              measurement plan and bench results
+  MODEL.md                    the measurement model (source of truth)
   src/                        the firmware (modules below)
+  lib/measure/                the portable measurement core: air.h, model.h, solver
+  lib/bme280/                 BME280/BMP280 compensation (portable)
+  test/test_measure/          Unity tests of the core on the PC (`pio test -e native`)
+  test/vectors/               shared test vectors, written by tools/model.py
+  tools/model.py              the model's reference implementation (numpy)
   tools/layout_study.py       mic layout study behind PLAN D1/D2 (numpy)
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs
@@ -79,6 +86,8 @@ hardware/host-board/          host board, KiCad 10
   use `pio device monitor -d firmware --echo` for the serial console (115200; type `help`
   for the commands). Add `--filter log2file` to log to a file. If `pio` is not on PATH,
   use `~/.platformio/penv/bin/pio`.
+- **Measurement core on the PC:** `pio test -d firmware -e native` (also in CI). After a
+  model change: `python3 firmware/tools/model.py` writes the vectors again.
 - **App:** `cargo run` / `cargo build --release` in `app/`. `cargo test` checks the protocol
   encoding against the examples in PROTOCOL.md. On Linux the app builds libdbus from
   source (`vendored`), so no `libdbus-1-dev` is needed.
@@ -100,9 +109,10 @@ hardware/host-board/          host board, KiCad 10
   status, build notes, bench test, bench results) go in the same commit. Every bench
   result the user reports goes into Bench results, failures included, with what it
   changed.
-- **The model rule (planned, PLAN D3):** once `firmware/MODEL.md` exists, it is the source
-  of truth for the propagation model, mirrored by `tdoa.h` and the Rust implementation,
-  with shared test vectors.
+- **The model rule:** `firmware/MODEL.md` is the source of truth for the measurement
+  model, mirrored by `firmware/lib/measure/` and `firmware/tools/model.py` (later also the
+  Rust fit). A model change touches all of them in one commit, with the vectors made
+  again and `pio test -e native` passing.
 - **Pins and timings** go in `firmware/src/config.h`. The pin map must match the host
   board README, and after a map change MEASUREMENT step 1 test 14 is due again.
 - **Commit only when the user asks.**
@@ -168,11 +178,11 @@ hardware/host-board/          host board, KiCad 10
 - `simulate.cpp` (`sim ...`): simulated shots at known positions on CH5–CH8 (the pins
   drive their own inputs), checked against the truth: the capture and t0. It stands in
   until the sensor boards arrive. It takes the firmware's air by default; `sim temp` sets another temperature.
-- **No solver yet (step 3).** The tag `archive/step3-first-try` holds a first try that
-  was set aside: it never ran on the board, and it predates PLAN.md. Parts of it can be
-  reused with `git show archive/step3-first-try:<path>` rather than rewritten:
-  - `firmware/src/tdoa.h`: a float Gauss–Newton solver, checked on the PC to 0.015 mm
-    rms, but without the mic height;
+- **The solver** (step 3b) is in `lib/measure/solver.cpp`, tested on the PC but not yet
+  called by the firmware (step 3c). `arrival.cpp` uses the core's `arrivalT0`. The tag
+  `archive/step3-first-try` holds a first try that was set aside (it never ran on the
+  board, and predates PLAN.md). Parts of it still to reuse, with
+  `git show archive/step3-first-try:<path>`:
   - `solver.cpp`: `mic` and the calibration mode's `cal evt=` lines;
   - the simulator's position check;
   - `firmware/tools/calibrate.py`: the fit, with a global k.

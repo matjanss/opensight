@@ -123,6 +123,9 @@ jobs:
           pip install platformio
           pio run -d firmware
 
+      - name: Test the measurement core (PC)
+        run: pio test -d firmware -e native
+
       - name: Package
         run: |
           b=firmware/.pio/build/nodemcu-32s

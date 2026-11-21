@@ -157,7 +157,7 @@ channel. It is, and with one condition: the four corners must already be off one
   mics hear the shock wave, whose trace spreads over the paper at c / √(1 − c²/v²), so the
   speed becomes an unknown per shot (5 mics can fit it, D2).
 - **Model spec:** `firmware/MODEL.md` becomes the source of truth for the model, mirrored
-  by `tdoa.h` and a Rust implementation (D5), with shared test vectors. It works like the
+  by `firmware/lib/measure/` and `firmware/tools/model.py`, later a Rust implementation (D5), with shared test vectors. It works like the
   protocol rule: a model change touches all three in one commit.
 
 ### D4 Who does what

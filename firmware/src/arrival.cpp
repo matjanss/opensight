@@ -2,6 +2,7 @@
 #include "arrival.h"
 #include <Preferences.h>
 #include "airtemp.h"
+#include "model.h"
 
 static Preferences prefs;
 static float kFactor = ARRIVAL_K_DEFAULT;
@@ -39,7 +40,7 @@ void arrivalCompute(const EventResult& r, Arrival& a) {
     if (L.rise < 0 || H.rise < 0) continue;
     float t1 = (float)(L.rise - ref) * NS_PER_SAMPLE;
     float t2 = (float)(H.rise - ref) * NS_PER_SAMPLE;
-    a.t0[c] = t1 - kFactor * (t2 - t1) - offsetNs[c];
+    a.t0[c] = measure::arrivalT0(t1, t2, kFactor, offsetNs[c]);
     a.gap[c] = (int32_t)(H.rise - L.rise) * (int32_t)NS_PER_SAMPLE;
     a.valid |= 1 << c;
   }

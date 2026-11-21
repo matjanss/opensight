@@ -84,7 +84,7 @@ so a problem shows up in the step that caused it.
 |---|---|---|
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
-| 3 | Solver and calibration | in progress on `step3-solver`: 3a-1 passes; 3a-2 (sync pin) to run; 3a-3/3a-4 (DS18B20, BME280) later, with the parts; 3b-3e planned (a first try is archived as the tag `archive/step3-first-try`) |
+| 3 | Solver and calibration | in progress on `step3-solver`: 3a-1 passes; 3a-2 (sync pin) to run; 3a-3/3a-4 (DS18B20, BME280) later, with the parts; 3b passes (PC); 3c-3e planned (a first try is archived as the tag `archive/step3-first-try`) |
 | 4 | Validity checks | planned |
 | 5 | Protocol and app | planned |
 | 6 | Wi-Fi and MQTT | planned |
@@ -371,9 +371,12 @@ Tests (PC; I run them, you can too with `pio test -d firmware -e native`):
   the uncertainty the solver reports (about 0.02 mm in the ring area).
 - Points up to 100 mm outside the frame: they converge or are reported as not converged,
   never a wrong position flagged as converged.
-- Every vector: C++ and Python agree to 0.001 mm and 0.1 ns.
+- Every vector: C++ (float) and Python (double) agree to 0.001 mm, residuals to 0.5 ns
+  (float's steps near 10⁶ ns are 0.06 ns), σ to 0.1 %.
 - A channel 24 µs late: the full fit's residual over 4 µs, drop-one finds that channel
   and the position within 0.01 mm.
+- Blasts (10 and 25 m in front, 0-3 m off the axis): none fits as a hit, with or without
+  drop-one.
 - Time per solve on the PC is not the ESP's; 3c measures that.
 
 #### 3c. The solver on the board
@@ -539,6 +542,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-21 | 3b | PC: `pio test -e native`, 9 tests | **PASS.** Speed of sound: 160 cases, within 5e-7 m/s of `model.py`. BMP280 datasheet example exact. Noise-free 5 mm grid, h 10.5 and 21.5 mm, D1/D2 layout: 3362 points within 0.00008 mm, at most 6 iterations, never the second start. 50 ns noise per channel, 4000 shots at each of 5 points: the rms error matches the reported σ within 2 % (0.010 mm in the centre, 0.019 mm at (80, 80)), bias under 0.0003 mm. Vectors: 310 fits and 100 drop-one cases agree with Python to 0.00006 mm (residuals 0.26 ns, τ 0.11 ns, σ 0.005 %); every late or early channel found; all 60 outside points converged to the truth; none of 60 blasts scored. 0.35 µs per solve on this PC. **Found on the way:** the final tiny step was dropped when the cost didn't fall (float can't resolve it at the minimum), leaving up to 0.0008 mm; the step is now always taken. |
 | 2026-11-21 | 3a | 3a-1, `sim at 0 0 1`, no sensor | **PASS (user report).** The event's air line: 18.0 °C, 50 %RH, 1013.2 hPa, each "(assumed)", c 342.74 m/s, as expected. But the run's first line still showed the simulator's own air (20.0 °C, 343.4 m/s, its old linear formula), different from the firmware's. Harmless without a solver, confusing all the same: the simulator now takes the firmware's air by default (`sim temp <C>` to differ on purpose). Recheck: the first line of `sim at 0 0 1` says "air 18.0 °C (the firmware's, 342.74 m/s)". `temp` still to check. |
 | 2026-11-21 | 3a | Built, not tested yet | The air sensor: BME280/BMP280 on I2C (GPIO 14/15) or DS18B20 (GPIO 14), found at boot and once a minute while none answers; T, RH, p and the speed of sound (Cramer) on event lines and `temp`. Checked on the PC: the BMP280 datasheet example (25.08 °C exact; 100653.25 Pa, as an exact integer recomputation) and the Cramer reference values to 0.001 m/s. The sync loopback on GPIO 12. Run 3a-1 to 3a-4. |
 | 2026-11-21 | 2 | 2d without a DS18B20 | **PASS (user report).** `temp` says 18.0 °C assumed; event lines end in "air 18.0 °C (assumed)". With a sensor: when the host board arrives (real-board test 5). Step 2's simulated tests are done. |

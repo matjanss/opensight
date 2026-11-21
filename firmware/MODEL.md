@@ -1,0 +1,172 @@
+# The measurement model
+
+The source of truth for how the target turns comparator edges into a shot position. It
+is mirrored by the C++ core in `lib/measure/` (on the target, and on the PC for tests and
+replay) and by `tools/model.py`, the reference implementation that writes the shared test
+vectors. A Rust implementation (the app's calibration fit, PLAN D5) will follow.
+
+**The model rule** (CLAUDE.md): a change to the model touches this file, `lib/measure/`
+and `tools/model.py` in one commit, with the vectors made again
+(`python3 firmware/tools/model.py`) and `pio test -d firmware -e native` passing.
+
+The decisions behind it are in `../PLAN.md` (D3 the model, D8 the air, D12 the solver).
+
+## Units and coordinates
+
+- **Positions:** mm from the frame centre, in the paper plane. x points right, y up, as
+  seen by the shooter.
+- **Times:** ns. Arrival times count from any common origin. On the target that is the
+  event's first edge.
+- **The speed of sound c:** m/s in settings and output, mm/ns inside the solver
+  (1 m/s = 10⁻⁶ mm/ns).
+
+## Mics
+
+Each mic i has:
+
+| Value | Meaning | Where it comes from |
+|---|---|---|
+| xᵢ, yᵢ | Its position in the paper plane, mm | The frame's nominal layout, then the calibration fit |
+| hᵢ | The mic port's height behind the paper plane, mm (10.5, or 21.5 with the sensor board flipped) | A setting per mic, measured with a calliper. Not fitted |
+| kᵢ | The arrival-time factor of its comparator pair | The calibration fit (default 1/3) |
+| offsetᵢ | Its channel's own delay, ns | The calibration fit (default 0) |
+| σᵢ | Its timing error, 1σ, ns | The calibration's residuals (default 50 ns until then) |
+
+The default layout (PLAN D1/D2), h = 10.5 mm:
+
+| Channel | Mic | x, y (mm) |
+|---|---|---|
+| CH1 | bottom left | −105, −105 |
+| CH2 | bottom right | 105, −105 |
+| CH3 | top right, slid 40 mm along the top edge | 65, 105 |
+| CH4 | top left | −105, 105 |
+| CH5 | bottom middle | 0, −105 |
+| CH6 | right middle | 105, 0 |
+
+No set of mics left after dropping one may lie on one circle: a blast's flat wavefront
+would then fit as a centre hit (PLAN D1, D2).
+
+## Arrival
+
+From a channel's first rising edge on OUT_L (t1) and on OUT_H (t2):
+
+  t0 = t1 − k · (t2 − t1) − offset
+
+For a signal that rises in a straight line, k = VL / (VH − VL) takes out the comparators'
+delay, which grows the slower the rise (k = 1/3 for VH = 4·VL). The real edge is curved by
+the mic port's resonance, so k is fitted per channel. `measure::arrivalT0` in `model.h`.
+
+## Speed of sound
+
+Cramer (1993), from the air temperature T (°C), relative humidity RH (%) and pressure p
+(Pa), with 400 ppm CO₂. Water vapour comes from RH through the saturation vapour pressure
+and the enhancement factor (Davis 1992, as Cramer uses them). `measure::soundSpeedMs` in
+`air.h`; the formula is written out there.
+
+| T | RH | p | c |
+|---|---|---|---|
+| 0 °C | 0 % | 101 325 Pa | 331.448 m/s |
+| 20 °C | 0 % | 101 325 Pa | 343.359 m/s |
+| 18 °C | 50 % | 101 325 Pa | 342.740 m/s |
+| 20 °C | 50 % | 101 325 Pa | 343.987 m/s |
+| 25 °C | 50 % | 101 325 Pa | 347.127 m/s |
+
+Near 18 °C: +0.62 m/s per °C, +0.011 m/s per % RH, +0.0006 m/s per hPa.
+
+## Propagation
+
+Subsonic projectiles and air guns: the crack starts at the hole (x, y), in the paper plane,
+at the emission time τ. It reaches mic i at
+
+  t0ᵢ = τ + dᵢ / c,   dᵢ = √((x − xᵢ)² + (y − yᵢ)² + hᵢ²)
+
+Supersonic projectiles are out of scope (PLAN D3).
+
+## Solver
+
+Unknowns: x, y and τ. Mic i's residual is rᵢ = t0ᵢ − τ − dᵢ / c (positive: the mic heard it
+late). The solver minimises Σ wᵢ rᵢ² over the mics used, with wᵢ = 1 / σᵢ².
+`measure::solve` in `solver.h`.
+
+- **Ranges:** inside, every time becomes a range relative to the first arrival among the
+  mics used, sᵢ = c (t0ᵢ − t0_first), and τ a range offset D = c (τ − t0_first). The residual
+  in range is d_i + D − s_i. For a given (x, y), the best D is the weighted mean of sᵢ − dᵢ;
+  the solver sets it so at every point.
+- **Method:** Levenberg–Marquardt on (x, y, D): the normal matrix A = Σ wᵢ Jᵢ Jᵢᵀ with
+  Jᵢ = ((x − xᵢ)/dᵢ, (y − yᵢ)/dᵢ, 1), its diagonal times (1 + λ), λ from 10⁻³, divided by 10
+  after a step that lowers the cost and multiplied by 10 after one that doesn't. Single
+  precision on the target.
+- **Start:** halfway between the first-hit mic and the frame centre. If that does not
+  converge, again from the centre.
+- **Convergence:** a step in (x, y) under 0.001 mm, which is taken even if the cost does not
+  drop (at the minimum, float cannot resolve the change). At most 15 linear solves per
+  start. A point more than 2000 mm from the centre, or a singular matrix (mics in a line):
+  not converged.
+- **Outside the area:** no clamping. The solver reports where the fit lands; validity
+  decides (MEASUREMENT step 4).
+- **Mics:** at least 3; 4 or more to have a residual.
+
+### Outputs
+
+| Output | Meaning |
+|---|---|
+| x, y | mm |
+| τ | ns, on the arrival times' clock |
+| rms | √(Σ rᵢ² / n) over the n mics used, ns |
+| rᵢ | ns, per mic, also for a mic not used (its misfit against the solution) |
+| converged, iterations, starts | as above |
+| used, dropped | which mics were in the fit; the one drop-one left out (−1: none) |
+| σx, σy, ρ | the 1σ uncertainty of x and y and their correlation |
+| major | 1σ along the long axis of the error ellipse, mm |
+
+The uncertainty is the covariance A⁻¹ at the solution, with the weights in absolute
+units (wᵢ = 1 / (c σᵢ)² in mm⁻²). It uses the σᵢ given, not the shot's own residual: with
+2–3 degrees of freedom that would be too noisy. It is checked by simulation: with 50 ns of
+noise per channel, the rms error matches it within 10 % (`pio test -e native`).
+
+### Drop-one
+
+`measure::solveDropOne`: the mechanism. The policy, when to use it and whether to accept
+the result, is the caller's (MEASUREMENT steps 3d and 4).
+
+1. Fit with all the mics given.
+2. If that converged with rms ≤ the limit, or it used fewer than 5 mics, that is the
+   result.
+3. Otherwise fit once with each mic left out, and take the best: a converged fit over one
+   that didn't, then the lowest rms. Its `dropped` says which mic. Its rms may still be
+   over the limit.
+
+## Test vectors
+
+`test/vectors/`, written by `tools/model.py` (fixed seed: the same files every run). Plain
+text, one case per line, fields separated by spaces, `#` starts a comment line. Inputs are
+written rounded, and the expected values are computed from the rounded inputs, so every
+implementation reads exactly what the reference solved.
+
+**`air.txt`:** `T_degC RH_percent p_Pa c_m_per_s`.
+
+**`solve.txt`:**
+
+```
+name kind limit_ns n mask c_mm_per_ns  (x y h)×n  t0_ns×n  sigma_ns×n  |  ok  [dropped x y tau rms res×n sx sy rho major]
+```
+
+- `mask`: hex, bit i = mic i used.
+- `ok`: 1 if the reference found a solution, then the expected values follow; 0 if
+  not (blasts).
+- `kind`:
+  - `fit`: `solve(mask)` must converge to the expected values;
+  - `drop`: `solveDropOne(limit, mask)` likewise, dropping the same mic;
+  - `outside`: noise-free points outside the frame. The solver may fail to converge,
+    but a converged fit with rms under 10 ns must be the expected point (0.01 mm);
+  - `blast`: a far point source. No fit, with or without drop-one, may be a hit (converged,
+    rms ≤ limit, inside ±100 mm).
+
+The cases: 230 random points with 50 ns noise on the D1/D2 layout (equal and mixed heights,
+some with unequal σ), 40 with the D1 corners only, 40 on the square, 60 outside the frame,
+80 with one channel 24 µs late or early, 20 clean shots through drop-one, 60 blasts.
+
+**Agreement** (single precision against double): positions 0.001 mm, residuals and rms
+0.5 ns, τ 0.5 ns, σx/σy/major 0.1 %, ρ 0.001. Today's C++ reaches 0.00006 mm, 0.26 ns,
+0.11 ns and 0.005 %. Arrival times near 10⁶ ns are float steps of 0.06 ns apart; that is
+where the residuals' 0.26 ns comes from (0.0001 mm of range).
