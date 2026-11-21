@@ -88,8 +88,9 @@ fit a point in the 200 × 200 mm scoring area.
 - **Two defences:** this covers the weak spot the summary describes (a neighbouring
   lane's blast fitting as a hit about 10 mm from the centre on the centre lines). The
   curtain is the second, independent defence (D9).
-- **Firmware:** `mic default` gets this layout, and `mic` warns when the fitted mics are
-  within 25 mm of one circle.
+- **Firmware:** `mic default` gets this layout. `mic` runs the study's 624 blasts through
+  the board's solver, with every mic and with each one dropped, and warns if any scores
+  (MEASUREMENT 3c; this replaced a planned "within 25 mm of one circle" test).
 - **Test:** a blast fault in the simulator (phase 0), then real blasts on the range (phase
   2).
 

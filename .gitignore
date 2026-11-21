@@ -20,3 +20,7 @@ hardware/**/*.lck
 hardware/**/~*.lck
 hardware/**/_autosave-*
 hardware/**/*.kicad_prl
+# The replay tool (firmware/tools/replay.cpp), built locally
+firmware/tools/replay
+# Serial logs (pio device monitor --filter log2file)
+logs/

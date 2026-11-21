@@ -77,6 +77,16 @@ const int      SYNC_PIN             = 12;
 // Arrival time t0 = t1 - k (t2 - t1) - offset; k and the offsets are settings (NVS).
 const float    ARRIVAL_K_DEFAULT    = 1.0f / 3;
 
+// --- Step 3c: the solver on the board ---
+// The calibration (NVS "cal", calib.cpp): per channel its mic (x, y, h), k, offset and
+// sigma. Defaults: the D1/D2 layout on CH1-CH6 (`mic default`).
+const float    MIC_H_DEFAULT_MM     = 10.5f;   // mic port behind the paper (21.5 flipped)
+const float    SIGMA_DEFAULT_NS     = 50.0f;   // timing error per channel until calibrated (3e)
+// A solved shot goes to the app if the fit converged with an rms residual up to this (ns;
+// `reslimit`, stored). Validity proper is step 4.
+const float    RES_LIMIT_DEFAULT_NS = 1500.0f;
+const float    CARD_HALF_MM         = 100.0f;  // the scoring area: |x|, |y| up to this
+
 // Simulator: 4 mics on CH5-CH8 (their pins can be outputs; CH1/CH2 are input-only), at
 // the corners of a square around the card, mm from its centre. CH5 bottom left, then
 // counter-clockwise. Those connectors must have no sensor board plugged in while it runs.
@@ -84,6 +94,7 @@ const int      SIM_FIRST_CHANNEL    = 4;      // CH5, 0-based
 const int      SIM_CHANNELS         = 4;
 const float    SIM_MIC_MM           = 105.0f;
 const float    SIM_CARD_MM          = 100.0f; // random shots land within +-this of the centre
+const float    SIM_POS_LIMIT_MM     = 0.1f;   // position check: worst error vs the truth (3c)
 
 // The air (step 3a): J5 takes a BME280/BMP280 on I2C (SDA, SCL) or a DS18B20 on 1-Wire
 // (SDA's pin, read through UART2: the UART times the slots, so no interrupts are held off),

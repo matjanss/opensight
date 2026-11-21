@@ -23,7 +23,7 @@ The web/wasm viewer is parked.
 |---|---|---|
 | `PLAN.md` | Decisions D1–D12 (mic layout, model, who does what, calibration, firmware structure, messages, the air, curtain, frame limits, ground truth, the solver), open questions Q1–Q3, phases 0–5 with their tests | Always, before choosing what to work on |
 | `firmware/MEASUREMENT.md` | The measurement firmware's steps 1–6, each with its build list and bench test, the step status table, and every bench result (newest first) | Before any measurement work; update it in the same commit as the code |
-| `firmware/MODEL.md` | The measurement model: units, mics, arrival time, speed of sound, propagation, the solver and its outputs, drop-one, the test vector format | Before touching `lib/measure/` or `tools/model.py` (see the model rule) |
+| `firmware/MODEL.md` | The measurement model: units, mics, arrival time, speed of sound, propagation, the solver and its outputs, drop-one, the log lines (`cfg`, `rec`), the test vector format | Before touching `lib/measure/` or `tools/model.py` (see the model rule) |
 | `FUTURE_ARCHITECTURE.md` | The target system: target, range server, viewers, management, network per lane, updates, its steps 1–4 | Before anything network, server, viewer or fleet |
 | `protocol/PROTOCOL.md` | The BLE protocol, v2: advertising, GATT, shots, security, buttons and LED | Before touching the link (see the protocol rule) |
 | `hardware/acoustic-sensor/README.md` | Sensor board v0.3: one mic channel, files, checks before ordering | Hardware questions |
@@ -49,7 +49,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Part | Where it stands | Next (see) |
 |---|---|---|
 | Firmware: BLE, pairing, shot buffer | Done; protocol v2 | Flash shot store, uplink interface (PLAN D6, phase 3–4) |
-| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration) was re-planned with the user on 2026-11-21 (PLAN D2, D3, D8, D12; a first try is archived, below) and is being built on `step3-solver` | MEASUREMENT step 3, sub-steps 3a-3e in order: the air sensor and sync pin, the model and core on the PC, the solver on the board, 6 simulated channels and drop-one, calibration |
+| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration) was re-planned with the user on 2026-11-21 (PLAN D2, D3, D8, D12; a first try is archived, below) and is being built on `step3-solver`: 3a passes on the bench (its sensor tests wait for the parts), 3b passes on the PC, 3c passes on the bench (bare NodeMCU, simulated); next 3d | MEASUREMENT step 3, sub-steps 3a-3e in order: the air sensor and sync pin, the model and core on the PC, the solver on the board, 6 simulated channels and drop-one, calibration |
 | Sensor board (`hardware/acoustic-sensor/`) | v0.3 designed (KiCad 10), not yet on the bench | Its "check before ordering" list; then the summary's initial calibration, polarity, PLAN phase 1 |
 | Host board (`hardware/host-board/`) | v0.3 designed and routed, not yet on the bench; firmware already on its pin map | Order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner slid 40 mm along the top edge, plus bottom-middle and right-middle mics; the user designs and prints the holders |
@@ -66,11 +66,13 @@ firmware/                     PlatformIO, Arduino-ESP32 3.x on pioarduino (IDF 5
   MEASUREMENT.md              measurement plan and bench results
   MODEL.md                    the measurement model (source of truth)
   src/                        the firmware (modules below)
-  lib/measure/                the portable measurement core: air.h, model.h, solver
+  lib/measure/                the portable measurement core: air.h, model.h, solver,
+                              record (the log lines), blast (the blast check)
   lib/bme280/                 BME280/BMP280 compensation (portable)
   test/test_measure/          Unity tests of the core on the PC (`pio test -e native`)
   test/vectors/               shared test vectors, written by tools/model.py
   tools/model.py              the model's reference implementation (numpy)
+  tools/replay.cpp            replays a serial log's events through lib/measure (g++)
   tools/layout_study.py       mic layout study behind PLAN D1/D2 (numpy)
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs
@@ -92,7 +94,11 @@ hardware/host-board/          host board, KiCad 10
   encoding against the examples in PROTOCOL.md. On Linux the app builds libdbus from
   source (`vendored`), so no `libdbus-1-dev` is needed.
 - **Tools:** `python3 firmware/tools/layout_study.py [--drop] [--offsets]` (a few
-  minutes).
+  minutes). The replay, from `firmware/`: `g++ -std=gnu++17 -O2 -mfma -ffp-contract=fast
+  -I lib/measure -o tools/replay tools/replay.cpp lib/measure/solver.cpp
+  lib/measure/record.cpp` (FMA like the ESP32, so it matches the board to 0.001 mm; no
+  `-mfma` on ARM), then
+  `tools/replay [--h mm] [--temp C] [--without ch] <log>` (also built in CI).
 - **Release:** `git tag vX.Y.Z && git push origin vX.Y.Z`.
 - **Hardware can't be tested here: the user runs every bench test.** The radio link and
   the measurement can only be checked by compiling (and by host-side checks of pure code,
@@ -173,19 +179,26 @@ hardware/host-board/          host board, KiCad 10
   - MCPWM, one operator per channel, both units started from edges on GPIO 12, by
     register from IRAM.
   - A CPU-driven generator is not exact under BLE load.
-- `arrival.cpp`: t0 = t1 − k·(t2 − t1) − offset per channel. `k` and `offset` are in NVS
-  (namespace `"measure"`). `k` is still global; PLAN D3 makes it per channel.
+- `calib.cpp`: the calibration per channel (mic x, y, h; k; offset; sigma), NVS namespace
+  `"cal"` (k and the offsets moved there from `"measure"` in 3c). Commands `mic`, `k`,
+  `offset`. Every change prints the `cfg` line, whose id every `rec` line carries.
+- `arrival.cpp`: t0 = t1 − k·(t2 − t1) − offset per channel (`measure::arrivalT0`), for
+  the printed t0 lines and the simulator.
+- `position.cpp`: every event (but the self-test's) solved in `loop()` with
+  `lib/measure` if 4+ channels have a mic and both edges; prints the `shot` and `rec`
+  lines; sends the shot to the app (`shots.h`, the buffer in `main.cpp`) if it converged
+  within `reslimit`. Also `testshot`, `stat`'s solver line, and the blast check `mic`
+  runs (`lib/measure/blast.h`). The solve takes `measure::solveInput` from a `rec`, so
+  `tools/replay` solves exactly what the board did.
 - `simulate.cpp` (`sim ...`): simulated shots at known positions on CH5–CH8 (the pins
-  drive their own inputs), checked against the truth: the capture and t0. It stands in
-  until the sensor boards arrive. It takes the firmware's air by default; `sim temp` sets another temperature.
-- **The solver** (step 3b) is in `lib/measure/solver.cpp`, tested on the PC but not yet
-  called by the firmware (step 3c). `arrival.cpp` uses the core's `arrivalT0`. The tag
-  `archive/step3-first-try` holds a first try that was set aside (it never ran on the
-  board, and predates PLAN.md). Parts of it still to reuse, with
-  `git show archive/step3-first-try:<path>`:
-  - `solver.cpp`: `mic` and the calibration mode's `cal evt=` lines;
-  - the simulator's position check;
-  - `firmware/tools/calibrate.py`: the fit, with a global k.
+  drive their own inputs), checked against the truth: the capture, t0 and the position.
+  It stands in until the sensor boards arrive. It takes the firmware's air by default;
+  `sim temp` sets another temperature. Its position check counts for PASS only when the
+  firmware has its mics (`mic sim`), air, offsets, k = 1/3 and no fault.
+- The tag `archive/step3-first-try` holds a first try that was set aside (it never ran on
+  the board, and predates PLAN.md). Still to reuse in 3e, with
+  `git show archive/step3-first-try:<path>`: `firmware/tools/calibrate.py` (the fit, with
+  a global k) and the calibration mode in `firmware/src/solver.cpp`.
 - `airtemp.cpp`: the air sensor on J5, read by a task on core 0 once a minute: a BME280
   or BMP280 on I2C (SDA 14, SCL 15; compensation in `lib/bme280/`), or a DS18B20 on
   GPIO 14 through UART2 as a 1-Wire bus. It looks for one 3 times, a minute apart, then
@@ -193,7 +206,7 @@ hardware/host-board/          host board, KiCad 10
   1013.25 hPa, marked "assumed"). The speed of sound (Cramer) is in `lib/measure/air.h`,
   the start of the portable measurement core (step 3b).
 - `main.cpp`: the main loop and the shot buffer.
-  - The button: short press = a random test shot (until there are solved shots); 2 s
+  - The button: short press = a random test shot (`testshot on|off`); 2 s
     hold = pairing mode; 10 s hold = PIN reset.
   - The heartbeat, and the name and PIN in NVS (namespace `"sensor"`).
   - The status LED: pairing blink, PIN reset, shot flash. The app can't switch it.

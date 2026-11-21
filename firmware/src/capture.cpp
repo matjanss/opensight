@@ -15,6 +15,8 @@
 #include "capture.h"
 #include <Preferences.h>
 #include "airtemp.h"
+#include "calib.h"
+#include "position.h"
 #include "arrival.h"
 #include "config.h"
 #include "driver/gpio.h"
@@ -568,10 +570,10 @@ static void selftestService(uint32_t now) {
 // ---- Output ----
 
 // Free serial buffer needed before printing an event (its line, the already-high lines, the
-// two arrival lines and the simulator's), and before its transition lists (verbose: up to
-// 16 lines).
-static const int PRINT_ROOM = 900;
-static const int PRINT_ROOM_VERBOSE = 1536;
+// two arrival lines, the shot and rec lines and the simulator's), and before its transition
+// lists (verbose: up to 16 lines).
+static const int PRINT_ROOM = 1700;   // the most one event prints (8 channels, solved, sim)
+static const int PRINT_ROOM_VERBOSE = 2600;
 static uint32_t verboseSkipped = 0;
 
 static void printEvent(const EventResult& r) {
@@ -648,6 +650,7 @@ static void printStatus() {
                 captureDeadUs() / 1000.0,
                 (unsigned)spanMm, (unsigned)coveredUs(postBlocks), verbose ? "on" : "off");
   airPrintStatus();
+  positionPrintStatus();
   Serial.printf("memory: %u bytes free, %u DMA-capable, largest DMA block %u\n",
                 (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
@@ -664,7 +667,8 @@ bool captureBegin() {
   spanMm = prefs.getUInt("span", CAPTURE_SPAN_MM_DEFAULT);
   if (postBlocksFor(spanMm) > POST_MAX) spanMm = CAPTURE_SPAN_MM_DEFAULT;
   postBlocks = postBlocksFor(spanMm);
-  arrivalBegin();
+  calibBegin();
+  positionBegin();
 
   pinMode(IR_EN_PIN, OUTPUT);
   digitalWrite(IR_EN_PIN, LOW);
@@ -798,7 +802,9 @@ void captureService(uint32_t nowMs) {
     Arrival a;
     arrivalCompute(r, a);
     arrivalPrint(r, a);
-    if (simActive()) simRecord(r, a);
+    Position p;
+    positionProcess(r, p, nowMs);
+    if (simActive()) simRecord(r, a, p);
   }
   uint32_t missed = missedCount;
   if (missed != missedReported) {
@@ -831,7 +837,8 @@ void captureCommand(const char* line) {
                    "                       20 pairs, 10000 ns)\n"
                    "  temp                 the air: sensor, temperature, humidity, pressure, speed of sound\n"
                    "  temp scan            look for an air sensor on J5 again (it stops after 2 min)");
-    arrivalHelp();
+    calibHelp();
+    positionHelp();
     simHelp();
   } else if (!running) {
     Serial.println("capture is not running (see the start-up messages)");
@@ -883,7 +890,7 @@ void captureCommand(const char* line) {
     } else {
       airPrintStatus();
     }
-  } else if (!arrivalCommand(cmd, line) && !simCommand(cmd, line)) {
+  } else if (!calibCommand(cmd, line) && !positionCommand(cmd, line) && !simCommand(cmd, line)) {
     Serial.printf("unknown command '%s', type 'help'\n", cmd);
   }
 }

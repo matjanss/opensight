@@ -11,7 +11,10 @@
 //     MCPWM unit), about 56 ns rms;
 //   - the t0 model: t0 from the edges sent against the true arrival. Zero for the linear
 //     trip model with k = 1/3 (up to the 25 ns steps); the sine model shows what the
-//     straight-line formula leaves on a curved rise.
+//     straight-line formula leaves on a curved rise;
+//   - the position (step 3c): the solver's shot against the point it was sent to. With the
+//     firmware's mics, air, offsets and model the same as the simulator's (`mic sim`), only
+//     the sampling is left: about 0.015 mm rms, 0.04 mm worst (a PC simulation).
 // `sim raw` sends fixed edges instead, to check the generator itself: equal times on all
 // channels show any offset between the two MCPWM units.
 //
@@ -19,6 +22,7 @@
 // T = 12 us; OUT_L trips at 1, OUT_H at 4 (k = 1/3); A = amp * 100 mm / distance.
 #include "simulate.h"
 #include "airtemp.h"
+#include "calib.h"
 #include "capture.h"
 #include "config.h"
 #include "esp_cpu.h"
@@ -38,7 +42,7 @@ static const int      MAX_COUNT  = 2000;
 
 // ---- Settings (RAM; `sim` shows them) ----
 
-static float micX[N], micY[N];
+static float micX[N], micY[N], micH[N];
 static float trueOffsetNs[N] = {};
 static float simTempC = NAN;   // NAN: the firmware's own air (airtemp.h); else `sim temp`
 static float simAmp = 40.0f;      // pulse amplitude at 100 mm, in units of the OUT_L threshold
@@ -52,7 +56,7 @@ static bool micsSet = false;
 static void defaultMics() {
   const float m = SIM_MIC_MM;
   const float xs[4] = {-m, m, m, -m}, ys[4] = {-m, -m, m, m};
-  for (int i = 0; i < N; i++) { micX[i] = xs[i % 4]; micY[i] = ys[i % 4]; }
+  for (int i = 0; i < N; i++) { micX[i] = xs[i % 4]; micY[i] = ys[i % 4]; micH[i] = MIC_H_DEFAULT_MM; }
   micsSet = true;
 }
 
@@ -97,10 +101,52 @@ static struct {
   Stat     err[N], model[N];       // t0: vs the edges sent, vs the true arrival
   Stat     raw[N][2];              // M_RAW: each line vs CH5 L
   uint32_t noT0[N], extraT0[N], rawMissing[N][2];
+  // The position check (3c): the solver's shot against the truth.
+  bool     posCounts;              // part of PASS: the firmware solves the simulator's world
+  const char* posWhyNot;
+  Stat     posErr, posRes;         // mm; the fit's rms residual, ns
+  double   posDx, posDy;           // sums, for the mean error
+  uint32_t posUnsolved, posNotConverged;
   uint32_t second[5];              // double: measured, MISSED, ignored (dead time), lost, partial
 } run;
 
 bool simActive() { return run.active; }
+
+bool simMic(int ch, float* x, float* y, float* h) {
+  if (ch < F || ch >= F + N) return false;
+  if (!micsSet) defaultMics();
+  *x = micX[ch - F];
+  *y = micY[ch - F];
+  *h = micH[ch - F];
+  return true;
+}
+
+// The k the firmware uses on a simulated channel (0..N-1), and the largest of them.
+static double simK(int i) { return calibCfg().ch[F + i].k; }
+static double simKMax() {
+  double k = 0;
+  for (int i = 0; i < N; i++) if (simK(i) > k) k = simK(i);
+  return k;
+}
+
+// Why the position check can't be part of PASS: the firmware's world differs from the
+// simulator's on purpose (or by mistake). nullptr: it counts.
+static const char* positionMismatch(Fault fl) {
+  const measure::Cfg& cfg = calibCfg();
+  for (int i = 0; i < N; i++) {
+    const measure::ChannelCfg& ch = cfg.ch[F + i];
+    if (!ch.mic || fabsf(ch.x - micX[i]) > 0.005f || fabsf(ch.y - micY[i]) > 0.005f)
+      return "the firmware's mics are not the simulator's (`mic sim`)";
+    if (fabsf(ch.h - micH[i]) > 0.005f) return "the firmware's mic heights are not the simulator's";
+    if (fabsf(ch.offsetNs - trueOffsetNs[i]) > 0.5f) return "the firmware's offsets are not the simulator's";
+    if (!sineModel && fabsf(ch.k - 1.0f / 3) > 0.001f)
+      return "the firmware's k is not the linear model's 1/3 (`k 0.33333`)";
+  }
+  if (!isnan(simTempC)) return "`sim temp` gives the simulator other air than the firmware's";
+  if (sineModel) return "the sine model (t0's formula is exact for the linear one only)";
+  if (fl != F_NONE) return "a fault is set";
+  return nullptr;
+}
 
 static uint16_t simChannelMask() { return ((1 << N) - 1) << F; }
 static uint16_t simLineMask() {
@@ -132,7 +178,7 @@ static bool makeShot(float x, float y, Shot& s) {
   s.x = x;
   s.y = y;
   for (int i = 0; i < N; i++) {
-    double d = hypot(x - micX[i], y - micY[i]);
+    double d = sqrt((x - micX[i]) * (x - micX[i]) + (y - micY[i]) * (y - micY[i]) + micH[i] * micH[i]);
     if (d < 1) d = 1;
     s.geo[i] = d / c;
     double a = simAmp * 100.0 / d;
@@ -207,8 +253,10 @@ static void startCommon(Mode m, uint32_t count) {
   run.doubleWaitUs = doubleUs;
   uint32_t runUs = (uint32_t)(period * TICK_NS / 1000) + 20;
   if (run.fault == F_DOUBLE && run.doubleWaitUs < runUs) run.doubleWaitUs = runUs;
-  double k = arrivalK();
+  const double k = simKMax();
   run.limitNs = (1 + 2 * k) * NS_PER_SAMPLE + TICK_NS + 5;
+  run.posWhyNot = rawMode ? "raw edges are not a shot" : positionMismatch(run.fault);
+  run.posCounts = !run.posWhyNot;
 
   // Check the first shot fits before setting anything up.
   Shot probe;
@@ -233,8 +281,8 @@ static void startCommon(Mode m, uint32_t count) {
   captureTestChannels(simChannelMask());
   run.active = true;
   uint32_t dead = captureDeadtimeMs();
-  // Four lines per shot (~450 bytes): 100 ms apart keeps well inside 115200 baud.
-  run.spacingMs = dead + 20 > 100 ? dead + 20 : 100;
+  // Six lines per shot (~1000 bytes): 150 ms apart keeps inside 115200 baud.
+  run.spacingMs = dead + 20 > 150 ? dead + 20 : 150;
   run.nextAt = millis() + 100;
   run.missedAtStart = captureMissedCount();
   run.closed = true;
@@ -243,6 +291,7 @@ static void startCommon(Mode m, uint32_t count) {
   int n = 0;
   for (int i = 0; i < N; i++)
     n += snprintf(pinText + n, sizeof pinText - n, "%s%d/%d", i ? ", " : "", pins[i][0], pins[i][1]);
+  calibPrintCfg();   // so a log of the run has the settings its rec lines name
   if (rawMode) {
     Serial.printf("sim: %u raw runs on CH%d-CH%d (GPIO %s), L at", (unsigned)count, F + 1, F + N, pinText);
     for (int i = 0; i < N; i++) Serial.printf(" %u", (unsigned)run.rawRiseNs[i]);
@@ -253,13 +302,18 @@ static void startCommon(Mode m, uint32_t count) {
   const char* faultText[] = {"none", "late", "missing", "honly", "double"};
   const Air sa = simAir();
   Serial.printf("sim: %u shots %s on CH%d-CH%d (GPIO %s); %s model, amp %.0f, air %.1f °C "
-                "(%s, %.2f m/s); firmware k %.4f; fault %s", (unsigned)count,
+                "(%s, %.2f m/s); firmware k up to %.4f; fault %s", (unsigned)count,
                 m == M_RANDOM ? "at random points on the card" : "at one point", F + 1, F + N,
                 pinText, sineModel ? "sine" : "linear", simAmp, sa.tC,
                 isnan(simTempC) ? "the firmware's" : "sim temp", sa.c, k, faultText[run.fault]);
   if (run.fault == F_DOUBLE) Serial.printf(" (second shot %u us later)", (unsigned)run.doubleWaitUs);
   else if (run.fault != F_NONE) Serial.printf(" on CH%d", F + 1 + run.faultCh);
   Serial.printf("; every %u ms\n", (unsigned)run.spacingMs);
+  if (run.posCounts)
+    Serial.printf("sim: position check on: the firmware has the simulator's mics and air (limit %.2f mm)\n",
+                  SIM_POS_LIMIT_MM);
+  else
+    Serial.printf("sim: position check for information only: %s\n", run.posWhyNot);
 }
 
 // ---- Recording ----
@@ -291,23 +345,22 @@ static void recordRaw(const EventResult& r) {
   Serial.println(line);
 }
 
-static void recordShot(const EventResult& r, const Arrival& a) {
+static void recordShot(const EventResult& r, const Arrival& a, const Position& p) {
   const Shot& s = run.shot;
-  const double k = arrivalK();
   double expT0[N];
   bool expOn[N], got[N];
   int ref = -1;
   for (int i = 0; i < N; i++) {
     expOn[i] = s.on[i][0] && s.on[i][1];
-    expT0[i] = expOn[i] ? s.rise[i][0] * TICK_NS - k * ((double)s.rise[i][1] - s.rise[i][0]) * TICK_NS -
-                              arrivalOffsetNs(F + i)
+    expT0[i] = expOn[i] ? s.rise[i][0] * TICK_NS - simK(i) * ((double)s.rise[i][1] - s.rise[i][0]) * TICK_NS -
+                              calibCfg().ch[F + i].offsetNs
                         : 0;
     got[i] = a.valid & (1 << (F + i));
     if (expOn[i] && !got[i]) run.noT0[i]++;
     if (!expOn[i] && got[i]) run.extraT0[i]++;
     if (ref < 0 && expOn[i] && got[i]) ref = i;
   }
-  char line[220];
+  char line[260];
   int n = snprintf(line, sizeof line, "  sim (%.1f, %.1f) mm, t0 error ns vs sent/vs true:", s.x, s.y);
   for (int i = 0; i < N; i++) {
     if (i == ref) continue;
@@ -323,10 +376,25 @@ static void recordShot(const EventResult& r, const Arrival& a) {
     n += snprintf(line + n, sizeof line - n, "  CH%d %+.0f/%+.0f%s", F + 1 + i, e, m,
                   fabs(e) > run.limitNs ? " (!)" : "");
   }
+  if (!p.solved) {
+    run.posUnsolved++;
+    n += snprintf(line + n, sizeof line - n, "; not solved");
+  } else if (!p.s.converged) {
+    run.posNotConverged++;
+    n += snprintf(line + n, sizeof line - n, "; did not converge");
+  } else {
+    const double dx = p.s.x - s.x, dy = p.s.y - s.y, e = sqrt(dx * dx + dy * dy);
+    run.posErr.add(e, SIM_POS_LIMIT_MM);
+    run.posRes.add(p.s.rmsNs, 1e18);
+    run.posDx += dx;
+    run.posDy += dy;
+    n += snprintf(line + n, sizeof line - n, "; position error %.3f mm%s", e,
+                  run.posCounts && e > SIM_POS_LIMIT_MM ? " (!)" : "");
+  }
   Serial.println(line);
 }
 
-void simRecord(const EventResult& r, const Arrival& a) {
+void simRecord(const EventResult& r, const Arrival& a, const Position& p) {
   if (!run.active) return;
   if (run.pending1) run.pending1 = false;
   else if (run.pending2) {
@@ -336,7 +404,7 @@ void simRecord(const EventResult& r, const Arrival& a) {
     run.second2Event = true;
     run.second2Good = (a.valid & (((1 << N) - 1) << F)) != 0;
     run.seen++;
-    if (run.second2Good) recordShot(r, a);
+    if (run.second2Good) recordShot(r, a, p);
     else Serial.println("  sim: an event with no first edges: a window opened in the middle of "
                         "the second shot");
     return;
@@ -347,7 +415,7 @@ void simRecord(const EventResult& r, const Arrival& a) {
   }
   run.seen++;
   if (run.mode == M_RAW) recordRaw(r);
-  else recordShot(r, a);
+  else recordShot(r, a, p);
 }
 
 // ---- Firing ----
@@ -465,10 +533,10 @@ static void finish() {
 
   // The captured t0 difference of two channels is off by the rounding of four edges to the
   // 100 ns samples: rms S * sqrt(2 ((1 + k)^2 + k^2) / 12).
-  const double k = arrivalK();
   const double S = NS_PER_SAMPLE;
-  const double rmsExp = S * sqrt(2 * ((1 + k) * (1 + k) + k * k) / 12);
   for (int i = 0; i < N; i++) {
+    const double k = simK(i);
+    const double rmsExp = S * sqrt(2 * ((1 + k) * (1 + k) + k * k) / 12);
     const Stat& st = run.err[i];
     const Stat& md = run.model[i];
     bool faulty = run.fault != F_NONE && run.fault != F_DOUBLE && run.faultCh == i;
@@ -502,6 +570,26 @@ static void finish() {
                   (unsigned)run.second[4]);
     if (run.second[3] || run.second[4]) pass = false;
   }
+  // The position check.
+  const Stat& pe = run.posErr;
+  const uint32_t tried = pe.n + run.posUnsolved + run.posNotConverged;
+  if (tried) {
+    Serial.printf("sim: position vs the truth: %u of %u shots solved and converged", (unsigned)pe.n,
+                  (unsigned)tried);
+    if (pe.n)
+      Serial.printf(", error rms %.4f mm, worst %.4f mm, mean (%+.4f, %+.4f) mm; rms residual "
+                    "mean %.0f ns, worst %.0f ns", sqrt(pe.sumSq / pe.n), pe.maxAbs, run.posDx / pe.n,
+                    run.posDy / pe.n, run.posRes.sum / pe.n, run.posRes.maxAbs);
+    Serial.println();
+    if (run.posCounts) {
+      const bool ok = pe.n == tried && pe.outside == 0;
+      Serial.printf("sim: position check %s (every shot solved, worst error within %.2f mm)\n",
+                    ok ? "PASS" : "FAIL", SIM_POS_LIMIT_MM);
+      if (!ok) pass = false;
+    } else {
+      Serial.printf("sim: position check not part of PASS: %s\n", run.posWhyNot);
+    }
+  }
   Serial.printf("sim: %s\n", pass ? "PASS" : "FAIL");
 }
 
@@ -515,7 +603,8 @@ void simHelp() {
                  "                       (default 1000), n runs (default 20)\n"
                  "  sim fault none | late <ch> | missing <ch> | honly <ch> | double <us>\n"
                  "  sim model linear|sine, sim amp <n>, sim temp <C>|air, sim offset <ch> <ns>,\n"
-                 "  sim mic <ch> <x> <y>  the simulated sensors; `sim` shows them; sim stop");
+                 "  sim mic <ch> <x> <y> [h]  the simulated mics (h default 10.5 mm); `sim` shows\n"
+                 "                       them; `mic sim` gives the firmware the same; sim stop");
 }
 
 static void printSettings() {
@@ -529,8 +618,8 @@ static void printSettings() {
   else if (fault != F_NONE) Serial.printf(" CH%d", F + 1 + faultCh);
   Serial.println();
   for (int i = 0; i < N; i++)
-    Serial.printf("sim: CH%d mic at (%.1f, %.1f) mm, own delay %.0f ns\n", F + 1 + i, micX[i],
-                  micY[i], trueOffsetNs[i]);
+    Serial.printf("sim: CH%d mic at (%.1f, %.1f) mm, h %.1f mm, own delay %.0f ns\n", F + 1 + i,
+                  micX[i], micY[i], micH[i], trueOffsetNs[i]);
 }
 
 static int simChannelArg(int ch) { return ch >= F + 1 && ch <= F + N ? ch - F - 1 : -1; }
@@ -621,14 +710,16 @@ bool simCommand(const char* cmd, const char* line) {
     trueOffsetNs[simChannelArg(ch)] = v;
   } else if (!strcmp(sub, "mic")) {
     int ch;
-    float x, y;
-    if (sscanf(line, "%*s %*s %d %f %f", &ch, &x, &y) != 3 || simChannelArg(ch) < 0 ||
-        fabsf(x) > 1000 || fabsf(y) > 1000) {
-      Serial.printf("sim mic <%d..%d> <x> <y> (mm)\n", F + 1, F + N);
+    float x, y, h = NAN;
+    int got = sscanf(line, "%*s %*s %d %f %f %f", &ch, &x, &y, &h);
+    if (got < 3 || simChannelArg(ch) < 0 || fabsf(x) > 1000 || fabsf(y) > 1000 ||
+        (got == 4 && !(h >= 0 && h <= 100))) {
+      Serial.printf("sim mic <%d..%d> <x> <y> [h] (mm)\n", F + 1, F + N);
       return true;
     }
     micX[simChannelArg(ch)] = x;
     micY[simChannelArg(ch)] = y;
+    if (got == 4) micH[simChannelArg(ch)] = h;
   } else {
     simHelp();
     return true;

@@ -2,12 +2,13 @@
 //
 // - BLE peripheral, protocol in protocol/PROTOCOL.md
 // - Heartbeat (millis()) every 2 s
-// - BOOT short press makes a test shot (until there is measuring hardware), BOOT held 2 s
+// - BOOT short press makes a test shot (`testshot on|off`), BOOT held 2 s
 //   opens a 60 s pairing window, BOOT held 10 s resets the PIN and deletes all bonds
 // - Shots are numbered, buffered and indicated to the app until it confirms them
 // - The onboard LED shows status only: pairing mode, a PIN reset, shots
 // - Sensor name and pairing PIN stored in flash, changeable over BLE
-// - Capture of the comparator lines (capture.cpp): events and commands on the serial port
+// - Capture of the comparator lines (capture.cpp): events and commands on the serial port;
+//   each event solved (position.cpp), a good fit sent to the app as a shot
 #include <Arduino.h>
 #include <Preferences.h>
 #include <math.h>
@@ -16,6 +17,8 @@
 #include "ble_link.h"
 #include "airtemp.h"
 #include "capture.h"
+#include "position.h"
+#include "shots.h"
 
 static Preferences prefs;
 static char sensorName[NAME_MAX_LEN + 1];
@@ -84,11 +87,11 @@ static uint32_t oldestSeq() {
   return oldest > clearedSeq ? oldest : clearedSeq + 1;
 }
 
-static void addShot(int32_t x, int32_t y, uint32_t now) {
+uint32_t shotAdd(int32_t x, int32_t y, uint32_t now) {
   Shot& s = shots[(++lastSeq) % SHOT_BUFFER];
   s = {lastSeq, now, x, y};
   shotFlashEnd = now + SHOT_FLASH_MS;
-  Serial.printf("Shot %u: x %.2f mm, y %.2f mm\n", (unsigned)lastSeq, x / 100.0, y / 100.0);
+  return lastSeq;
 }
 
 // A test shot, normally distributed around the centre (Box-Muller).
@@ -96,7 +99,9 @@ static void makeTestShot(uint32_t now) {
   float u1 = (esp_random() + 1.0f) / 4294967297.0f;   // (0, 1]: log() stays finite
   float u2 = esp_random() / 4294967296.0f;
   float r = sqrtf(-2.0f * logf(u1)) * TEST_SHOT_SIGMA_MM * 100.0f;
-  addShot(lroundf(r * cosf(2 * PI * u2)), lroundf(r * sinf(2 * PI * u2)), now);
+  const int32_t x = lroundf(r * cosf(2 * PI * u2)), y = lroundf(r * sinf(2 * PI * u2));
+  const uint32_t seq = shotAdd(x, y, now);
+  Serial.printf("Test shot %u: x %.2f mm, y %.2f mm\n", (unsigned)seq, x / 100.0, y / 100.0);
 }
 
 static void put32(uint8_t* p, uint32_t v) {
@@ -163,7 +168,8 @@ static void pollButton(uint32_t now) {
       longFired = false;
       resetFired = false;
     } else if (!longFired) {
-      makeTestShot(now);
+      if (positionTestShot()) makeTestShot(now);
+      else Serial.println("BOOT: test shots are off (`testshot on`)");
     }
   }
   if (stable == LOW && !longFired && now - pressedAt >= LONG_PRESS_MS) {
@@ -221,7 +227,7 @@ static void pollSerial() {
 }
 
 void setup() {
-  Serial.setTxBufferSize(2048);   // event lines go out without blocking loop()
+  Serial.setTxBufferSize(4096);   // event lines go out without blocking loop()
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);

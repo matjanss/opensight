@@ -126,6 +126,10 @@ jobs:
       - name: Test the measurement core (PC)
         run: pio test -d firmware -e native
 
+      - name: Build the replay tool (PC)
+        working-directory: firmware
+        run: g++ -std=gnu++17 -O2 -mfma -ffp-contract=fast -Wall -Wextra -Werror -I lib/measure -o tools/replay tools/replay.cpp lib/measure/solver.cpp lib/measure/record.cpp
+
       - name: Package
         run: |
           b=firmware/.pio/build/nodemcu-32s

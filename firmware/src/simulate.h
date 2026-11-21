@@ -3,11 +3,17 @@
 // the capture and the arrival times can be checked against the truth. See simulate.cpp.
 #pragma once
 #include "arrival.h"
+#include "position.h"
 
 bool simActive();
 
-// From captureService, for every event while the simulator runs (after it is printed).
-void simRecord(const EventResult& r, const Arrival& a);
+// From captureService, for every event while the simulator runs (after it is printed and
+// solved): checks the capture, t0 and the position against the shot it sent.
+void simRecord(const EventResult& r, const Arrival& a, const Position& p);
+
+// The simulator's mic on channel ch (0-based, CH1 = 0), for `mic sim`; false if ch isn't
+// one of its channels.
+bool simMic(int ch, float* x, float* y, float* h);
 
 // From captureService: fires the next shot when it is time.
 void simService(uint32_t nowMs);

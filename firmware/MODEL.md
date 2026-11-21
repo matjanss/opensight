@@ -11,6 +11,9 @@ and `tools/model.py` in one commit, with the vectors made again
 
 The decisions behind it are in `../PLAN.md` (D3 the model, D8 the air, D12 the solver).
 
+The log lines (below) are mirrored by `lib/measure/record.h` and `tools/replay.cpp`, not by
+`tools/model.py`; a change to them touches both, and the tests in `pio test -e native`.
+
 ## Units and coordinates
 
 - **Positions:** mm from the frame centre, in the paper plane. x points right, y up, as
@@ -135,6 +138,45 @@ the result, is the caller's (MEASUREMENT steps 3d and 4).
 3. Otherwise fit once with each mic left out, and take the best: a converged fit over one
    that didn't, then the lowest rms. Its `dropped` says which mic. Its rms may still be
    over the limit.
+
+## Log lines
+
+The target logs every event on serial so it can be solved again on the PC (`tools/replay`,
+later the app's calibration fit). `lib/measure/record.h` writes and reads both lines, and
+`measure::solveInput` turns them into the solver's input, on the target and in the replay
+alike. One line each, fields `key=value` separated by spaces; text before the line (a
+monitor's timestamp) is ignored, and so are unknown keys (later firmware may add some).
+
+**`cfg`**, the settings, printed at boot, after every change, by `mic` and at the start of
+a `sim` run:
+
+```
+cfg id=0262A982 CH1=-105,-105,10.5,0.333333343,0,50 ... CH7=- CH8=-
+```
+
+- `CHn=x,y,h,k,offset,sigma` (mm, mm, mm, -, ns, ns), or `-` for a channel without a mic.
+- Floats with 9 significant digits: they read back to the same bits.
+- `id`: the CRC-32 (IEEE, as zlib's) of the text after `id=XXXXXXXX `. A line whose id
+  doesn't match its text is rejected.
+
+**`rec`**, one event:
+
+```
+rec n=2161 t=876.1903407 cfg=0262A982 T=18.00 RH=50.0 p=1013.25 meas=--- c=342.739716 CH5=0,1500 CH6=100000,101500 CH8=-,-
+```
+
+| Key | Meaning |
+|---|---|
+| `n` | Event number (from 1 per boot) |
+| `t` | The event's first edge, s since the capture started |
+| `cfg` | The id of the `cfg` it was solved with |
+| `T`, `RH`, `p` | The air: °C, % RH, hPa |
+| `meas` | `T`, `R`, `P` where measured, `-` where assumed |
+| `c` | The speed of sound used, m/s, 9 digits (the solver's c, not computed again) |
+| `CHn=t1,t2` | Each channel fitted in the event: OUT_L's and OUT_H's first rise, ns from the event's first edge, `-` for none |
+
+The solver's input: t0 = arrivalT0(t1, t2, k, offset) per channel, in float, for every
+channel that has a mic and both edges; c from `c`.
 
 ## Test vectors
 

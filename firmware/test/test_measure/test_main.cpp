@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <random>
 #include <sstream>
@@ -13,8 +14,10 @@
 #include <vector>
 
 #include "air.h"
+#include "blast.h"
 #include "bme280_comp.h"
 #include "model.h"
+#include "record.h"
 #include "solver.h"
 
 using namespace measure;
@@ -251,6 +254,134 @@ static void test_vectors() {
   TEST_ASSERT_TRUE(worstSig < 1e-3f);
 }
 
+// ---- Log lines (record.h) and the blast check (blast.h) ----
+
+static void test_crc32() {
+  TEST_ASSERT_EQUAL_HEX32(0xCBF43926u, crc32("123456789"));   // the standard check value
+  TEST_ASSERT_EQUAL_HEX32(0u, crc32(""));
+}
+
+static Cfg sampleCfg() {
+  Cfg cfg = {};
+  for (int c = 0; c < 6; c++)
+    cfg.ch[c] = {true, D2[c][0], D2[c][1], 10.5f, 1.0f / 3, -12.345f + c, 50};
+  cfg.ch[2].h = 21.5f;
+  cfg.ch[4].k = 0.3333f;
+  cfg.ch[6].k = 0.25f;   // no mic, but its own k
+  return cfg;
+}
+
+static void test_cfg_round_trip() {
+  const Cfg cfg = sampleCfg();
+  char line[640];
+  formatCfg(line, sizeof line, cfg);
+  printf("%s\n", line);
+  Cfg back;
+  uint32_t id = 0;
+  TEST_ASSERT_TRUE(parseCfg(line, back, &id));
+  TEST_ASSERT_EQUAL_HEX32(cfgId(cfg), id);
+  for (int c = 0; c < MAX_MICS; c++) {
+    TEST_ASSERT_EQUAL(cfg.ch[c].mic, back.ch[c].mic);
+    if (!cfg.ch[c].mic) continue;
+    // Bit for bit: %.9g gives every float back exactly.
+    TEST_ASSERT_TRUE(cfg.ch[c].x == back.ch[c].x && cfg.ch[c].y == back.ch[c].y &&
+                     cfg.ch[c].h == back.ch[c].h && cfg.ch[c].k == back.ch[c].k &&
+                     cfg.ch[c].offsetNs == back.ch[c].offsetNs && cfg.ch[c].sigmaNs == back.ch[c].sigmaNs);
+  }
+  // With text before it (a monitor's timestamp), and a line end.
+  std::string withPrefix = std::string("12:00:01.123 > ") + line + "\r\n";
+  TEST_ASSERT_TRUE(parseCfg(withPrefix.c_str(), back, &id));
+  // A changed digit no longer matches its id.
+  std::string bad = line;
+  bad[bad.find("CH2=") + 5] ^= 1;
+  TEST_ASSERT_FALSE(parseCfg(bad.c_str(), back, &id));
+  // Any setting changes the id.
+  Cfg other = cfg;
+  other.ch[3].h = 10.6f;
+  TEST_ASSERT_NOT_EQUAL(cfgId(cfg), cfgId(other));
+}
+
+static void test_rec_round_trip() {
+  Rec r = {};
+  r.n = 2161;
+  r.timeS = 876.1903407;
+  r.cfgId = 0x1A2B3C4D;
+  r.tC = 18;
+  r.rh = 50;
+  r.hPa = 1013.25f;
+  strcpy(r.measured, "T--");
+  r.cMs = (float)soundSpeedMs(18, 50, 101325);
+  for (int c = 0; c < MAX_MICS; c++) r.t1[c] = r.t2[c] = NO_EDGE;
+  r.channels = 0xF3;   // CH1, CH2, CH5-CH8
+  const int32_t t1[8] = {0, 100000, 0, 0, 200000, 300000, 412300, NO_EDGE};
+  const int32_t t2[8] = {1500, 101500, 0, 0, 201000, NO_EDGE, 413900, NO_EDGE};
+  for (int c = 0; c < MAX_MICS; c++)
+    if (r.channels & (1 << c)) { r.t1[c] = t1[c]; r.t2[c] = t2[c]; }
+  char line[400];
+  formatRec(line, sizeof line, r);
+  printf("%s\n", line);
+  Rec b;
+  TEST_ASSERT_TRUE(parseRec((std::string("  ") + line + "\n").c_str(), b));
+  TEST_ASSERT_EQUAL_UINT32(r.n, b.n);
+  TEST_ASSERT_EQUAL_HEX32(r.cfgId, b.cfgId);
+  TEST_ASSERT_EQUAL_HEX8(r.channels, b.channels);
+  TEST_ASSERT_EQUAL_STRING("T--", b.measured);
+  TEST_ASSERT_TRUE(r.cMs == b.cMs);   // exact
+  TEST_ASSERT_DOUBLE_WITHIN(1e-7, r.timeS, b.timeS);
+  for (int c = 0; c < MAX_MICS; c++) {
+    TEST_ASSERT_EQUAL_INT32(r.t1[c], b.t1[c]);
+    TEST_ASSERT_EQUAL_INT32(r.t2[c], b.t2[c]);
+  }
+  // The solver's input: CH1, CH2, CH5 have a mic and both edges; CH6 has no H edge, CH7 no
+  // mic, CH8 no edges, CH3/CH4 were not fitted.
+  const Cfg cfg = sampleCfg();
+  SolveInput in;
+  TEST_ASSERT_EQUAL_HEX8(0x13, solveInput(cfg, b, in));
+  TEST_ASSERT_TRUE(in.t0[4] == arrivalT0(200000.0f, 201000.0f, 0.3333f, cfg.ch[4].offsetNs));
+  TEST_ASSERT_TRUE(in.c == mmPerNs(r.cMs));
+  // Not a rec line, or one with a field missing.
+  TEST_ASSERT_FALSE(parseRec("evt 2161 at 876.1903407 s", b));
+  TEST_ASSERT_FALSE(parseRec("rec n=1 t=2 cfg=00000000 T=18 RH=50 p=1013", b));
+}
+
+static SolveInput micsAt(const float (*xy)[2], int n, float h) {
+  SolveInput in = {};
+  in.n = n;
+  for (int i = 0; i < n; i++) {
+    in.mic[i] = {xy[i][0], xy[i][1], h};
+    in.sigmaNs[i] = 50;
+  }
+  in.c = mmPerNs((float)soundSpeedMs(18, 50, 101325));
+  return in;
+}
+
+static void test_blast_check() {
+  // The study (PLAN D1/D2, h 0, 9 starts): the square scores 484 of 624; one corner slid
+  // 40 mm none (smallest residual 9.1 us); D2 none, with every mic or any one dropped.
+  const float SQ[4][2] = {{-105, -105}, {105, -105}, {105, 105}, {-105, 105}};
+  BlastResult sq = blastCheck(micsAt(SQ, 4, 10.5f), 0x0F, 1500, 100);
+  BlastResult d1 = blastCheck(micsAt(D2, 4, 10.5f), 0x0F, 1500, 100);
+  printf("blasts scored: square %d (smallest %.0f ns), D1 corners %d (smallest %.0f ns)\n",
+         sq.scored, sq.smallestNs, d1.scored, d1.smallestNs);
+  TEST_ASSERT_TRUE(sq.scored > 300);
+  TEST_ASSERT_EQUAL_INT(0, d1.scored);
+  TEST_ASSERT_TRUE(d1.smallestNs > 3 * 1500);
+  const SolveInput d2 = micsAt(D2, 6, 10.5f);
+  BlastResult all = blastCheck(d2, 0x3F, 1500, 100);
+  printf("D2: every mic %d (smallest %.0f ns);", all.scored, all.smallestNs);
+  TEST_ASSERT_EQUAL_INT(0, all.scored);
+  for (int i = 0; i < 6; i++) {
+    BlastResult b = blastCheck(d2, 0x3F & ~(1 << i), 1500, 100);
+    printf(" without CH%d %d (%.0f ns)", i + 1, b.scored, b.smallestNs);
+    TEST_ASSERT_EQUAL_INT(0, b.scored);
+  }
+  printf("\n");
+  // The square plus a bottom middle: dropping the middle leaves the square (the study: 484).
+  const float SQ5[5][2] = {{-105, -105}, {105, -105}, {105, 105}, {-105, 105}, {0, -105}};
+  BlastResult sq5 = blastCheck(micsAt(SQ5, 5, 10.5f), 0x0F, 1500, 100);
+  TEST_ASSERT_EQUAL_INT(sq.scored, sq5.scored);
+}
+
 static void test_time_per_solve() {
   SolveInput in = layout(10.5f, 50, 343.99f);
   shoot(in, 37, -61, 0);
@@ -276,6 +407,10 @@ int main(int, char**) {
   RUN_TEST(test_noise_matches_uncertainty);
   RUN_TEST(test_too_few_mics);
   RUN_TEST(test_vectors);
+  RUN_TEST(test_crc32);
+  RUN_TEST(test_cfg_round_trip);
+  RUN_TEST(test_rec_round_trip);
+  RUN_TEST(test_blast_check);
   RUN_TEST(test_time_per_solve);
   return UNITY_END();
 }

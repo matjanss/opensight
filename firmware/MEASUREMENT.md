@@ -84,7 +84,7 @@ so a problem shows up in the step that caused it.
 |---|---|---|
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
-| 3 | Solver and calibration | in progress on `step3-solver`: 3a-1 and 3a-2 pass; 3a-5 (the search stops) to run; 3a-3/3a-4 (DS18B20, BME280) later, with the parts; 3b passes (PC); 3c-3e planned (a first try is archived as the tag `archive/step3-first-try`) |
+| 3 | Solver and calibration | in progress on `step3-solver`: 3a-1 and 3a-2 pass; 3a-5 (the search stops) to run; 3a-3/3a-4 (DS18B20, BME280) later, with the parts; 3b passes (PC); 3c passes; 3d-3e planned (a first try is archived as the tag `archive/step3-first-try`) |
 | 4 | Validity checks | planned |
 | 5 | Protocol and app | planned |
 | 6 | Wi-Fi and MQTT | planned |
@@ -390,50 +390,92 @@ Tests (PC; I run them, you can too with `pio test -d firmware -e native`):
 
 #### 3c. The solver on the board
 
-Build:
-- **Mic geometry** (`mic`), stored in NVS (namespace `"cal"`, with k and the offsets, which
-  move there from `"measure"`; old values are carried over once):
-  - `mic` lists x, y, h per channel, and warns when the fitted mics, or any set left after
-    dropping one, lie within 25 mm of one circle;
+Build (done, on `step3-solver`):
+- **The calibration** (`calib.cpp`), in NVS namespace `"cal"`, one record per channel: its
+  mic (x, y, h), k, offset and sigma (50 ns until 3e). k and the offsets were in
+  `"measure"`; on the first boot with 3c they are carried over (to every channel's k) and
+  removed there. With nothing stored, the mics are `mic default`.
+  - `mic` lists them and runs the **blast check** (below);
   - `mic <ch> <x> <y> [h]`, `mic h <mm>` (every mic), `mic h <ch> <mm>`;
-  - `mic default`: the D1/D2 layout on CH1-CH6, h 10.5 mm;
-  - `mic sim`: the simulator's own layout on its channels (to test it);
-  - `mic clear <ch>`: no mic on that channel.
-- **k per channel:** `k <ch> <value>`, `k <value>` (every channel). The global k becomes
-  every channel's.
-- **Every event** with t0 on 4 or more channels that have a mic is solved (in `loop()`).
-  Under the event line:
-  - `shot x y`, the rms residual, the uncertainty (major axis), iterations, the channels
-    used, and each channel's residual;
-  - an `evt` line: everything needed to replay it, machine-readable (event number,
-    millis, t1 and t2 per channel, T, RH, p, and the settings' ID).
-- **Solved shots go to the app** (the v2 shot message) when the fit converged and its
-  rms residual is under `reslimit` (default 1500 ns, stored). The rest are logged only.
-  Validity proper is step 4. `testshot on|off` (stored, default on) keeps the BOOT test
-  shot.
-- **Replay on the PC:** `tools/replay.cpp`, built with g++ against `lib/measure/`, reads a
-  serial log, solves every `evt` line with the settings given, and prints the shots.
-- `stat` shows the time per solve (mean and longest, µs).
-- The simulator gets h per mic (default 10.5 mm), still 4 channels on CH5-CH8.
+  - `mic default`: the D1/D2 layout on CH1-CH6, h 10.5 mm, no mic on CH7/CH8;
+  - `mic sim`: the simulator's mics on CH5-CH8 and none elsewhere (to test it);
+  - `mic clear <ch>`: no mic on that channel;
+  - `k` lists k; `k <value>` sets every channel's, `k <ch> <value>` one; `offset` as before.
+- **The blast check** (`lib/measure/blast.h`): the layout study's 624 blasts (point sources
+  10 and 25 m in front, 0-3 m off the axis) through the board's own solver, with every mic
+  and with each one dropped. A blast "scores" if its fit converges inside ±100 mm within
+  `reslimit`. Any score is a warning: the mics, or the ones left after dropping one, are
+  close to one circle. This replaces the planned "within 25 mm of one circle" test: it
+  measures what matters directly. On the PC (`pio test -e native`) it gives the study's
+  numbers: the square 484 of 624, the D1 corners 0 (smallest residual 9.0 µs; the study
+  9.1), D2 0 with every mic and with any one dropped (smallest 13.5 µs, without CH2).
+- **Every event** (except the self-test's) is solved in `loop()` (`position.cpp`) if 4 or
+  more channels have a mic and both edges. Under the event's lines:
+  - `shot <evt>: x .. y .. mm`, the rms residual, the 1σ along the error ellipse's long
+    axis, the iterations, each channel's residual, and whether it was sent;
+  - a `cfg` line whenever the settings change (and at boot, `mic`, the start of a `sim`
+    run), and a `rec` line for every event: its edges, the air, c and the cfg's id.
+    The format is in MODEL.md "Log lines" (`lib/measure/record.h`).
+- **Solved shots go to the app** (the v2 shot message) when the fit converged with an rms
+  residual within `reslimit` (default 1500 ns, stored in `"measure"`). The rest are logged
+  only. Validity proper is step 4. `testshot on|off` (stored, default on) keeps BOOT's
+  random test shot.
+- **Replay on the PC:** `tools/replay.cpp` reads a log's `cfg` and `rec` lines and solves
+  every event again through the same code (`measure::solveInput`, `measure::solve`). With
+  the board's `shot` lines in the log it compares them. Options change the settings for
+  the replay: `--h`, `--temp`, `--c`, `--without <ch>` (5 mics instead of 6), `--reslimit`.
+  Build it from `firmware/`:
+  `g++ -std=gnu++17 -O2 -mfma -ffp-contract=fast -I lib/measure -o tools/replay tools/replay.cpp lib/measure/solver.cpp lib/measure/record.cpp`
+  (`-mfma` on x86-64 PCs; leave it out on ARM). The ESP32 fuses `a·b + c` into one
+  instruction, which rounds differently; with FMA on the PC too, a replay matches the
+  board to the printed 0.001 mm (498 of 500 shots; 2 one step off), against 0.007 mm worst
+  without it (on shots with a late channel).
+- `stat` shows the solver: events solved, converged and sent, the time per solve (mean
+  and longest, µs), `reslimit`, test shots, the settings' id.
+- **The simulator** has a height per mic (`sim mic <ch> <x> <y> [h]`, default 10.5 mm), still
+  4 channels on CH5-CH8, and checks the position against the point it sent. The check is
+  part of PASS (every shot solved and converged, the worst error within 0.1 mm) only when
+  the firmware solves the simulator's world: the same mics, heights and offsets, its own
+  air (no `sim temp`), the linear model with k = 1/3, no fault. Otherwise it is shown for
+  information, with the reason. Shots are 150 ms apart now (an event prints about 1000
+  characters).
+- Serial: the TX buffer is 4096 bytes; an event is printed only with 1700 free.
+
+Expected values come from a simulation of the simulator on the PC (the square, h 10.5 mm,
+the 25 ns steps and the 100 ns sampling, 2000 random shots).
 
 Bench test, bare NodeMCU, `mask 0`, nothing on CH5-CH8 or GPIO 12:
-- **3c-1, the square.** `mic sim` (it warns: the 4 sim mics are on one circle; expected),
-  `sim random 200`: every shot solved, converged in ≤ 6 iterations, position error
-  against the truth rms about 0.02 mm, worst under 0.1 mm (the position check: PASS),
-  rms residual under 100 ns. The shots appear in the app. `stat`: the solve takes well
-  under 1 ms (I expect 20-100 µs).
-- **3c-2, the height.** `mic h 0`, `sim random 100`: the error grows to about 0.5 mm mean,
-  several mm in the corners (the study's "mic height not modelled"). `mic h 10.5`: back
-  to 3c-1.
-- **3c-3, the air.** `sim temp` 1 °C above the firmware's air (`temp`; 19 without a
-  sensor): errors about 0.15 mm rms, growing with the distance from the centre.
-  `sim temp air`.
-- **3c-4, a late channel.** `sim fault late 7`, `sim at 30 30 20`: rms residual over
-  4 µs, no shot sent to the app (logged). `sim fault none`.
-- **3c-5, replay.** Log 3c-1 with `--filter log2file`; `tools/replay` on the log gives the
-  same positions as the board, to 0.001 mm.
+- **3c-0, the first boot.** It prints "cal: no calibration stored yet: the default mics
+  (D1/D2 on CH1-CH6), k and the offsets carried over from step 2" and a `cfg` line. `k`:
+  every channel 0.3333 (the stored value from step 2). Then `k 0.33333` (the linear
+  model's 1/3, or the simulator says its position check is for information only), and
+  `mic`: D1/D2, the blast check with 0 scored on every line ("no blast scores, with every
+  mic or with any one dropped"), the smallest residuals about 34, 35, 13, 37, 37, 22 and
+  35 µs, in under a second (the time is printed). `stat`: the solver line.
+- **3c-1, the square.** `mic sim`: CH5-CH8 at the corners, and the blast check warns
+  (about 484 of 624 scored: the 4 sim mics are on one circle; expected). `sim random 200`:
+  "position check on" at the start; every shot solved, the position error rms about
+  0.015 mm, worst about 0.04 mm (under 0.1 mm), mean within ±0.003 mm; the rms residual
+  mean about 16 ns, worst under 100 ns; "position check PASS" and PASS. The shots appear
+  in the app. `stat`: the solve takes well under 1 ms (measured: 278 µs mean, 453 µs
+  longest).
+- **3c-2, the height.** `mic h 0`, `sim random 100`: the check is for information ("mic
+  heights are not the simulator's"); the error about 0.33 mm mean, 0.43 rms, up to
+  about 2 mm near the corners (the study's "mic height not modelled"). `mic h 10.5`, and
+  it is 3c-1 again.
+- **3c-3, the air.** `sim temp` 1 °C above the firmware's air (`temp`; `sim temp 19`
+  without a sensor), `sim random 100`: the error about 0.16 mm rms, up to about 0.27 mm,
+  growing with the distance from the centre. `sim temp air`.
+- **3c-4, a late channel.** `sim fault late 7`, `sim at 30 30 20`: the rms residual over
+  4 µs, "not sent: rms over the 1500 ns limit", no shot in the app. `sim fault none`.
+- **3c-5, replay.** Log 3c-1 with `pio device monitor -d firmware --echo --filter log2file`
+  (a `platformio-device-monitor-<date>.log` in the folder it was run from). `tools/replay <log>`: 200 events, the same
+  positions as the board ("worst 0.0000 mm" against the board's shot lines; the board
+  prints 0.001 mm steps). `sim fault none` first, or 3c-4's late channel is still on. Then `tools/replay --h 0 <log>`: about 0.4 mm rms off, as 3c-2.
 - **3c-6, the test shot.** BOOT short press with `testshot on`: a test shot in the app as
-  before; with `testshot off`: none.
+  before; `testshot off`: "BOOT: test shots are off", none in the app. `testshot on`.
+
+Afterwards `mic default` (the D1/D2 layout for the real sensors).
 
 #### 3d. The simulator on six channels, and drop-one
 
@@ -551,6 +593,9 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-21 | 3c | 3c-1 and 3c-5 again, `sim fault none`, logged | **PASS.** `sim random 200`: 200 of 200 solved and converged, position error rms 0.0140 mm, worst 0.0315 mm, mean (−0.0006, −0.0004) mm; rms residual mean 17 ns, worst 54 ns (the PC simulation: 0.015, 0.039, 16 and 57). `tools/replay` on the log: 200 within 1500 ns, the board's positions to the printed digit (worst 0.0000 mm). 3c done. |
+| 2026-11-21 | 3c | 3c-0 to 3c-6, bare NodeMCU, `k 0.33333` | **PASS (user report).** From the logs: `mic sim`'s blast check warns as expected (484 of 624 scored, smallest residual 0, 106 ms). The solve takes 278 µs mean, 453 µs longest (`stat`, 1032 events): slower than the 20-100 µs guessed (float division and square root are slow on the ESP32), still well under 1 ms; drop-one (3d) will take about 7 times that. The replayed logs were made with 3c-4's `sim fault late 7` still on (200 + 200 + 100 shots, rms residual about 5.8 µs, position error 4.4 mm rms, none sent): the replay agreed (none within 1500 ns). It differed from the board by up to 0.0073 mm, from the ESP32's fused multiply-add; built with `-mfma -ffp-contract=fast` it matches to the printed digit in 498 of 500 shots, the other 2 one 0.001 mm step off (a last-bit difference, perhaps in the square root, or a rounding boundary). The replay's build command now has those flags. |
+| 2026-11-21 | 3c | Built; PC checks | The calibration in NVS "cal" (mics with h, k and offset per channel), the solver on every event, `shot`/`cfg`/`rec` lines, shots to the app within `reslimit`, `testshot`, `stat`'s solver line, the blast check on `mic`, the simulator's h and position check, `tools/replay`. On the PC: 13 tests pass (new: CRC-32, `cfg` and `rec` lines read back bit for bit, the blast check giving the study's numbers). A log written in the firmware's format replays to the same positions; `--h 0` gives 0.38 mm rms and `--temp 19` 0.16 mm, as the simulation predicts for 3c-2 and 3c-3. The firmware builds (RAM 13 %, flash 56 %). Run 3c-0 to 3c-6. |
 | 2026-11-21 | 3a | Built: the search stops | At the user's request, the air task no longer looks for a sensor once a minute for ever: 3 tries (boot, 1 and 2 min), then it stops until `temp scan`. Run 3a-5. |
 | 2026-11-21 | 3a | 3a-1 recheck: `sim at 0 0 1`, `temp`, no sensor | **PASS (user report).** The run's first line now gives the firmware's air (18.0 °C, 342.74 m/s), the same as the event lines; `temp` says no sensor on J5 and the assumed values. 3a-1 done. |
 | 2026-11-21 | 3a | 3a-2, the sync pin on GPIO 12: bare NodeMCU, `mask 0`, `span 300`, `deadtime 30` | **PASS (user report).** All four self-tests and both `sim raw` runs pass, 0 late starts. `selftest 1050 200`: 200 of 200 pairs, 95 × 1000 ns and 105 × 1100 ns (52 % at 1100), mean 1052.5 ns (rounding alone ±3.5 ns); L by quarter of its DMA block 43/41/52/64; L and H in different blocks 4 times (about 1.1 expected; split pairs were measured right). `sim raw 0 100000 200000 300000 100 1500`: every line at its set time (+0 ns vs set), t0 differences exactly +100000/+200000/+300000 ns, CH8 (unit 1) not a sample off. A mistyped `sim raw 100000 200000 300000 0` was +0 on every line too. The sync loopback works on GPIO 12. The printed t0 of −499.9 ns for a 1500 ns gap shows a stored k of 0.3333, not the default 1/3 (harmless; k moves to the calibration in 3c). |
