@@ -3,9 +3,10 @@
 The decisions that shape the target, viewer and server from here on, why, and what test
 settles each; then the order of work. Written 2026-11-21, after a first try of step 3
 (solver, calibration mode, fit script) and before the sensor boards arrive. That first try
-was set aside and kept as the tag `archive/step3-first-try`. **This plan is to be revisited
-with the user before step 3 starts again on a new branch;** step 3 in MEASUREMENT.md is
-then rewritten from it.
+was set aside and kept as the tag `archive/step3-first-try`. The plan was then revisited
+with the user the same day: six mics (D2), the mic height per mic as a setting (D3), a
+BME280 for temperature and humidity (D8), and the solver (D12). Step 3 in MEASUREMENT.md is
+rewritten from it, on the branch `step3-solver`.
 
 It builds on three sources:
 
@@ -92,11 +93,11 @@ fit a point in the 200 × 200 mm scoring area.
 - **Test:** a blast fault in the simulator (phase 0), then real blasts on the range (phase
   2).
 
-### D2 Five mics: four corners (one slid) plus the bottom middle
+### D2 Six mics: four corners (one slid), the bottom middle and the right middle
 
 The summary asks whether a fifth mid-edge mic, for leave-one-out, is worth a spare
 channel. It is, and with one condition: the four corners must already be off one circle
-(D1).
+(D1). A sixth was then checked too, and is worth it.
 
 | Mics *(study)* | A bad channel (a half-cycle-late trip, noise just before the wavefront) | Blasts scored, with a channel dropped | Speed of sound fitted, GDOP in the ring area |
 |---|---|---|---|
@@ -104,22 +105,51 @@ channel. It is, and with one condition: the four corners must already be off one
 | 5: square + bottom middle | Found and dropped every time | **484 of 624**: dropping the 5th mic leaves the square | 1.9 |
 | **5: one corner slid + bottom middle** | Found and dropped in 553 of 555 | **0 of 624** | 1.7 mean, 4.9 worst |
 | 6: one corner slid + left and right middles | Found and dropped every time | 0 of 624 | 1.45 |
+| **6: one corner slid + bottom and right middles** | **Found and dropped in 666 of 666** | **0 of 624** | – |
 
-- **Decision:** five mics. The sensor board order is for 5 boards, so this needs nothing
-  more.
-- **Prototype order:** start with the 4 corners (one slid), the 5th as soon as it is built.
-- **Six** only adds a little. Keep the 6th connector as a spare.
-- **The speed of sound** can be fitted per shot with 5 mics, as a cross-check on the
-  thermometer (D8). That would also be the way to supersonic ammunition later, but it is
-  out of scope.
+- **Decision (2026-11-21):** six mics. CH1 bottom left (−105, −105), CH2 bottom right
+  (105, −105), CH3 top right slid (65, 105), CH4 top left (−105, 105), CH5 bottom middle
+  (0, −105), CH6 right middle (105, 0). This is `mic default` (D12).
+- **What the sixth adds** (1σ position error per unit of timing error per channel, ring
+  area and whole area, from a covariance calculation with h = 10.5 mm):
+
+  | Mics | Within 50 mm | Whole area, mean | 95 % of the area | Worst |
+  |---|---|---|---|---|
+  | 5 (slid corner + bottom middle) | 0.76 | 0.86 | 1.21 | 3.07 |
+  | 6 (+ right middle) | 0.63 | 0.75 | 0.95 | 2.71 |
+  | 6 with the left middle instead | 0.65 | 0.77 | 1.08 | 2.70 |
+  | 6 with a second top mic (−20, 105) | 0.76 | 0.82 | 1.19 | 3.07 |
+
+  About 17 % less in the centre, but only for the errors that are independent per
+  channel and per shot (edge jitter, echoes). A delay shared by every channel drops out
+  (the emission time absorbs it), a channel's constant delay is calibrated, and a
+  speed-of-sound error scales every distance alike, so more mics don't help there. The
+  bigger gain is drop-one: with one channel dropped, 5 mics are left (2 degrees of
+  freedom) instead of 4 (1), so the residual still checks the rest.
+- **Test:** record shots with all six on the bench, replay them on the PC with 5 and with
+  6 mics (phase 1.3).
+- **Holders:** the user designs and prints them (PETG): the slid top-right corner, the
+  bottom middle and the right middle (Q2).
+- **Sensor boards:** JLC makes 5 per order, so 6 mics take two orders (spares included).
+- **The speed of sound** is not fitted per shot on the target (D8): it comes from the
+  BME280. Fitting it from the shots stays a diagnostic on the PC, from replayed events.
+  Supersonic ammunition would need it per shot, but is out of scope.
 - **Rule for any layout:** no set of mics left after dropping one may be on one circle.
+  `layout_study.py` checks it (`--drop`).
 
 ### D3 The propagation model, written down once
 
 - **Subsonic projectiles and air guns:** the crack starts at the hole, in the paper plane.
   Each mic sits at a height h behind that plane (10.5 mm, or 21.5 mm with the board
-  flipped), so the distance is √(ρ² + h²). The speed of sound comes from the DS18B20. The
-  first try leaves h out; that is the first fix.
+  flipped), so the distance is √(ρ² + h²). The first try leaves h out; that is the first
+  fix.
+- **h is a setting per mic, not fitted** (2026-11-21). The board is made to be flipped,
+  to find which height works best, so h can differ per mic. It is set with a calliper
+  value: by serial `mic` in step 3, from the app once protocol v3 carries the calibration
+  record. Changing h (or a mic position) marks the calibration as stale, because the
+  offsets and k were fitted with the old geometry.
+- **The speed of sound** comes from the air temperature, humidity and pressure (Cramer
+  1993), measured by the BME280 (D8).
 - **k per channel**, as the summary says: the mic's port resonance curves the edge, so k
   comes out nearer 1 than the straight-line 1/3, and differs per board. The first try has
   one global k; the firmware's `k` and the fit become per channel.
@@ -140,6 +170,9 @@ channel. It is, and with one condition: the four corners must already be off one
 | Calibration | measures (`cal` mode), stores and applies the record | – | keeps a copy of every target's record | **runs the fit and the workflow** |
 | Settings | applies them (signed later) | none | holds them | edits them |
 
+- **Confirmed 2026-11-21:** the target solves, not a thin target sending raw times.
+  Step 3 keeps BLE to the current app; the raw data goes along as a first step towards
+  the server.
 - **Why the target solves:** it keeps working with BLE only and without a server
   (principle 1), it is the source of truth for shots (principle 2), and it adds no
   latency. The ESP32 has plenty of time: the solve takes microseconds per event.
@@ -167,7 +200,7 @@ plan adds:
   and checked against the same recorded logs.
 - **The calibration record:**
   - ID (a hash of the record), date, target ID, frame type;
-  - per mic: x, y, h, offset, k;
+  - per mic: x, y, h (set, D3), offset, k;
   - the threshold and gain settings logged at the initial calibration (the summary's
     per-board values);
   - the fit's residual, and how many points and sparks went into it.
@@ -222,14 +255,31 @@ One message set for BLE and MQTT, under the protocol rule:
 The encoding stays binary little-endian, as now (BLE's MTU is small); the server shows it
 as JSON. `PROTOCOL_VERSION` goes up.
 
-### D8 Temperature
+**Not in step 3** (2026-11-21): step 3 sends solved shots in the v2 shot message only, so
+the app needs no change. Everything else goes to serial, in lines the PC can replay (D12).
+Protocol v3 (these messages, plus h per mic from the app) is its own branch, designed for
+BLE and MQTT alike.
+
+### D8 Air: temperature, humidity, pressure
 
 - The summary's budget is 0.17 % of c per °C, about 0.2 mm at the edge. The study gives
-  0.15 mm rms per °C in the ring area. So the DS18B20 has to read the air between the
+  0.15 mm rms per °C in the ring area. So the sensor has to read the air between the
   mics to about 0.3 °C. The summary already has it on a cable at the frame, which is
   right; keep it off the host board, which the IR LEDs and the regulator warm.
-- With 5 mics, the speed of sound fitted per shot and averaged over the last shots checks
-  the thermometer. It may even replace it (test in phase 0, then 1.4).
+- **Humidity counts too:** 0.011 m/s per % RH at 18 °C (0.017 at 25 °C), against
+  0.62 m/s per °C. 30 → 60 % RH is about 0.08 mm rms in the ring area. Pressure barely
+  matters (0.04 m/s from 1013 to 950 hPa).
+- **Decision (2026-11-21): a BME280** (temperature, humidity, pressure; I2C) on the host
+  board's J5, which becomes a 4-pin connector: SDA on GPIO 14, SCL on GPIO 15 (host board
+  README). A DS18B20 still works on the same connector (GPIO 14). The firmware finds
+  which one is there; with a DS18B20 or a BMP280 (no humidity), RH is assumed 50 %, and
+  with no sensor, 18 °C too.
+- The pulse generator's sync loopback moves from GPIO 15 to GPIO 12 (unconnected; a
+  strapping pin, driven only after boot).
+- **Every event logs T, RH and p** (a few bytes), so a better model can re-solve it.
+- **The speed of sound per shot is not fitted on the target.** With 6 mics it could be,
+  but it costs precision (one more unknown). Fitting it over many replayed events on the
+  PC checks the sensor instead (phase 1.4).
 
 ### D9 The IR curtain: the gate, and the shots through an existing hole
 
@@ -265,14 +315,47 @@ and position error.
 
 All of this is needed before the range tests (phase 2).
 
+### D12 The solver (2026-11-21)
+
+- **Unknowns:** x, y and the emission time τ. Channel i's residual is
+  rᵢ = t0ᵢ − τ − dᵢ / c, with dᵢ = √((x − xᵢ)² + (y − yᵢ)² + hᵢ²). This is the TDOA fit,
+  but each channel's error stays its own, which makes weights, per-channel residuals and
+  drop-one simple. c is known (D8).
+- **Method:** Gauss–Newton with Levenberg–Marquardt damping, in single-precision float
+  (the ESP32's FPU; double is software), coordinates in mm from the frame centre, times
+  relative to the first arrival.
+- **Start:** halfway between the first-hit mic and the centre; if that does not converge,
+  again from the centre. Inside the frame the problem is nearly convex (GDOP about 1 in
+  the ring area).
+- **Convergence:** a step under 0.001 mm, at most 15 iterations. Not converged: no shot,
+  logged.
+- **Outside the area:** no clamping. The solver reports where it lands; validity decides
+  (step 4).
+- **Weights:** equal in step 3, but the code takes a σ per channel. The calibration record
+  supplies them later (1/σ², from each channel's fit residuals).
+- **Outputs:** x, y, τ; the rms residual and each channel's residual; iterations,
+  converged, the channels used and dropped; and an **uncertainty per shot**:
+  σ²(JᵀJ)⁻¹ with σ the calibrated timing σ (not the shot's own residual: with 2–3 degrees
+  of freedom that is too noisy), as a 1σ ellipse (σx, σy, ρ) and its major axis in mm.
+- **A bad channel:** the solver has the mechanism: solve with a channel mask, and a
+  drop-one search over every subset that leaves out one channel. The policy (when to
+  search, what to accept, the residual limit) belongs to validity (step 4); step 3 tests
+  the mechanism with the simulator's faults.
+- **Where it runs:** a portable measurement core (`firmware/lib/measure/`, no Arduino or
+  IDF; D6), unit-tested on the PC with PlatformIO's `native` env. `firmware/MODEL.md` is
+  its spec, with test vectors made by a Python reference (`firmware/tools/model.py`), in
+  plain text, one case per line, so C++, Python and later Rust read the same files.
+- **Replay:** the firmware prints every event as an `evt` line; a PC program feeds such
+  logs through the same core.
+
 ## Open questions for you
 
 - **Q1 Which card first?** The 10 m air pistol card (10-ring 11.5 mm) or the air rifle
   card (10-ring 0.5 mm, a much harder target for 0.2–0.5 mm)? On the 25 m range, which
   disciplines are shot on this lane?
-- **Q2 The mic holders:** can the top-right holder sit 40 mm along the top edge, and is
-  there room for a bottom-middle holder? Could the mics move out to ±115 mm (D1's corner
-  remark)?
+- **Q2 The mic holders:** answered 2026-11-21: yes, the user designs and prints them
+  (PETG) for the slid corner and both middle mics (D2). Still open: could the mics move
+  out to ±115 mm (D1's corner remark)?
 - **Q3 The summary doc:** should D1 and D2 go into it as the answer to its open question
   on breaking the corner symmetry, and the mic-height correction into its error budget? I
   have only read it; nothing in it is changed.
@@ -284,26 +367,32 @@ starts, as they did so far.
 
 ### Phase 0: before the boards (PC and a bare NodeMCU)
 
-1. `firmware/MODEL.md`: the subsonic model with h and k per channel. The solver
-   (`tdoa.h` from the archive, plus h), `arrival.cpp` and the Python fit follow, plus
-   shared test vectors.
-2. Split out the measurement core (D6): a `native` test env with the test vectors, and
-   replay of recorded events.
-3. Simulator:
-   - five channels (CH4–CH8: those pins can drive; the pulse generator has 6 operators);
+This is MEASUREMENT step 3, sub-steps 3a–3e, on the branch `step3-solver`.
+
+1. The BME280 or DS18B20 on J5, humidity in the speed of sound, the sync loopback on
+   GPIO 12 (3a).
+2. `firmware/MODEL.md`: the subsonic model with h and k per channel. The measurement core
+   split out (D6, D12), the Python reference and shared test vectors, the `native` tests
+   (3b).
+3. The solver on the board: `mic` with the D1/D2 layout and h per mic, k per channel,
+   `evt` lines, solved shots to the app, replay on the PC (3c).
+4. Simulator (3d):
+   - six channels (CH3–CH8: those pins can drive, and the pulse generator has exactly 6
+     operators);
    - h and k per channel in its model;
    - `sim fault blast <distance> <offset>`: a far point source on every channel;
    - noise just before the wavefront on one channel;
-   - the D1/D2 layout as its default.
-4. `mic default` gets the D1/D2 layout, and `mic` warns about concyclic layouts. Step 4's
-   first checks move forward so D1/D2 can be tested: the residual limit, and the drop-one
-   search with 5 mics.
-5. Tests, all simulated:
-   - blasts: 0 scored with the D1 layout, many with the square (the study again, on the
-     hardware path);
-   - a late or early channel found and dropped with 5 mics, the shot kept;
-   - calibration recovers mics, offsets, k per channel and h from simulated sparks;
-   - with 5 mics, a fitted speed of sound recovers a simulated temperature error.
+   - the D1/D2 layout as its default;
+   - the drop-one search and a residual limit, moved forward from step 4.
+5. Calibration mode and the Python fit (3e).
+6. Tests, all simulated:
+   - blasts: 0 scored with the D1/D2 layout, many with the square (the study again, on
+     the hardware path);
+   - a late or early channel found and dropped with 6 mics, the shot kept;
+   - calibration recovers mic positions, offsets and k per channel from simulated sparks
+     (h is set);
+   - on the PC, a speed of sound fitted over replayed events recovers a simulated
+     temperature error.
 
 ### Phase 1: the boards arrive (bench)
 
@@ -316,7 +405,8 @@ starts, as they did so far.
    noise floor of the real system, the one error calibration can't remove, and the number
    that decides whether 0.2–0.5 mm is reachable.
 3. **Calibration:** the frame with the D1/D2 layout and the template on the card holder,
-   then verification at other known points: within 0.2–0.5 mm?
+   then verification at other known points: within 0.2–0.5 mm? The same shots replayed
+   with 5 and with 6 mics show what the sixth adds (D2).
 4. **Temperature:** the room several °C warmer or colder, verification again.
 5. **Board swap:** replace one sensor board and see what the calibration loses (just that
    channel's offset and k?).
@@ -353,11 +443,10 @@ copies, re-solving from raw data.
 
 ## How this changes the existing plans
 
-- **MEASUREMENT step 3** is rewritten from this plan before its branch starts: the
-  solver with h and k per channel, `mic` with the D1/D2 layout, calibration mode, 5
-  simulated channels, the blast test. The archived first try supplies the solver
-  (`tdoa.h`), the simulator's position check and the Python fit.
-- **MEASUREMENT step 4:** the residual limit and the drop-one search move forward to phase
-  0. The loudness and edge-sharpness checks wait for real pulses.
+- **MEASUREMENT step 3** is rewritten from this plan (done 2026-11-21): 3a–3e above. The
+  archived first try supplies parts of the solver (`tdoa.h`), the simulator's position
+  check and the Python fit.
+- **MEASUREMENT step 4:** the residual limit and the drop-one search move forward to step
+  3d. The loudness and edge-sharpness checks wait for real pulses.
 - **The summary doc:** D1 and D2 answer its open question on breaking the corner
   symmetry, and the mic height corrects its error budget (Q3).

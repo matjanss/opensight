@@ -8,13 +8,15 @@ commit as the code, and every bench test result goes into [Bench results](#bench
 
 ## Scope
 
-- 4 corner mics to start, up to 8 channels (the host board has 8 connectors). Each
+- 6 mics (PLAN D1/D2: four corners with the top right slid 40 mm, the bottom middle and
+  the right middle), up to 8 channels (the host board has 8 connectors). Each
   channel gives two comparator lines: OUT_L (low threshold, trips first) and OUT_H (high
   threshold, a few µs later). Lines idle low and go high while SIG is above the threshold.
 - **No IR light curtain** for now; it comes later. IR_IN (GPIO 13) is unused and IR_EN
   (GPIO 27) is held low.
-- Results go out over **serial** (115200) until step 5. The BOOT test shot stays the shot
-  source until step 3 has a solver. No protocol change before step 5.
+- Results go out over **serial** (115200) until step 5. From step 3c, solved shots go to
+  the app in the v2 shot message; everything else (raw events, residuals, uncertainty)
+  stays on serial. No protocol change before step 5.
 - Accuracy target after calibration: 0.2–0.5 mm (1σ). Every 1 µs of timing error is about
   0.37 mm, so the firmware must add well under 0.1 µs.
 
@@ -39,8 +41,10 @@ bench-tested on the v0.2 map; v0.3 moves every line, see Bench results.)
 | CH7 | 17 | 18 |
 | CH8 | 4 | 16 |
 
-Other: IR_IN 13, IR_EN 27, DQ 14 (DS18B20, 4.7 k pull-up), STAT 2 (blue LED + panel LED),
-BOOT 0. Spare: 5 (the capture clock loopback), 12, 15 (the pulse generator's sync loopback). Empty connectors are held low by 100 k pull-downs. A breadboard
+Other: IR_IN 13, IR_EN 27, STAT 2 (blue LED + panel LED), BOOT 0. J5, the air sensor:
+GPIO 14 (BME280 SDA, or DS18B20 DQ; 4.7 k pull-up) and 15 (BME280 SCL, 4.7 k pull-up;
+the host board change before ordering). Spare: 5 (the capture clock loopback) and 12 (the
+pulse generator's sync loopback from step 3a; was 15). Empty connectors are held low by 100 k pull-downs. A breadboard
 setup uses the same map, so nothing changes when the host board arrives.
 
 ## Pipeline
@@ -51,11 +55,11 @@ setup uses the same map, so nothing changes when the host board arrives.
 | Activity scan | DMA end-of-block interrupt (IRAM) | ORs each finished block; on activity, marks the event window and freezes the ring around it | Event window |
 | Edge extraction | Measurement task, core 1 | First rising edge per line in the window, plus pulse length | t1 (L), t2 (H) per channel |
 | Arrival times | Measurement task | t0 = t1 − k·(t2 − t1) − offset per channel | t0 per channel |
-| Position solver | Measurement task | Time-difference fit over 4–8 mics, speed of sound from the DS18B20 | x, y in mm, residual |
+| Position solver | `loop()` (microseconds per event) | Fit of x, y and the emission time over 4–8 mics (PLAN D12), speed of sound from T, RH, p | x, y in mm, residuals, uncertainty |
 | Validity checks | Measurement task | Residual, loudness pattern, edge sharpness, dead time | Shot or reject reason |
 | Shot buffer | `loop()` (existing) | Indicates shots to the app, resends after a link drop | Protocol v2 shot |
 
-Tasks: NimBLE runs on core 0, and so does the DS18B20 housekeeping task (once a minute).
+Tasks: NimBLE runs on core 0, and so does the air sensor task (once a minute).
 Arduino's `loop()` runs on core 1; it stays the light
 10 ms loop (button, LED, BLE requests, shot buffer). The measurement task runs on core 1 at
 a higher priority and hands finished shots to `loop()` through a queue. The DMA interrupt
@@ -64,13 +68,15 @@ and the code it calls live in IRAM, because NVS writes (name, PIN) stall the fla
 Code: `capture.cpp/.h` (I2S, ring, activity scan, edge extraction, output, commands, the
 self-test), `event.h` (the event result), `pulsegen.cpp/.h` (MCPWM pulse pairs for the
 self-test and the simulator), `arrival.cpp/.h` (t0), `simulate.cpp/.h` (the sensor
-simulator), `airtemp.cpp/.h` (DS18B20), later `solver.cpp/.h`. Pins and timings go in `config.h`; a channel mask says which connectors
+simulator), `airtemp.cpp/.h` (the air sensor); from step 3, the portable measurement core
+in `lib/measure/` (no Arduino; tested on the PC) and `solver.cpp/.h` (its glue: settings,
+commands, output). The model is specified in `MODEL.md` (from step 3b). Pins and timings go in `config.h`; a channel mask says which connectors
 are fitted.
 
 ## Steps
 
 The decisions behind the next steps (mic layout, model, who calibrates) are in
-`../PLAN.md`; step 3 below is rewritten from it before its branch starts. Each step ends
+`../PLAN.md`; step 3 below is rewritten from it. Each step ends
 with a bench test the user runs. The next step starts only when it passes,
 so a problem shows up in the step that caused it.
 
@@ -78,7 +84,7 @@ so a problem shows up in the step that caused it.
 |---|---|---|
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
-| 3 | Solver and calibration | being re-planned from ../PLAN.md (a first try is archived as the tag `archive/step3-first-try`) |
+| 3 | Solver and calibration | planned, on `step3-solver`: 3a-3e (a first try is archived as the tag `archive/step3-first-try`) |
 | 4 | Validity checks | planned |
 | 5 | Protocol and app | planned |
 | 6 | Wi-Fi and MQTT | planned |
@@ -278,17 +284,211 @@ channels, polarity is confirmed, and there are no half-cycle-late trips.
 
 ### 3. Solver and calibration
 
-Build:
-- TDOA solver: single-precision Gauss–Newton, 3–5 iterations from the first-hit mic,
-  speed of sound from the DS18B20. Output x, y and the fit residual.
-- Calibration mode: prints raw arrival times per spark. The fit of mic positions, offsets
-  and k over 9–16 template points runs on the laptop (a script first, the app in step 5);
-  the firmware stores the results in NVS.
-- Solved shots replace the BOOT test shot as the shot source (the BOOT test shot stays
-  available as a setting).
+Rewritten 2026-11-21 from `../PLAN.md` (D2, D3, D8, D12). One branch, `step3-solver`, in
+five sub-steps, each with its own test; the next starts when the last one passes. All of
+it is tested on a bare NodeMCU and the PC: the real-board tests move to PLAN phase 1. Step
+3 is done, and the branch merges, when 3a-3e pass.
 
-Bench test: spark through a template at 9–16 known points, then at other known points.
-Done when: positions are within 0.2–0.5 mm after calibration.
+The archived first try (`git show archive/step3-first-try:<path>`) supplies parts: the
+solver in `firmware/src/tdoa.h`, `mic` and the `cal` lines in `solver.cpp`, the
+simulator's position check, and `firmware/tools/calibrate.py`.
+
+#### 3a. The air sensor and the sync pin
+
+Build:
+- **The sync loopback moves from GPIO 15 to GPIO 12** (`SYNC_PIN`), because GPIO 15
+  becomes the BME280's SCL. GPIO 12 is a strapping pin (flash voltage): nothing may pull
+  it up at boot, and the firmware only drives it after boot, inside the chip.
+- **J5 takes either sensor** (`airtemp.cpp`). At boot, and once a minute while none
+  answers, the task looks for:
+  - a BME280 on I2C (SDA 14, SCL 15, address 0x76 or 0x77, chip ID 0x60): temperature,
+    humidity and pressure, in forced mode once a minute, compensated with the datasheet's
+    integer formulas;
+  - a BMP280 (chip ID 0x58): temperature and pressure, humidity assumed;
+  - a DS18B20 on GPIO 14 (1-Wire through UART2, as in step 2): temperature only.
+
+  Missing values are assumed: 18 °C, 50 % RH, 1013.25 hPa, each marked "(assumed)". A
+  reading older than 10 minutes counts as missing. The BME280's readings are checked for
+  range (−20..60 °C, 0..100 % RH, 300..1100 hPa) and for the all-ones of a bus with
+  nothing on it.
+- **The speed of sound** from T, RH and p (Cramer 1993, with 400 ppm CO₂), in the
+  portable core (`lib/measure/air.h`) so the solver and the PC share it.
+- **Output:** `temp` and `stat` show the sensor type, T, RH, p and c, each marked measured
+  or assumed. Event lines end in `air 21.3 °C 45 %RH 1009.8 hPa, c 344.6 m/s`.
+
+Reference values for c (Cramer, 1013.25 hPa): 0 °C dry 331.45 m/s; 18 °C 50 % 342.74;
+20 °C 50 % 343.99; 25 °C 50 % 347.13. Per °C +0.62 m/s, per % RH +0.011 (18 °C).
+
+Bench test, bare NodeMCU, nothing on GPIO 12, `mask 0`:
+- **3a-1, no sensor.** `temp`: no sensor on J5, 18.0 °C, 50 % RH, 1013.3 hPa, all
+  assumed, c 342.74 m/s. An event (`selftest`) ends in the same.
+- **3a-2, the sync pin.** Step 2a again: `selftest`, `selftest 1050 200`, `selftest 0`,
+  `selftest 100000`, then `sim raw 0 0 0 0 200` and
+  `sim raw 0 100000 200000 300000 100 1500`. PASS as before, 0 late starts.
+- **3a-3, a DS18B20** (data on GPIO 14, 4.7 k to 3V3): found within a minute, T measured,
+  RH and p still assumed.
+- **3a-4, a BME280 breakout** (SDA 14, SCL 15, 3V3, GND; most breakouts have their own
+  pull-ups): found within a minute as a BME280 at 0x76 or 0x77. T within about 1 °C of a
+  room thermometer; RH plausible indoors (30-60 %), and up by several % within a minute of
+  breathing on it; p within a few hPa of the local weather station's pressure at your
+  altitude (not the sea-level QNH). c matches the reference table for those values. With
+  the BME280 on GPIO 15, 3a-2's tests again: still PASS (the sync loopback no longer
+  shares a pin with it). `stat`'s interrupt load and longest interrupt unchanged.
+
+3a-3 and 3a-4 need the parts; whichever is missing waits, and is noted in Bench results.
+
+#### 3b. The model and the measurement core (PC)
+
+Build:
+- **`firmware/MODEL.md`**, the source of truth for the model (the model rule in
+  CLAUDE.md):
+  - frame coordinates: mm from the centre, x to the right, y up, as seen by the shooter;
+  - per mic: x, y, h (set, not fitted), k, offset, σ;
+  - t0 = t1 − k·(t2 − t1) − offset;
+  - t0ᵢ = τ + dᵢ / c, dᵢ = √((x − xᵢ)² + (y − yᵢ)² + hᵢ²);
+  - c(T, RH, p);
+  - the solver and its outputs (PLAN D12), the uncertainty, drop-one;
+  - the test vector format.
+- **`lib/measure/`**: `air.h` (c), `model.h` (distances, the forward model), `solver.h/.cpp`
+  (the fit, drop-one, the covariance), the pure part of `arrival.cpp`. No Arduino, no
+  `Serial`, no NVS.
+- **`tools/model.py`**: the Python reference of MODEL.md (numpy), which writes the test
+  vectors to `test/vectors/*.txt`, one case per line: the mics, the air, the t0s, and the
+  expected position, τ, residuals and uncertainty.
+- **`pio test -e native`**: Unity tests on the PC against the vectors; CI runs them.
+
+Tests (PC; I run them, you can too with `pio test -d firmware -e native`):
+- c matches `model.py` to 0.001 m/s over −10..40 °C, 0..100 % RH, 900..1050 hPa.
+- Noise-free shots on a 5 mm grid over the 200 × 200 mm area, h 10.5 and 21.5 mm, the
+  D1/D2 layout: position within 0.001 mm of the truth, converged within 15 iterations
+  from the planned start.
+- The same shots with 50 ns rms of noise per channel: rms error per point within 10 % of
+  the uncertainty the solver reports (about 0.02 mm in the ring area).
+- Points up to 100 mm outside the frame: they converge or are reported as not converged,
+  never a wrong position flagged as converged.
+- Every vector: C++ and Python agree to 0.001 mm and 0.1 ns.
+- A channel 24 µs late: the full fit's residual over 4 µs, drop-one finds that channel
+  and the position within 0.01 mm.
+- Time per solve on the PC is not the ESP's; 3c measures that.
+
+#### 3c. The solver on the board
+
+Build:
+- **Mic geometry** (`mic`), stored in NVS (namespace `"cal"`, with k and the offsets, which
+  move there from `"measure"`; old values are carried over once):
+  - `mic` lists x, y, h per channel, and warns when the fitted mics, or any set left after
+    dropping one, lie within 25 mm of one circle;
+  - `mic <ch> <x> <y> [h]`, `mic h <mm>` (every mic), `mic h <ch> <mm>`;
+  - `mic default`: the D1/D2 layout on CH1-CH6, h 10.5 mm;
+  - `mic sim`: the simulator's own layout on its channels (to test it);
+  - `mic clear <ch>`: no mic on that channel.
+- **k per channel:** `k <ch> <value>`, `k <value>` (every channel). The global k becomes
+  every channel's.
+- **Every event** with t0 on 4 or more channels that have a mic is solved (in `loop()`).
+  Under the event line:
+  - `shot x y`, the rms residual, the uncertainty (major axis), iterations, the channels
+    used, and each channel's residual;
+  - an `evt` line: everything needed to replay it, machine-readable (event number,
+    millis, t1 and t2 per channel, T, RH, p, and the settings' ID).
+- **Solved shots go to the app** (the v2 shot message) when the fit converged and its
+  rms residual is under `reslimit` (default 1500 ns, stored). The rest are logged only.
+  Validity proper is step 4. `testshot on|off` (stored, default on) keeps the BOOT test
+  shot.
+- **While the simulator runs,** the solver takes the simulator's air instead of the
+  sensor's (`sim air`), so the two use the same c unless a test sets an error.
+- **Replay on the PC:** `tools/replay.cpp`, built with g++ against `lib/measure/`, reads a
+  serial log, solves every `evt` line with the settings given, and prints the shots.
+- `stat` shows the time per solve (mean and longest, µs).
+- The simulator gets h per mic (default 10.5 mm), still 4 channels on CH5-CH8.
+
+Bench test, bare NodeMCU, `mask 0`, nothing on CH5-CH8 or GPIO 12:
+- **3c-1, the square.** `mic sim` (it warns: the 4 sim mics are on one circle; expected),
+  `sim random 200`: every shot solved, converged in ≤ 6 iterations, position error
+  against the truth rms about 0.02 mm, worst under 0.1 mm (the position check: PASS),
+  rms residual under 100 ns. The shots appear in the app. `stat`: the solve takes well
+  under 1 ms (I expect 20-100 µs).
+- **3c-2, the height.** `mic h 0`, `sim random 100`: the error grows to about 0.5 mm mean,
+  several mm in the corners (the study's "mic height not modelled"). `mic h 10.5`: back
+  to 3c-1.
+- **3c-3, the air.** `sim air error 1` (the solver's temperature 1 °C off the
+  simulator's): errors about 0.15 mm rms, growing with the distance from the centre.
+  `sim air error 0`.
+- **3c-4, a late channel.** `sim fault late 7`, `sim at 30 30 20`: rms residual over
+  4 µs, no shot sent to the app (logged). `sim fault none`.
+- **3c-5, replay.** Log 3c-1 with `--filter log2file`; `tools/replay` on the log gives the
+  same positions as the board, to 0.001 mm.
+- **3c-6, the test shot.** BOOT short press with `testshot on`: a test shot in the app as
+  before; with `testshot off`: none.
+
+#### 3d. The simulator on six channels, and drop-one
+
+Build:
+- **Six simulated channels on CH3-CH8** (GPIO 33/32, 26/25, 22/23, 19/21, 17/18, 4/16;
+  CH1/CH2 are input-only). The pulse generator has exactly 6 operators: CH3-CH5 on MCPWM
+  unit 0, CH6-CH8 on unit 1. The D1/D2 layout as the default (`sim mic` lists or sets x,
+  y, h per channel; `mic sim` copies it).
+- **k per channel in the simulator:** `sim thr <ch> <L> <H>` (the trip levels; k is
+  L / (H − L)).
+- **Faults:** `sim fault blast <m> <offset mm>` (a point source that far in front and
+  that far off the axis, on every channel), `sim fault early <ch>` (noise tripping one
+  channel 24 µs early), with the old `late`, `missing`, `honly`, `double`.
+- **Drop-one** in the solver, moved forward from step 4: if the full fit's residual is
+  over `reslimit`, the best fit with one channel left out; the shot keeps it when that
+  residual is under the limit, and says which channel was dropped. `dropone on|off`
+  (stored, default on).
+
+Bench test, bare NodeMCU, `mask 0`, nothing on CH3-CH8 or GPIO 12:
+- **3d-1, the generator again.** `sim raw 0 0 0 0 0 0 200`: every line within a sample
+  of CH3 L; a mean on CH6-CH8 alone is the offset between the units (fine up to a tick).
+- **3d-2, six mics.** `mic sim`, `sim random 500`: PASS, position error rms about
+  0.015 mm (less than 3c-1's: two more mics), worst under 0.1 mm.
+- **3d-3, a bad channel.** `sim fault late 5`, `sim random 100`: every shot kept with CH5
+  dropped (expect all of them: 666 of 666 in the study), error as in 3d-2 but a little
+  larger. `sim fault early 8`: the same for CH8.
+- **3d-4, blasts.** `sim fault blast 10 0`, `sim fault blast 10 500`,
+  `sim fault blast 25 2000`, 20 each: none sent to the app, with or without drop-one
+  (residuals of tens of µs). Then `mic` set to a square on CH3-CH6 (`sim mic` likewise),
+  `sim fault blast 10 0`: many fit as near-centre shots (the reason for D1). `mic sim`
+  back.
+- **3d-5, k per channel.** `sim thr 4 1 3` (k 0.5 on CH4), `sim random 50`: errors grow
+  (the firmware still uses 1/3); `k 4 0.5`: back to 3d-2.
+
+#### 3e. Calibration mode and the fit
+
+Build:
+- **Calibration mode** (`cal on|off`, `cal pt <x> <y>`: the template point the next sparks
+  are at): every event prints a `cal` line with the point, t1 and t2 per channel and the
+  air, and is not sent to the app.
+- **`tools/calibrate.py`** (the reference fit, from the archive, extended): mic x and y,
+  offset and k per channel over all points, h fixed; robust first fit, outliers against a
+  MAD scale, then a plain fit. Offsets have mean 0 (a shared delay is the emission time).
+  It prints the fit's residual, the error per point, each parameter's uncertainty, and the
+  serial commands that set the result, ending with `cal id ...`.
+- **The calibration record** (PLAN D5) in NVS `"cal"`: the values above, the ID (a hash of
+  them), the date, the points and sparks used and the residual. `cal` shows it. Any later
+  change to a mic, h, k or an offset marks it **stale** (shown by `cal`, `stat` and every
+  `evt` line).
+- **`sim cal <n>`:** n sparks at each point of a 4 × 4 template grid, at random loudness,
+  with the simulator's truth set off from the firmware's mic table (mics up to 1.5 mm off,
+  offsets up to ±500 ns, k 0.25-0.6 per channel), printed as for a real calibration.
+
+Bench test, bare NodeMCU, as 3d:
+- **3e-1, uncalibrated.** `mic sim` (the nominal layout), then `sim cal truth` (sets the
+  simulator's truth off from it, as above), `sim random 100`: errors around 0.5 mm, up to
+  1-2 mm.
+- **3e-2, calibrate.** `cal on`, `sim cal 10`, `cal off`, logged to a file;
+  `python3 firmware/tools/calibrate.py <log>`: residual about 60 ns, mics within
+  0.05 mm, offsets within 10 ns, k within 0.02 of the simulator's truth (`sim mic` shows
+  it). Paste the printed commands.
+- **3e-3, verify.** `sim random 200`: error back to 3d-2's (rms about 0.015 mm); `cal`
+  shows the record, not stale. `mic h 4 21.5`: `cal` says stale; `mic h 4 10.5` restores
+  the value but it stays stale until a new `cal id` (a record is only trusted as
+  written).
+- **3e-4, temperature on the PC.** `sim air error 2`, `sim random 200`, logged; replay
+  with the speed of sound fitted over all events: it recovers the 2 °C (to about 0.1 °C).
+
+The exact commands of 3d and 3e may still change as they are built; this file is updated
+with them.
 
 ### 4. Validity checks
 

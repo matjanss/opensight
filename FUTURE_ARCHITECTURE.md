@@ -88,7 +88,10 @@ fallback.
 
 ### Range server
 
-- A Pi 5 or mini PC running Mosquitto and one Rust service (for example axum + SQLite).
+- A Pi 5, a mini PC, or a Docker container or VM on any machine that qualifies, running
+  Mosquitto and one Rust service (for example axum + SQLite). It can start as only the
+  server for the viewer (serving the wasm app and relaying shots) and grow into the
+  central range management server.
 - **Range model:** Range → Lane (distance, disciplines) → Post → assigned target and,
   optionally, a fixed viewer.
 - **Jobs:**
@@ -147,6 +150,10 @@ Things to watch:
 
 ## Steps
 
+Several lanes, with shooters' own phones and tablets as viewers, is the aim once the
+single target measures well (user, 2026-11-21). The native app stays, for development and
+as the admin tool.
+
 1. **Prototype on BLE (now):**
    - Add a shot message to the protocol (sequence number, x/y in mm, timestamp).
    - The target produces test shots until the measuring hardware exists.
@@ -168,8 +175,8 @@ and only the transport changes.
 
 ## Open questions
 
-- How impacts are measured (acoustic, optical, …). This decides the target's timing and
-  computing needs, and how much battery it uses.
+- ~~How impacts are measured~~: acoustic, by time differences of arrival, and the target
+  solves the position itself (PLAN.md D4, D12). Raw data goes along with every shot.
 - Which disciplines and cards are needed first.
 - Whether shooters need accounts and results history, and whether that data is shared
   across ranges.

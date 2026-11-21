@@ -48,10 +48,10 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Part | Where it stands | Next (see) |
 |---|---|---|
 | Firmware: BLE, pairing, shot buffer | Done; protocol v2 | Flash shot store, uplink interface (PLAN D6, phase 3–4) |
-| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration) is being re-planned: a first try was built, then set aside and archived (below) | Revisit PLAN.md together, rewrite step 3 in MEASUREMENT.md, then a new branch for step 3 (PLAN phase 0: mic height and k per channel, the D1/D2 layout, 5 simulated channels, blast fault, measurement core tested on the PC) |
+| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration) was re-planned with the user on 2026-11-21 (PLAN D2, D3, D8, D12; a first try is archived, below) and is being built on `step3-solver` | MEASUREMENT step 3, sub-steps 3a-3e in order: the air sensor and sync pin, the model and core on the PC, the solver on the board, 6 simulated channels and drop-one, calibration |
 | Sensor board (`hardware/acoustic-sensor/`) | v0.3 designed (KiCad 10), not yet on the bench | Its "check before ordering" list; then the summary's initial calibration, polarity, PLAN phase 1 |
 | Host board (`hardware/host-board/`) | v0.3 designed and routed, not yet on the bench; firmware already on its pin map | Order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
-| Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | PLAN Q2: one corner mic slid 40 mm along its edge, plus a bottom-middle mic |
+| Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner slid 40 mm along the top edge, plus bottom-middle and right-middle mics; the user designs and prints the holders |
 | IR curtain | Designed (receiver on the host board, emitter board), firmware not started | Its bench test first (summary), then step 4 |
 | App (`app/`) | v0.1.2, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay | Raw events and the calibration wizard with a Rust fit (PLAN D5, phase 3) |
 | Range server, MQTT, management, wasm viewer | Not started (wasm parked) | FUTURE_ARCHITECTURE step 2, PLAN phase 4 |
@@ -130,7 +130,9 @@ hardware/host-board/          host board, KiCad 10
   - The NodeMCU-32S on sockets.
   - 8 sensor connectors (CH1–4 west, CH5–8 east, 6 fitted at first), each with a 470 Ω
     series resistor, a 100 k pull-down and an optional scope header.
-  - LP2950 low-noise 3.3 V for the sensors; DS18B20 on a cable (GPIO 14).
+  - LP2950 low-noise 3.3 V for the sensors; an air sensor on a cable at J5. Before
+    ordering, J5 becomes 4-pin for a BME280 (SDA GPIO 14, SCL GPIO 15); a DS18B20 still
+    fits (GPIO 14). See the host board README's to-do.
   - IR curtain receiver (BPW34F strip → MCP6002 TIA and gain → LM393, IR_IN GPIO 13, own
     AGND) and emitter drive (IR_EN GPIO 27).
   - Panel LED (GPIO 2) and button (BOOT, GPIO 0).
@@ -139,8 +141,8 @@ hardware/host-board/          host board, KiCad 10
 - **GPIO map:** in `config.h` (`CAPTURE_LINE_PINS`) and the host board README.
   - L/H per channel: CH1 39/36, CH2 35/34, CH3 33/32, CH4 26/25, CH5 22/23, CH6 19/21,
     CH7 17/18, CH8 4/16.
-  - GPIO 5: the capture clock loopback. GPIO 15: the pulse generator's sync loopback.
-    GPIO 12 is spare.
+  - GPIO 5: the capture clock loopback. The pulse generator's sync loopback is GPIO 15
+    on `main`, moving to GPIO 12 in step 3a (15 becomes the BME280's SCL).
   - GPIO 34–39 (CH1, CH2) are input-only and have no internal pull-downs.
 
 ## Firmware
@@ -271,9 +273,13 @@ hardware/host-board/          host board, KiCad 10
 
 - **Measurement** (PLAN, MEASUREMENT steps 3–5):
   - **Layout** (D1/D2): never all mics on one circle, or blasts fit as centre hits. One
-    corner mic slides 40 mm along its edge, plus a bottom-middle mic: 5 mics, so a bad
-    channel can be dropped and blasts stay out.
-  - **Model** (D3): the mic height in the model, k per channel.
+    corner mic slides 40 mm along its edge, plus bottom-middle and right-middle mics: 6
+    mics, so a bad channel can be dropped and blasts stay out.
+  - **Model** (D3, D8): the mic height per mic (a setting, later in the app), k per
+    channel, the speed of sound from the BME280's T, RH and p.
+  - **Solver** (D12): on the ESP, x, y and the emission time by Levenberg–Marquardt in
+    float, residuals and an uncertainty per shot, drop-one; a portable core tested on the
+    PC; shots to the app in the v2 message, the rest on serial until protocol v3.
   - **Validity** (step 4): residual, drop-one, loudness, sharpness, curtain, dead time.
     Every event is logged.
   - **Ground truth** (D11): scanned cards.
