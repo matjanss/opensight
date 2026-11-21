@@ -107,6 +107,11 @@ hardware/host-board/          host board, KiCad 10
 - **Pins and timings** go in `firmware/src/config.h`. The pin map must match the host
   board README, and after a map change MEASUREMENT step 1 test 14 is due again.
 - **Commit only when the user asks.**
+- **Branches:** one branch per measurement step (or any other work that needs a bench
+  test), named after it, for example `step3-solver-and-plan`. It is merged into `main`
+  (fast-forward when possible) only once the user reports its bench test passing; then
+  the branch is deleted. Small fixes and docs-only changes go straight to `main`. So
+  `main` always means "passed on the hardware", and release tags are only made there.
 - **Docs style:** plain English, short sentences, numbers with units. Say what was
   measured and what it changed.
 
