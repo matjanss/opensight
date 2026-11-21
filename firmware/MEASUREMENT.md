@@ -69,14 +69,16 @@ are fitted.
 
 ## Steps
 
-Each step ends with a bench test the user runs. The next step starts only when it passes,
+The decisions behind the next steps (mic layout, model, who calibrates) are in
+`../PLAN.md`; step 3 below is rewritten from it before its branch starts. Each step ends
+with a bench test the user runs. The next step starts only when it passes,
 so a problem shows up in the step that caused it.
 
 | # | Step | Status |
 |---|---|---|
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
-| 3 | Solver and calibration | planned |
+| 3 | Solver and calibration | being re-planned from ../PLAN.md (a first try is archived as the tag `archive/step3-first-try`) |
 | 4 | Validity checks | planned |
 | 5 | Protocol and app | planned |
 | 6 | Wi-Fi and MQTT | planned |

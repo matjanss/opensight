@@ -7,19 +7,21 @@ An ESP32 (NodeMCU-32S) that talks Bluetooth LE to a desktop app written in Rust.
 - **protocol/PROTOCOL.md** — the BLE protocol both sides implement
 - **hardware/** — KiCad projects for the sensor hardware
 
-Open `opensights.code-workspace` in VS Code: PlatformIO picks up `firmware/` and
+Open `esp-sensor.code-workspace` in VS Code: PlatformIO picks up `firmware/` and
 rust-analyzer picks up `app/`.
 
 ## What it does
 
-- The sensor is the prototype of an electronic target. Until it has measuring hardware,
-  a short press on BOOT makes a test shot.
+- The sensor is the prototype of an electronic target: an acoustic target that locates
+  each shot from the sound arriving at its microphones (being built, see
+  [PLAN.md](PLAN.md) and [firmware/MEASUREMENT.md](firmware/MEASUREMENT.md)). Until the
+  measuring hardware is running, a short press on BOOT makes a random test shot.
 - The app shows the shots on a 10 m air pistol card and scores them: whole rings with X for an inner ten, or decimals (a setting). The series
   list and total sit next to the card.
 - No shot is lost when the link drops: the sensor keeps its last 64 shots and resends the
   ones the app missed.
-- Settings also show the heartbeat (the sensor's `millis()`, every 2 s) and switch the
-  blue LED.
+- Settings also show the heartbeat (the sensor's `millis()`, every 2 s). The blue LED
+  only shows the sensor's status: pairing mode, a PIN reset, a shot.
 - The sensor has a name (`OpenSights-xyz` at first) that you can change from the app.
 - The app remembers the sensor and reconnects to it automatically.
 - Pairing needs the sensor's 6-digit PIN (`000000` at first), which you can change from

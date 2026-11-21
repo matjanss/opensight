@@ -1,92 +1,300 @@
 # CLAUDE.md
 
-OpenSights: an ESP32 BLE peripheral (`firmware/`) and a Rust desktop app (`app/`) that
-talk over the protocol in `protocol/PROTOCOL.md`. The prototype of an electronic target
-system; where it is heading is described in `FUTURE_ARCHITECTURE.md`.
+OpenSights is the prototype of an electronic shooting target. An acoustic target (ESP32
+plus MEMS microphones in the frame corners) locates each shot by the time differences of
+arrival of the pellet's crack, and reports x/y in mm. A Rust app shows the shots on a
+target card and scores them. The current link is BLE; the plan is Wi-Fi/MQTT to a range
+server, with viewers on Pis and phones.
 
-## Build
+Proof-of-concept scope:
 
-- Firmware (NodeMCU-32S): `pio run -d firmware`. Add `-t upload` to flash over USB, and
-  `pio device monitor -d firmware` for the serial log (115200).
-  If `pio` is not on PATH, use `~/.platformio/penv/bin/pio`.
-- App: `cargo run` / `cargo build --release` in `app/`. `cargo test` checks the protocol
-  encoding against the examples in PROTOCOL.md.
-- Linux: the app builds libdbus from source (`vendored`), so no `libdbus-1-dev` is needed.
-- The radio link can't be tested here; the user tests with the hardware.
+- an indoor 25 m range, mainly air guns and subsonic ammunition, with other lanes firing;
+- a 250 × 250 mm frame around a 200 × 200 mm scoring area;
+- the goal is 0.2–0.5 mm (1σ) after calibration;
+- an IR light curtain behind the paper confirms each shot;
+- supersonic ammunition is out of scope.
 
-## The protocol rule
+Current focus: get the measuring hardware running and find out how accurate it really is.
+The web/wasm viewer is parked.
 
-`protocol/PROTOCOL.md` is the source of truth. It is mirrored by `firmware/src/protocol.h`
-and `app/src/protocol.rs`. **Any protocol change touches all three in the same commit**,
-updates the examples and tests in `protocol.rs`, and bumps `PROTOCOL_VERSION` when an old
-app could misread new firmware or the reverse.
+## Read first: the documents
+
+| Document | What it holds | Read it when |
+|---|---|---|
+| `PLAN.md` | Decisions D1–D11 (mic layout, model, who does what, calibration, firmware structure, messages, temperature, curtain, frame limits, ground truth), open questions Q1–Q3, phases 0–5 with their tests | Always, before choosing what to work on |
+| `firmware/MEASUREMENT.md` | The measurement firmware's steps 1–6, each with its build list and bench test, the step status table, and every bench result (newest first) | Before any measurement work; update it in the same commit as the code |
+| `FUTURE_ARCHITECTURE.md` | The target system: target, range server, viewers, management, network per lane, updates, its steps 1–4 | Before anything network, server, viewer or fleet |
+| `protocol/PROTOCOL.md` | The BLE protocol, v2: advertising, GATT, shots, security, buttons and LED | Before touching the link (see the protocol rule) |
+| `hardware/acoustic-sensor/README.md` | Sensor board v0.3: one mic channel, files, checks before ordering | Hardware questions |
+| `hardware/host-board/README.md` | Host board v0.3: layout, GPIO map, assembly | Hardware questions, pin changes |
+| Project summary (claude.ai doc, below) | The hardware design: approaches considered, signal chain and BOM, threshold levels, initial calibration per board, error budget, error sources, valid-shot detection, IR curtain design, host board requirements, its open questions | Hardware or measurement design questions |
+| `README.md` | User-facing: what it does, getting started, downloads, notes per platform | Changing user-visible behaviour |
+| `app/assets/icon/README.md` | The app icon and where it is used | Icon work |
+
+**The project summary** is a Claude Docs document: "Electronic shooting target – project
+summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (doc ID
+`a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1`).
+
+- **Reading it:** use the Claude Docs connector. `read` the doc (ref object `project`,
+  that ID) for its tab, then `read` the tab's content node. The tab is about 130 KB of
+  XML, so it comes back as a file: strip the tags to text before reading.
+- **Editing it:** it's the user's doc. Change it only when asked, as suggestions.
+- **Where it is out of date** (PLAN.md has the corrections):
+  - its error budget counts the mic height as 1 mm, but it is 10.5 mm (PLAN D3);
+  - its open question on breaking the corner symmetry is answered by PLAN D1/D2.
+
+## Status (2026-11-21) and what's next, per part
+
+| Part | Where it stands | Next (see) |
+|---|---|---|
+| Firmware: BLE, pairing, shot buffer | Done; protocol v2 | Flash shot store, uplink interface (PLAN D6, phase 3–4) |
+| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration) is being re-planned: a first try was built, then set aside and archived (below) | Revisit PLAN.md together, rewrite step 3 in MEASUREMENT.md, then a new branch for step 3 (PLAN phase 0: mic height and k per channel, the D1/D2 layout, 5 simulated channels, blast fault, measurement core tested on the PC) |
+| Sensor board (`hardware/acoustic-sensor/`) | v0.3 designed (KiCad 10), not yet on the bench | Its "check before ordering" list; then the summary's initial calibration, polarity, PLAN phase 1 |
+| Host board (`hardware/host-board/`) | v0.3 designed and routed, not yet on the bench; firmware already on its pin map | Order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
+| Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | PLAN Q2: one corner mic slid 40 mm along its edge, plus a bottom-middle mic |
+| IR curtain | Designed (receiver on the host board, emitter board), firmware not started | Its bench test first (summary), then step 4 |
+| App (`app/`) | v0.1.2, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay | Raw events and the calibration wizard with a Rust fit (PLAN D5, phase 3) |
+| Range server, MQTT, management, wasm viewer | Not started (wasm parked) | FUTURE_ARCHITECTURE step 2, PLAN phase 4 |
+
+## Repository
+
+```
+CLAUDE.md, PLAN.md, FUTURE_ARCHITECTURE.md, README.md
+protocol/PROTOCOL.md          the BLE protocol (source of truth)
+firmware/                     PlatformIO, Arduino-ESP32 3.x on pioarduino (IDF 5), NimBLE-Arduino 2.3
+  MEASUREMENT.md              measurement plan and bench results
+  src/                        the firmware (modules below)
+  tools/layout_study.py       mic layout study behind PLAN D1/D2 (numpy)
+app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
+  src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs
+  assets/                     cards/, fonts/ (IBM Plex Sans), icon/
+hardware/acoustic-sensor/     sensor board, KiCad 10
+hardware/host-board/          host board, KiCad 10
+.github/workflows/build.yml   CI; a v* tag builds a GitHub Release (app for 3 OSes + firmware)
+```
+
+## Build and test
+
+- **Firmware** (NodeMCU-32S): `pio run -d firmware`. Add `-t upload` to flash over USB, and
+  use `pio device monitor -d firmware --echo` for the serial console (115200; type `help`
+  for the commands). Add `--filter log2file` to log to a file. If `pio` is not on PATH,
+  use `~/.platformio/penv/bin/pio`.
+- **App:** `cargo run` / `cargo build --release` in `app/`. `cargo test` checks the protocol
+  encoding against the examples in PROTOCOL.md. On Linux the app builds libdbus from
+  source (`vendored`), so no `libdbus-1-dev` is needed.
+- **Tools:** `python3 firmware/tools/layout_study.py [--drop] [--offsets]` (a few
+  minutes).
+- **Release:** `git tag vX.Y.Z && git push origin vX.Y.Z`.
+- **Hardware can't be tested here: the user runs every bench test.** The radio link and
+  the measurement can only be checked by compiling (and by host-side checks of pure code,
+  such as a solver with no Arduino dependencies). Write each bench test so the user can run it and report back, with
+  the numbers to expect.
+
+## Rules
+
+- **The protocol rule:** `protocol/PROTOCOL.md` is the source of truth, mirrored by
+  `firmware/src/protocol.h` and `app/src/protocol.rs`. Any protocol change touches all
+  three in the same commit, updates the examples and tests in `protocol.rs`, and bumps
+  `PROTOCOL_VERSION` when an old app could misread new firmware or the reverse.
+- **The measurement rule:** a measurement step's code and its MEASUREMENT.md update (step
+  status, build notes, bench test, bench results) go in the same commit. Every bench
+  result the user reports goes into Bench results, failures included, with what it
+  changed.
+- **The model rule (planned, PLAN D3):** once `firmware/MODEL.md` exists, it is the source
+  of truth for the propagation model, mirrored by `tdoa.h` and the Rust implementation,
+  with shared test vectors.
+- **Pins and timings** go in `firmware/src/config.h`. The pin map must match the host
+  board README, and after a map change MEASUREMENT step 1 test 14 is due again.
+- **Commit only when the user asks.**
+- **Branches:** one branch per measurement step (or any other work that needs a bench
+  test), named after it, for example `step3-solver`. It is merged into `main`
+  (fast-forward when possible) only once the user reports its bench test passing; then
+  the branch is deleted. Small fixes and docs-only changes go straight to `main`. So
+  `main` always means "passed on the hardware", and release tags are only made there.
+- **Docs style:** plain English, short sentences, numbers with units. Say what was
+  measured and what it changed.
+
+## Hardware in brief
+
+- **Sensor board v0.3:** one channel. GTA2718B-3 bottom-port MEMS mic → TLV9062 two-stage
+  preamp (×6.3–17.7, ×12 at RV1 mid-travel, three 16 kHz high-pass poles) → TLV3202 dual
+  comparator, giving OUT_L (low threshold, trips first) and OUT_H (high threshold, a few
+  µs later).
+  - Trimpots: RV1 gain, RV2 low threshold, RV3 high threshold. Start at VTH_L = VMID +
+    100 mV and VTH_H = VMID + 400 mV.
+  - 50 × 32 mm. The board stands on its long edge, mic port 10.5 mm from the paper
+    (21.5 mm flipped).
+  - J1 is JST XH 5-pin: VA, GND, OUT_L, GND, OUT_H. JLC assembles the SMD parts, 5 boards
+    per order.
+- **Host board v0.3:** 76 × 118 mm, through-hole, hand-soldered.
+  - The NodeMCU-32S on sockets.
+  - 8 sensor connectors (CH1–4 west, CH5–8 east, 6 fitted at first), each with a 470 Ω
+    series resistor, a 100 k pull-down and an optional scope header.
+  - LP2950 low-noise 3.3 V for the sensors; DS18B20 on a cable (GPIO 14).
+  - IR curtain receiver (BPW34F strip → MCP6002 TIA and gain → LM393, IR_IN GPIO 13, own
+    AGND) and emitter drive (IR_EN GPIO 27).
+  - Panel LED (GPIO 2) and button (BOOT, GPIO 0).
+  - Powered from USB 5 V through a panel switch and a Schottky diode; no battery on this
+    version.
+- **GPIO map:** in `config.h` (`CAPTURE_LINE_PINS`) and the host board README.
+  - L/H per channel: CH1 39/36, CH2 35/34, CH3 33/32, CH4 26/25, CH5 22/23, CH6 19/21,
+    CH7 17/18, CH8 4/16.
+  - GPIO 5: the capture clock loopback. GPIO 15: the pulse generator's sync loopback.
+    GPIO 12 is spare.
+  - GPIO 34–39 (CH1, CH2) are input-only and have no internal pull-downs.
 
 ## Firmware
 
-- Measuring shots: `firmware/MEASUREMENT.md` is the plan (steps, each ending in a bench
-  test) and the record of bench results. Read it before working on measurement; update its
-  step status and results in the same commit as the code.
-- `capture.cpp`: I2S0 in camera mode samples the 16 comparator lines into a DMA ring
-  (register level: IDF 5 has no driver for it); an IRAM interrupt scans each finished
-  block and freezes the ring around an event (spare DMA blocks), a task on core 1 extracts
-  the edges, and `loop()` prints them. The window length follows from the mic span. Serial
-  commands (`help`) set the channel mask, dead time and mic span and run the self-test
-  (a pulse pair on CH8's pins). `event.h` holds the event result the other modules read.
-- `pulsegen.cpp`: hardware-timed pulse pairs (MCPWM, one operator per channel, both units
-  started from edges on GPIO 15, by register from IRAM) for the self-test and the
-  simulator; a CPU-driven generator is not exact under BLE load.
-- `arrival.cpp`: t0 = t1 − k·(t2 − t1) − offset per channel; `k` and `offset` in NVS.
-  `simulate.cpp` (`sim ...`): simulated shots at known positions on CH5-CH8, checked
-  against the truth, until the sensor boards arrive. `airtemp.cpp`: DS18B20 on GPIO 14
-  through UART2 as a 1-Wire bus, a task on core 0 once a minute; 18 °C without a sensor.
-- `main.cpp`: button (short press = test shot, 2 s hold = pairing mode, 10 s hold = PIN
-  reset), heartbeat, name and PIN in NVS (namespace `"sensor"`), the status LED (pairing blink, PIN reset, shot flash; the app can't switch it), and the shot
-  buffer: the last 64 shots, indicated one at a time until the app confirms each
-  (`serviceShots`); a clear request from the app drops the shots it has (`clearedSeq`). Simple 10 ms loop.
-- `ble_link.cpp`: NimBLE GATT server. NimBLE callbacks run in NimBLE's task: they only store
-  requests, which `loop()` picks up with `bleTake*()`. Don't touch pins, NVS or app state
-  from a callback.
-- Security: every characteristic needs an encrypted, MITM-authenticated link (passkey =
-  the PIN, 6 digits, default 000000, NVS key `"pin"`; bonding). Unbonded centrals are
-  disconnected unless pairing mode is on. A pairing without the passkey (no MITM) is
-  rejected and its bond deleted at once: NimBLE would otherwise delete it later anyway,
-  when the central re-pairs on the same link. Writing a new PIN
-  deletes all bonds but the writer's; BOOT held 10 s resets the PIN and deletes all bonds.
+- Measuring shots: read `firmware/MEASUREMENT.md` first, and PLAN.md for where step 3
+  onward is heading.
+- `capture.cpp`: I2S0 in camera mode samples the 16 comparator lines at 10 MHz into a DMA
+  ring.
+  - It works at register level, because IDF 5 has no driver for this.
+  - An IRAM interrupt scans each finished block, and freezes the ring around an event by
+    linking in two spare DMA blocks.
+  - A task on core 1 extracts the edges, and `loop()` prints them.
+  - The window length follows from the mic span (`span`).
+  - Serial commands (`help`) set the channel mask, dead time and mic span, and run the
+    self-test (a pulse pair on CH8's pins).
+  - `event.h` holds the event result the other modules read.
+- `pulsegen.cpp`: hardware-timed pulse pairs for the self-test and the simulator.
+  - MCPWM, one operator per channel, both units started from edges on GPIO 15, by
+    register from IRAM.
+  - A CPU-driven generator is not exact under BLE load.
+- `arrival.cpp`: t0 = t1 − k·(t2 − t1) − offset per channel. `k` and `offset` are in NVS
+  (namespace `"measure"`). `k` is still global; PLAN D3 makes it per channel.
+- `simulate.cpp` (`sim ...`): simulated shots at known positions on CH5–CH8 (the pins
+  drive their own inputs), checked against the truth: the capture and t0. It stands in
+  until the sensor boards arrive. Its air temperature is a fixed 20 °C (`sim temp`).
+- **No solver yet (step 3).** The tag `archive/step3-first-try` holds a first try that
+  was set aside: it never ran on the board, and it predates PLAN.md. Parts of it can be
+  reused with `git show archive/step3-first-try:<path>` rather than rewritten:
+  - `firmware/src/tdoa.h`: a float Gauss–Newton solver, checked on the PC to 0.015 mm
+    rms, but without the mic height;
+  - `solver.cpp`: `mic` and the calibration mode's `cal evt=` lines;
+  - the simulator's position check;
+  - `firmware/tools/calibrate.py`: the fit, with a global k.
+- `airtemp.cpp`: a DS18B20 on GPIO 14, read through UART2 as a 1-Wire bus by a task on
+  core 0, once a minute. 18 °C (marked "assumed") without a sensor.
+- `main.cpp`: the main loop and the shot buffer.
+  - The button: short press = a random test shot (until there are solved shots); 2 s
+    hold = pairing mode; 10 s hold = PIN reset.
+  - The heartbeat, and the name and PIN in NVS (namespace `"sensor"`).
+  - The status LED: pairing blink, PIN reset, shot flash. The app can't switch it.
+  - The shot buffer: the last 64 shots, in RAM, indicated one at a time until the app
+    confirms each (`serviceShots`). A clear request from the app drops the shots it has
+    (`clearedSeq`).
+  - Serial lines go to `captureCommand`.
+  - A simple 10 ms loop.
+- **Cores:** NimBLE and the DS18B20 task run on core 0. `loop()` and the measurement task
+  (higher priority) run on core 1, and so does the capture interrupt. Arrival times run in
+  `loop()` (microseconds per event). The interrupt and the code it calls
+  stay in IRAM, because NVS writes stall the flash cache.
+- `ble_link.cpp`: NimBLE GATT server. NimBLE callbacks run in NimBLE's task: they only
+  store requests, which `loop()` picks up with `bleTake*()`. Don't touch pins, NVS or app
+  state from a callback.
+- **Security:**
+  - Every characteristic needs an encrypted, MITM-authenticated link. The passkey is the
+    PIN: 6 digits, default 000000, NVS key `"pin"`, with bonding.
+  - Unbonded centrals are disconnected unless pairing mode is on.
+  - A pairing without the passkey (no MITM) is rejected and its bond deleted at once.
+    NimBLE would otherwise delete it later anyway, when the central re-pairs on the same
+    link.
+  - Writing a new PIN deletes all bonds but the writer's. BOOT held 10 s resets the PIN
+    and deletes all bonds.
 - `BOOT_PIN` is defined by the Arduino core; ours is `BOOT_BTN_PIN`.
 - NimBLE only calls `onPassKeyDisplay()` while its static passkey is the default 123456,
   so `bleSetPasskey` must not call `NimBLEDevice::setSecurityPasskey`.
 
 ## App
 
-- `ble.rs`: a background thread with a tokio runtime owns btleplug. The UI sends `Command`s
-  and receives `Event`s over channels; each event requests a repaint. Keep btleplug calls
-  out of the UI thread.
-- `agent.rs` (Linux): a BlueZ pairing agent on its own D-Bus connection. The app calls
-  `Device1.Pair` itself so BlueZ asks this agent. For the sensor being paired only, the
-  agent hands the request to the UI (a `PasskeyReply` in `Event::PasskeyRequest`), which
-  shows a PIN popup and answers it directly: the BLE loop is busy awaiting `Pair` meanwhile.
-  Desktops run no agent unless their Bluetooth settings are open.
-  `Pair` must come **before** connecting: on a link that is already up, BlueZ pairs with the
-  system-wide "no input" capability, so without the passkey (no MITM). Connecting to a
-  sensor in pairing mode deletes BlueZ's old keys first (stale bonds). The sensor list
-  shows BlueZ's real pairing state; unpaired sensors can only be paired in pairing mode.
-- `card.rs`: target cards. Each card is an SVG (the picture) plus JSON (scoring geometry);
-  scoring never looks at the SVG. The cards are rendered with resvg, using the embedded IBM
-  Plex font rather than system fonts. The built-in card is in `assets/cards/`.
-  1 SVG unit = 1 mm.
-- Shots: `ble.rs` asks for missed shots on every connect and drops duplicates by
+- `ble.rs`: a background thread with a tokio runtime owns btleplug. The UI sends
+  `Command`s and receives `Event`s over channels; each event requests a repaint. Keep
+  btleplug calls out of the UI thread.
+- `agent.rs` (Linux): a BlueZ pairing agent on its own D-Bus connection.
+  - The app calls `Device1.Pair` itself, so BlueZ asks this agent.
+  - For the sensor being paired only, the agent hands the request to the UI (a
+    `PasskeyReply` in `Event::PasskeyRequest`). The UI shows a PIN popup and answers it
+    directly, because the BLE loop is busy awaiting `Pair` meanwhile.
+  - Desktops run no agent unless their Bluetooth settings are open.
+  - `Pair` must come **before** connecting: on a link that is already up, BlueZ pairs
+    with the system-wide "no input" capability, so without the passkey (no MITM).
+  - Connecting to a sensor in pairing mode deletes BlueZ's old keys first (stale bonds).
+  - The sensor list shows BlueZ's real pairing state; unpaired sensors can only be paired
+    in pairing mode.
+- `card.rs`: target cards. Each card is an SVG (the picture) plus JSON (the scoring
+  geometry); scoring never looks at the SVG. The cards are rendered with resvg, using the
+  embedded IBM Plex font rather than system fonts. The built-in card is in
+  `assets/cards/` (ISSF 10 m air pistol). 1 SVG unit = 1 mm.
+- **Shots:** `ble.rs` asks for missed shots on every connect and drops duplicates by
   (boot, seq). The app keeps the series in memory. "Clear series" also sends a clear
   request, so the sensor forgets those shots and doesn't resend them after an app restart.
-- `main.rs`: egui UI. While connected, the main window shows the target card with the
-  series' shots (the newest in the UI's only color; clicking one opens a small info popup; zoom with the wheel or the zoom bar (bottom right), drag to pan; the replay bar (bottom left) shows the series again shot by shot; both bars can be hidden in settings; a close-call notice at the top left lists every shot of the series within the close-call margin (0.5 mm by default) of a higher score (`Card::higher`, same rule as scoring) for manual review; zoomed in, a sharp render of just the visible part replaces the stretched card once the view stops moving) and the series list with a shots-per-score chart below it (bars per ring, or points per tenth when decimal; painted by hand in `score_chart`); everything else
-  (dark mode, decimal scoring (off by default: whole rings, X = inner ten), the target card's zoom/replay bars, default replay speed, close-call notice and margin, sensor list and pairing, and one "Sensor settings" panel with name, PIN, heartbeat and disconnect/forget) is in a settings window,
-  an immediate viewport opened from the gear in the status bar. The PIN popup and messages
-  show in the settings window while it's open. The remembered sensor ID and the preferences are
-  saved with eframe's storage.
-  Grayscale styling, IBM Plex Sans embedded from `assets/fonts/`; emoji come from egui's
-  monochrome emoji fonts (`monochrome_emoji_fonts`), not the system's color emoji.
-- App icon: `assets/icon/` (see its README): the PNG is the window icon of every viewport
-  (`with_app_icon` in `main.rs`), `build.rs` embeds the .ico in the Windows .exe, and the
-  release workflow puts the .icns in the macOS bundle. Wayland ignores window icons: it
-  needs `linux/opensights-app.desktop` installed, matching the app id `APP_ID`, which is
-  also the storage name (changing it loses saved settings).
+- `main.rs`: the egui UI.
+  - **The main window, while connected:** the target card with the series' shots, and the
+    series list with a shots-per-score chart below it (bars per ring, or points per tenth
+    when decimal; painted by hand in `score_chart`).
+  - **On the card:**
+    - the newest shot is in the UI's only colour; clicking a shot opens a small info
+      popup;
+    - zoom with the wheel or the zoom bar (bottom right), drag to pan;
+    - the replay bar (bottom left) shows the series again shot by shot; both bars can be
+      hidden in settings;
+    - a close-call notice at the top left lists every shot of the series within the
+      close-call margin (0.5 mm by default) of a higher score, for manual review
+      (`Card::higher`, the same rule as scoring);
+    - zoomed in, a sharp render of just the visible part replaces the stretched card once
+      the view stops moving.
+  - **The settings window** (an immediate viewport, opened from the gear in the status
+    bar) holds everything else:
+    - dark mode;
+    - decimal scoring (off by default: whole rings, X = inner ten);
+    - the card's zoom and replay bars, the default replay speed;
+    - the close-call notice and its margin;
+    - the sensor list and pairing;
+    - one "Sensor settings" panel: name, PIN, heartbeat, disconnect/forget.
+
+    The PIN popup and messages show in the settings window while it's open.
+  - **Storage:** the remembered sensor ID and the preferences are saved with eframe's
+    storage.
+  - **Styling:** grayscale, IBM Plex Sans embedded from `assets/fonts/`. Emoji come from
+    egui's monochrome emoji fonts (`monochrome_emoji_fonts`), not the system's colour
+    emoji.
+- **App icon** (`assets/icon/`, see its README):
+  - the PNG is the window icon of every viewport (`with_app_icon` in `main.rs`);
+  - `build.rs` embeds the .ico in the Windows .exe;
+  - the release workflow puts the .icns in the macOS bundle;
+  - Wayland ignores window icons: it needs `linux/opensights-app.desktop` installed,
+    matching the app ID `APP_ID`. `APP_ID` is also the storage name, so changing it loses
+    saved settings.
+
+## Where each part is heading (summary of the plans)
+
+- **Measurement** (PLAN, MEASUREMENT steps 3–5):
+  - **Layout** (D1/D2): never all mics on one circle, or blasts fit as centre hits. One
+    corner mic slides 40 mm along its edge, plus a bottom-middle mic: 5 mics, so a bad
+    channel can be dropped and blasts stay out.
+  - **Model** (D3): the mic height in the model, k per channel.
+  - **Validity** (step 4): residual, drop-one, loudness, sharpness, curtain, dead time.
+    Every event is logged.
+  - **Ground truth** (D11): scanned cards.
+- **Firmware structure** (D6):
+  - a portable measurement core, tested on the PC with replay of recorded events;
+  - the platform code apart from it;
+  - an uplink interface (BLE, then MQTT);
+  - the shot store in flash;
+  - separate NVS namespaces for settings, calibration and identity.
+- **Calibration** (D5):
+  - the target measures and stores; the fit runs in Rust in the app (a wizard), later in
+    the management UI;
+  - the record has an ID, is copied to the server, and every shot carries it.
+- **Messages** (D7): one message set for BLE and MQTT, adding the raw event and
+  calibration messages (protocol v3).
+- **System** (FUTURE_ARCHITECTURE):
+  - one range is one local system;
+  - targets publish over MQTT to a range server (a Pi or mini PC with Mosquitto and a
+    Rust service on SQLite);
+  - viewers get shots over WebSocket: the egui app built as wasm for phones and kiosk
+    Pis, natively for development;
+  - management in the browser behind an admin login;
+  - signed configuration;
+  - OTA updates with rollback.
