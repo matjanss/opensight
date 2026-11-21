@@ -75,7 +75,7 @@ so a problem shows up in the step that caused it.
 | # | Step | Status |
 |---|---|---|
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
-| 2 | Arrival times | built; 2a-2c pass, 2d (DS18B20) to run; real-board tests wait for the boards |
+| 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
 | 3 | Solver and calibration | planned |
 | 4 | Validity checks | planned |
 | 5 | Protocol and app | planned |
@@ -334,6 +334,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-21 | 2 | 2d without a DS18B20 | **PASS (user report).** `temp` says 18.0 °C assumed; event lines end in "air 18.0 °C (assumed)". With a sensor: when the host board arrives (real-board test 5). Step 2's simulated tests are done. |
 | 2026-11-21 | 2 | 2c retest after the relink fix: double shots at `deadtime 1`, `selftest 1050 200`, `sim random 100` | **All PASS (user report); 2c done.** No second shot lost or partial; the self-test and random shots unchanged by the fix in the capture's main path. |
 | 2026-11-21 | 2 | 2c retest, `span 300`: double shots, `deadtime 30` then `deadtime 1` | `deadtime 30`: **PASS** (20 ignored inside the dead time). `deadtime 1` (1.4 ms in effect): FAIL, 7 MISSED and **13 lost: a capture bug.** The first ring block after a relink was never scanned (its ring neighbour is from before the freeze, so it was skipped), a 200 µs blind spot after every event. Here the relink came ~2.3-2.5 ms after the first edge, so each second shot landed in the spares (MISSED) or in that block (lost). Fixed: that block is scanned against the last spare block's last sample, and a window opened there starts at it (no pre-block, the spare's sample as the state before). A shot found in a spare finished after the relink also gets its dead time. |
 | 2026-11-21 | 2 | 2c retest: double shots, `deadtime 30` then `deadtime 1`, then verbose | `deadtime 30`: **PASS**, 20 of 20 second shots ignored inside the dead time. `deadtime 1`: FAIL (14 MISSED, 5 partial, 1 lost). Verbose showed why: the stored mic span was still 600 mm (step 1 test 8), so the window covered 2.4-2.6 ms and the simulator's lines stayed high 1.62 ms (every line falls at the end of the run, which was as long as the window allowed). (1) A second shot 2.5 ms later sometimes rose inside the first window and was merged in, unreported ("lost"): **the dead time is now never shorter than the window.** (2) A missed shot's lines outlasted the restarted 1 ms dead time, so their falls still opened a partial window: the simulator now ends each run 10 µs after the shot's last rise. Rerun with `span 300`. |
