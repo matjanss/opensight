@@ -104,7 +104,7 @@ bool arrivalCommand(const char* cmd, const char* line) {
         char key[8];
         offsetKey(key, c);
         offsetNs[c] = 0;
-        prefs.remove(key);
+        if (prefs.isKey(key)) prefs.remove(key);   // remove() logs an error for a missing key
       }
     } else {
       int got = sscanf(line, "%*s %d %f", &ch, &v);
