@@ -212,6 +212,8 @@ static void pollSerial() {
     int c = Serial.read();
     if (c == '\r' || c == '\n') {
       if (len) { line[len] = 0; captureCommand(line); len = 0; }
+    } else if (c == '\b' || c == 0x7F) {   // backspace: the terminal shows the corrected line
+      if (len) len--;
     } else if (len < sizeof line - 1) {
       line[len++] = (char)c;
     }

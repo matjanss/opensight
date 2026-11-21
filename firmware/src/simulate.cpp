@@ -85,6 +85,7 @@ static struct {
   uint32_t spacingMs, nextAt, periodTicks, doubleWaitUs;
   uint32_t missedAtStart, missedAtFire;
   bool     pending1, pending2, closed;
+  bool     fired2, second2Event, second2Good;   // double: second shot fired, its event, had t0s
   float    px, py;                 // M_POINT
   uint32_t rawRiseNs[N];           // M_RAW: L rise per channel, ns from the first
   uint32_t rawGapNs;
@@ -95,7 +96,7 @@ static struct {
   Stat     err[N], model[N];       // t0: vs the edges sent, vs the true arrival
   Stat     raw[N][2];              // M_RAW: each line vs CH5 L
   uint32_t noT0[N], extraT0[N], rawMissing[N][2];
-  uint32_t second[4];              // double: measured, MISSED, ignored (dead time), lost
+  uint32_t second[5];              // double: measured, MISSED, ignored (dead time), lost, partial
 } run;
 
 bool simActive() { return run.active; }
@@ -316,8 +317,18 @@ static void recordShot(const EventResult& r, const Arrival& a) {
 void simRecord(const EventResult& r, const Arrival& a) {
   if (!run.active) return;
   if (run.pending1) run.pending1 = false;
-  else if (run.pending2) { run.pending2 = false; run.second[0]++; }
-  else {
+  else if (run.pending2) {
+    // The second shot's event. Without a t0 on any channel it isn't a measurement of the
+    // shot but a window opened in its middle (its start was missed).
+    run.pending2 = false;
+    run.second2Event = true;
+    run.second2Good = (a.valid & (((1 << N) - 1) << F)) != 0;
+    run.seen++;
+    if (run.second2Good) recordShot(r, a);
+    else Serial.println("  sim: an event with no first edges: a window opened in the middle of "
+                        "the second shot");
+    return;
+  } else {
     run.unexpected++;
     Serial.println("  sim: an event with no shot sent");
     return;
@@ -336,9 +347,14 @@ static void closeShot() {
     run.notSeen++;
     Serial.printf("sim: shot %u was not seen\n", (unsigned)run.sent);
   }
-  if (run.pending2) {
+  if (run.fired2) {
     bool missed = captureMissedCount() != run.missedAtFire;
-    if (missed) run.second[1]++;
+    if (run.second2Event && run.second2Good) run.second[0]++;
+    else if (run.second2Event) {
+      run.second[4]++;
+      Serial.printf("sim: the second shot of %u came out as a partial event%s\n",
+                    (unsigned)run.sent, missed ? " after its MISSED" : "");
+    } else if (missed) run.second[1]++;
     else if (run.doubleWaitUs < captureDeadtimeMs() * 1000) run.second[2]++;
     else {
       run.second[3]++;
@@ -347,6 +363,7 @@ static void closeShot() {
     }
   }
   run.pending1 = run.pending2 = false;
+  run.fired2 = run.second2Event = run.second2Good = false;
 }
 
 static double uniform(double lo, double hi) { return lo + (hi - lo) * (esp_random() / 4294967296.0); }
@@ -385,6 +402,7 @@ void simService(uint32_t now) {
     while (esp_timer_get_time() - t0 < run.doubleWaitUs) {}
     if (pulsegenFire() >= LEAD_TICKS * TICK_NS) run.late++;
     run.pending2 = true;
+    run.fired2 = true;
   }
   run.closed = false;
   run.sent++;
@@ -458,10 +476,12 @@ static void finish() {
   }
   if (run.fault == F_DOUBLE) {
     Serial.printf("sim: second shots %u us after the first: %u measured as their own event, %u "
-                  "reported MISSED, %u ignored inside the dead time (%u ms), %u lost\n",
+                  "reported MISSED, %u ignored inside the dead time (%u ms), %u lost, %u partial "
+                  "events (a window opened in the middle of a shot)\n",
                   (unsigned)run.doubleWaitUs, (unsigned)run.second[0], (unsigned)run.second[1],
-                  (unsigned)run.second[2], (unsigned)captureDeadtimeMs(), (unsigned)run.second[3]);
-    if (run.second[3]) pass = false;
+                  (unsigned)run.second[2], (unsigned)captureDeadtimeMs(), (unsigned)run.second[3],
+                  (unsigned)run.second[4]);
+    if (run.second[3] || run.second[4]) pass = false;
   }
   Serial.printf("sim: %s\n", pass ? "PASS" : "FAIL");
 }

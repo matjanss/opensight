@@ -272,6 +272,10 @@ static void measureTask(void*) {
     spare[0].qe.stqe_next = next;
     spare[1].qe.stqe_next = next;
     contigFrom = trigRing + evPost;   // the next ring block follows a gap in time
+    // A shot came while frozen (MISSED) and may still be going on: its remaining edges (lines
+    // still high, ringing) would open a window in its middle, with no first edges in it
+    // (bench, step 2c). It gets a dead time of its own from here, like any shot's ringing.
+    if (missedThisFreeze) quietUntil = blocksDone + deadBlocks;
     evState = EV_IDLE;
     if (xQueueSend(results, &r, 0) != pdTRUE) droppedCount++;
   }

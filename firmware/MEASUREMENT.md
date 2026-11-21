@@ -245,7 +245,8 @@ Bench test, simulated (bare NodeMCU, nothing on CH5-CH8 and GPIO 15), `mask 0`:
   arrival, still PASS against the edges sent. `sim fault missing 8` and `sim fault honly 8`:
   CH8 has no t0, as set. `sim fault double 2500`, `sim at 0 0 20`: with `deadtime 30` all
   ignored inside the dead time; with `deadtime 1`, each second shot measured or `MISSED`,
-  none lost. `sim fault none`, `deadtime 30`.
+  none lost and no partial events (a window opened in the middle of a shot). Then
+  `verbose on`, `sim at 0 0 3`, `verbose off`. `sim fault none`, `deadtime 30`.
 - **2d, temperature.** Without a DS18B20: `temp` says 18.0 °C assumed, the event lines end
   in "air 18.0 °C (assumed)". With one (data on GPIO 14, 4.7 k to 3V3): the reading
   appears within a minute and updates every minute; `stat`'s interrupt load and longest
@@ -325,6 +326,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-21 | 2 | 2c: `sim fault double 2500`, `sim at 0 0 20` (the stored dead time was still 1 ms from step 1's flood test) | **FAIL, two bugs, the capture's main duty held:** all 20 second shots (2.5 ms after the first, while the ring was frozen) were reported `MISSED`, none lost. (1) Capture: in 9 of 20 a junk event followed, all lines already high at its start and no rising edges: the missed shot's remainder opened a window after the unfreeze. Fixed: a freeze that saw a missed shot restarts the dead time when the ring is relinked. Open: those windows started 4.8-4.9 ms after the first edge, while the second shot's lines should have been high only from 2.5 to ~3.7 ms; a verbose rerun shows where the edges really are. (2) Simulator: it counted those as "measured"; now a second shot is measured (with t0s), MISSED, ignored (dead time), lost, or a partial event (FAIL). The first run read `sim at 0 0 20` as 1 shot: a typo corrected with backspace reached the firmware as a backspace character; backspace now edits the line. |
 | 2026-11-21 | 2 | 2c: `sim fault missing 8` and `sim fault honly 8`, `sim at 30 30 20` each | **PASS both.** CH8 had no t0 in all 20 shots, as set (no edges; H without L: t0 needs both, so none from H alone); CH6/CH7 timed as without the fault, every shot seen. Step 4 rejects shots without a t0 on every channel. |
 | 2026-11-21 | 2 | 2c: `sim fault late 7`, `sim at 30 30 20` | **PASS.** CH7 +23998.4 ns against the true arrival in every shot (24 µs less one 25 ns tick), the others within the ticks; against the edges sent all within the limit. CH7, the nearest mic, still came first, 223 µs ahead of CH5 instead of 247: step 4's fit residual must reject such shots. `offset clear` logged a NOT_FOUND error per key never stored (harmless); it now removes only stored keys. |
 | 2026-11-21 | 2 | 2c: `sim offset 6 500`, `sim random 50`; then `offset 6 500`, `sim random 50` | **PASS both.** A 500 ns delay on CH6 alone: CH6 +500.8 ns against the true arrival (others ~0), still PASS against the edges sent. With the firmware's offset set to match: CH6 −0.8 ns, all within the ticks (worst 20-33 ns). The offset setting takes a channel's own delay out exactly. |
