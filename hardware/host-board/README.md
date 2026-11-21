@@ -4,6 +4,50 @@ The host board for the acoustic target: a NodeMCU-32S, 8 sensor connectors, the 
 
 The files are in KiCad 10 format; open them with KiCad 10 or newer. "Update PCB from Schematic" should report no changes.
 
+**Not ordered yet. One change to make first:** J5 takes a BME280 as well as the DS18B20. See [To do before ordering](#to-do-before-ordering-a-bme280-on-j5).
+
+## To do before ordering: a BME280 on J5
+
+**Why:** the speed of sound depends on humidity as well as temperature:
+
+- 0.011 m/s per % RH at 18 °C, and 0.017 at 25 °C;
+- 30 → 60 % RH is about 0.08 mm rms of shot position (0.12 mm at 25 °C);
+- pressure has almost no effect (100 hPa ≈ 0.01 mm).
+
+The DS18B20 can't see humidity. A BME280 (temperature, humidity and pressure, over I2C) can. Its temperature is no more accurate than the DS18B20's (±0.5 °C); humidity is the gain. See `../../PLAN.md` (D8).
+
+**The change:**
+
+1. **J5:** a 4-pin JST XH (B4B-XH-A) instead of the 3-pin. Pins 1–3 stay as they are, so a DS18B20 cable still plugs into pins 1–3.
+
+   | J5 pin | Now (v0.3) | New |
+   |---|---|---|
+   | 1 | GND | GND |
+   | 2 | DQ: GPIO 14 (U2 pin 12) | SDA, or the DS18B20's DQ: GPIO 14 (U2 pin 12) |
+   | 3 | +3V3 (the NodeMCU's 3V3, U2 pin 1) | +3V3 (unchanged) |
+   | 4 | – | SCL: GPIO 15 (U2 pin 35) |
+
+2. **R45, new:** 4.7 k from +3V3 to GPIO 15, the SCL pull-up, next to R43. R43 (4.7 k, +3V3 to GPIO 14) stays: it is the SDA pull-up, and the DS18B20's pull-up.
+3. **GPIO 12 stays unconnected, with no pull-up.** The firmware moves the pulse generator's sync loopback from GPIO 15 to GPIO 12. GPIO 12 is the flash-voltage strapping pin: anything holding it high at boot stops the module from starting.
+4. **Silkscreen:** J5 "BME280 / DS18B20", with pin labels GND, SDA, 3V3, SCL.
+5. **Afterwards:** update the parts list (J5, R45), the GPIO map below, and this section.
+
+**The sensor and its cable:**
+
+- A BME280 breakout (GY-BME280 or similar), run from 3.3 V.
+- Buy carefully: many "BME280" modules are really BMP280s, which have no humidity. The firmware reports the chip ID: 0x60 is a BME280, 0x58 a BMP280.
+- Breakouts usually have the pin order VCC, GND, SCL, SDA, which doesn't match J5 one to one: wire the cable by signal name.
+- Keep the cable short, up to about 50 cm (I2C at 100 kHz). Many breakouts have their own 10 k pull-ups; with R43 and R45 in parallel that's about 3.2 k, which is fine.
+- Mount the sensor in the air between the mics, away from the host board and the IR LEDs, which warm it.
+
+**Firmware:** not changed yet (planned for measurement step 3):
+
+- the sync loopback moves to GPIO 12 (`SYNC_PIN` in `config.h`);
+- `airtemp.cpp` detects which sensor is on J5;
+- the speed of sound gets the humidity term.
+
+Until then a BME280 on J5 is harmless but unread: today's firmware talks 1-Wire on GPIO 14 and reports 18 °C "assumed".
+
 ## Changes from v0.2
 
 - The BAT85 clamp diodes are gone; the ESP32's own input clamps and the 470 Ω series resistors protect the inputs.
@@ -30,7 +74,7 @@ North is the antenna end of the NodeMCU.
 | Middle, north half | The NodeMCU-32S on sockets, antenna at the north edge, USB plug pointing south (the area south of it is kept free for the plug) |
 | West edge | Sensors CH1–CH4 (J11–J14), north to south. Beside each one: scope header J2n and the four channel resistors |
 | East edge | Sensors CH5–CH8 (J15–J18), mirrored |
-| Middle, south of the module | West: LP2950 sensor regulator and J5 DS18B20. East: J6 panel LED and J7 panel button |
+| Middle, south of the module | West: LP2950 sensor regulator and J5 DS18B20 (BME280 too, see above). East: J6 panel LED and J7 panel button |
 | South-west (outlined) | IR receiver on its own AGND copper. J4 photodiodes at the south edge, RV1 = IR threshold. Test loops TP3 AGND, TP4 TIA, TP5 AMP, TP6 VTH |
 | South middle | IR emitter: 4 current-limiter cells, J3 IR LEDs at the south edge |
 | South-east | Power: J1 5 V in and J2 panel switch on the east edge, D1, C1, C2, test loops TP1 (+5V), TP2 (VSENS), TP7 (GND) |
@@ -62,12 +106,17 @@ Connector pinout (every sensor connector the same way round): VA at the south en
 | CH8 L/H | 4 / 16 |
 | IR_IN | 13 |
 | IR_EN | 27 |
-| DQ (DS18B20) | 14 |
+| DQ (DS18B20); SDA with the BME280 change | 14 |
+| Spare now; SCL with the BME280 change | 15 |
 | STAT (blue LED + panel LED) | 2 |
 | BOOT (button) | 0 |
-| Spare, left open | 5, 12, 15 |
+| Spare, left open | 5, 12 |
 
-The firmware's `config.h` still has the v0.2 map: `CAPTURE_LINE_PINS` becomes `39, 36, 35, 34, 33, 32, 26, 25, 22, 23, 19, 21, 17, 18, 4, 16` (L, H per channel) and `IR_EN_PIN` becomes 27. GPIO5 stays free for the capture clock loopback.
+The firmware's `config.h` has this map (`CAPTURE_LINE_PINS`, L then H per channel). It also uses three of the open pins inside the chip, with nothing wired to them on the board:
+
+- GPIO 5: the capture clock loopback;
+- GPIO 15: the pulse generator's sync loopback (GPIO 12 after the BME280 change);
+- GPIO 12: nothing yet.
 
 ## Checks done
 
