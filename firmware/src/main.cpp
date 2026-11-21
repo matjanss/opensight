@@ -2,7 +2,8 @@
 //
 // - BLE peripheral, protocol in protocol/PROTOCOL.md
 // - Heartbeat (millis()) every 2 s
-// - BOOT short press makes a test shot (until there is measuring hardware), BOOT held 2 s
+// - Shots: the solved positions of the capture (capture.cpp, solver.cpp); a BOOT short press
+//   makes a random test shot if that setting is on (serial `testshot on`). BOOT held 2 s
 //   opens a 60 s pairing window, BOOT held 10 s resets the PIN and deletes all bonds
 // - Shots are numbered, buffered and indicated to the app until it confirms them
 // - The onboard LED shows status only: pairing mode, a PIN reset, shots
@@ -37,6 +38,7 @@ static uint32_t sendNext = 1;   // next shot to indicate; lastSeq + 1 when the a
 static uint32_t inFlight = 0;   // the shot being indicated
 static uint32_t retryAt = 0;
 static uint32_t clearedSeq = 0; // shots up to this one were cleared by the app
+static bool     testShots = false;   // BOOT short press makes a test shot (NVS "testshot")
 
 static bool isValidName(const char* s, size_t len) {
   if (len < 1 || len > (size_t)NAME_MAX_LEN) return false;
@@ -89,6 +91,11 @@ static void addShot(int32_t x, int32_t y, uint32_t now) {
   s = {lastSeq, now, x, y};
   shotFlashEnd = now + SHOT_FLASH_MS;
   Serial.printf("Shot %u: x %.2f mm, y %.2f mm\n", (unsigned)lastSeq, x / 100.0, y / 100.0);
+}
+
+// A solved shot from the capture (called from captureService, in loop()).
+static void onSolvedShot(float xMm, float yMm) {
+  addShot(lroundf(xMm * 100.0f), lroundf(yMm * 100.0f), millis());
 }
 
 // A test shot, normally distributed around the centre (Box-Muller).
@@ -162,7 +169,7 @@ static void pollButton(uint32_t now) {
       pressedAt = now;
       longFired = false;
       resetFired = false;
-    } else if (!longFired) {
+    } else if (!longFired && testShots) {
       makeTestShot(now);
     }
   }
@@ -204,14 +211,35 @@ static void handleBleWrites() {
   }
 }
 
-// Serial commands, one per line (see captureCommand).
+// The serial commands of this file; the rest go to captureCommand.
+static void command(const char* line) {
+  char cmd[16] = "", arg[8] = "";
+  sscanf(line, "%15s %7s", cmd, arg);
+  if (!strcmp(cmd, "testshot")) {
+    if (!strcmp(arg, "on") || !strcmp(arg, "off")) {
+      testShots = !strcmp(arg, "on");
+      prefs.putBool("testshot", testShots);
+    } else if (arg[0]) {
+      Serial.println("testshot on|off");
+      return;
+    }
+    Serial.printf("test shots (BOOT short press) %s\n", testShots ? "on" : "off");
+    return;
+  }
+  captureCommand(line);
+  if (!strcmp(cmd, "help"))
+    Serial.printf("  testshot on|off      BOOT short press makes a random test shot (stored; now "
+                  "%s)\n", testShots ? "on" : "off");
+}
+
+// Serial commands, one per line.
 static void pollSerial() {
   static char line[64];
   static size_t len = 0;
   while (Serial.available()) {
     int c = Serial.read();
     if (c == '\r' || c == '\n') {
-      if (len) { line[len] = 0; captureCommand(line); len = 0; }
+      if (len) { line[len] = 0; command(line); len = 0; }
     } else if (c == '\b' || c == 0x7F) {   // backspace: the terminal shows the corrected line
       if (len) len--;
     } else if (len < sizeof line - 1) {
@@ -230,6 +258,7 @@ void setup() {
   bootId = esp_random() | 1;   // never 0, which the app sends when it has no shots yet
   prefs.begin("sensor");
   loadName();
+  testShots = prefs.getBool("testshot", false);
   Serial.printf("\nOpenSights \"%s\", protocol v%d\n", sensorName, PROTOCOL_VERSION);
 
   bleBegin(sensorName, loadPin());
@@ -238,6 +267,7 @@ void setup() {
     prefs.putString("gatt", GATT_BUILD_ID);
     Serial.println("New firmware: told bonded computers to re-read the services");
   }
+  captureOnShot(onSolvedShot);
   captureBegin();   // after BLE: the DMA ring takes 64 KB
   airTempBegin();   // DS18B20, once a minute, on core 0
 }

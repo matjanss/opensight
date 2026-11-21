@@ -34,6 +34,7 @@
 #include "event.h"
 #include "pulsegen.h"
 #include "simulate.h"
+#include "solver.h"
 
 // ---- Sizes derived from config.h ----
 
@@ -315,6 +316,8 @@ static void measureTask(void*) {
 // ---- For the self-test and the simulator ----
 
 bool captureIdle() { return evState == EV_IDLE; }
+uint16_t captureChannelMask() { return channelMask; }
+uint32_t captureSpanMm() { return spanMm; }
 uint32_t captureMissedCount() { return missedCount; }
 uint32_t captureWindowUs() { return coveredUs(postBlocks); }
 uint32_t captureDeadtimeMs() { return deadtimeMs; }
@@ -568,9 +571,9 @@ static void selftestService(uint32_t now) {
 // ---- Output ----
 
 // Free serial buffer needed before printing an event (its line, the already-high lines, the
-// two arrival lines and the simulator's), and before its transition lists (verbose: up to
-// 16 lines).
-static const int PRINT_ROOM = 900;
+// two arrival lines, the position, the calibration line and the simulator's), and before its
+// transition lists (verbose: up to 16 lines).
+static const int PRINT_ROOM = 1200;
 static const int PRINT_ROOM_VERBOSE = 1536;
 static uint32_t verboseSkipped = 0;
 
@@ -665,6 +668,7 @@ bool captureBegin() {
   if (postBlocksFor(spanMm) > POST_MAX) spanMm = CAPTURE_SPAN_MM_DEFAULT;
   postBlocks = postBlocksFor(spanMm);
   arrivalBegin();
+  solverBegin();
 
   pinMode(IR_EN_PIN, OUTPUT);
   digitalWrite(IR_EN_PIN, LOW);
@@ -785,6 +789,9 @@ bool captureBegin() {
   return true;
 }
 
+static void (*shotFn)(float, float) = nullptr;
+void captureOnShot(void (*fn)(float, float)) { shotFn = fn; }
+
 void captureService(uint32_t nowMs) {
   if (!running) return;
   static EventResult r;
@@ -798,7 +805,11 @@ void captureService(uint32_t nowMs) {
     Arrival a;
     arrivalCompute(r, a);
     arrivalPrint(r, a);
-    if (simActive()) simRecord(r, a);
+    Solution s;
+    solverSolve(r, a, s);
+    solverPrint(r, a, s);
+    if (simActive()) simRecord(r, a, s);
+    if (s.solved && s.complete && shotFn) shotFn(s.x, s.y);
   }
   uint32_t missed = missedCount;
   if (missed != missedReported) {
@@ -831,6 +842,7 @@ void captureCommand(const char* line) {
                    "                       20 pairs, 10000 ns)\n"
                    "  temp                 the air temperature (DS18B20)");
     arrivalHelp();
+    solverHelp();
     simHelp();
   } else if (!running) {
     Serial.println("capture is not running (see the start-up messages)");
@@ -875,7 +887,7 @@ void captureCommand(const char* line) {
     selftestStart(a, b, c);
   } else if (!strcmp(cmd, "temp")) {
     airTempPrintStatus();
-  } else if (!arrivalCommand(cmd, line) && !simCommand(cmd, line)) {
+  } else if (!arrivalCommand(cmd, line) && !solverCommand(cmd, line) && !simCommand(cmd, line)) {
     Serial.printf("unknown command '%s', type 'help'\n", cmd);
   }
 }

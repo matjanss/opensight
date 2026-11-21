@@ -17,6 +17,13 @@ void captureService(uint32_t nowMs);
 // One line typed on the serial port (without the line end).
 void captureCommand(const char* line);
 
+// Called from captureService (so from loop()) for every solved event that is a shot
+// (solver.h: solved, every fitted channel in the fit), with its position in mm.
+void captureOnShot(void (*fn)(float xMm, float yMm));
+
+uint16_t captureChannelMask();        // fitted channels now, bit n = CH(n+1)
+uint32_t captureSpanMm();             // the mic span setting
+
 // For the self-test and the simulator (simulate.cpp).
 bool     captureIdle();               // no event being collected or read
 bool     captureSelftestActive();

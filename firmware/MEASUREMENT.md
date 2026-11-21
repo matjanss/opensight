@@ -13,8 +13,9 @@ commit as the code, and every bench test result goes into [Bench results](#bench
   threshold, a few µs later). Lines idle low and go high while SIG is above the threshold.
 - **No IR light curtain** for now; it comes later. IR_IN (GPIO 13) is unused and IR_EN
   (GPIO 27) is held low.
-- Results go out over **serial** (115200) until step 5. The BOOT test shot stays the shot
-  source until step 3 has a solver. No protocol change before step 5.
+- Results go out over **serial** (115200) until step 5. Since step 3 the solved positions
+  are the shot source; the BOOT test shot is a setting (`testshot on`). No protocol change
+  before step 5.
 - Accuracy target after calibration: 0.2–0.5 mm (1σ). Every 1 µs of timing error is about
   0.37 mm, so the firmware must add well under 0.1 µs.
 
@@ -50,33 +51,37 @@ setup uses the same map, so nothing changes when the host board arrives.
 | I2S parallel capture | DMA | Samples the 16 lines at ~10 MHz into a ring of ~64 KB (~3 ms) | 16-bit samples |
 | Activity scan | DMA end-of-block interrupt (IRAM) | ORs each finished block; on activity, marks the event window and freezes the ring around it | Event window |
 | Edge extraction | Measurement task, core 1 | First rising edge per line in the window, plus pulse length | t1 (L), t2 (H) per channel |
-| Arrival times | Measurement task | t0 = t1 − k·(t2 − t1) − offset per channel | t0 per channel |
-| Position solver | Measurement task | Time-difference fit over 4–8 mics, speed of sound from the DS18B20 | x, y in mm, residual |
-| Validity checks | Measurement task | Residual, loudness pattern, edge sharpness, dead time | Shot or reject reason |
+| Arrival times | `loop()` | t0 = t1 − k·(t2 − t1) − offset per channel | t0 per channel |
+| Position solver | `loop()` | Time-difference fit over 4–8 mics, speed of sound from the DS18B20 | x, y in mm, residual |
+| Validity checks | `loop()` | Residual, loudness pattern, edge sharpness, dead time | Shot or reject reason |
 | Shot buffer | `loop()` (existing) | Indicates shots to the app, resends after a link drop | Protocol v2 shot |
 
 Tasks: NimBLE runs on core 0, and so does the DS18B20 housekeeping task (once a minute).
 Arduino's `loop()` runs on core 1; it stays the light
-10 ms loop (button, LED, BLE requests, shot buffer). The measurement task runs on core 1 at
-a higher priority and hands finished shots to `loop()` through a queue. The DMA interrupt
+10 ms loop (button, LED, BLE requests, shot buffer); the arrival times and the solver take
+microseconds per event, so they run there too. The measurement task runs on core 1 at a
+higher priority and hands finished events to `loop()` through a queue. The DMA interrupt
 and the code it calls live in IRAM, because NVS writes (name, PIN) stall the flash cache.
 
 Code: `capture.cpp/.h` (I2S, ring, activity scan, edge extraction, output, commands, the
 self-test), `event.h` (the event result), `pulsegen.cpp/.h` (MCPWM pulse pairs for the
 self-test and the simulator), `arrival.cpp/.h` (t0), `simulate.cpp/.h` (the sensor
-simulator), `airtemp.cpp/.h` (DS18B20), later `solver.cpp/.h`. Pins and timings go in `config.h`; a channel mask says which connectors
-are fitted.
+simulator), `airtemp.cpp/.h` (DS18B20), `tdoa.h` (the solver's arithmetic, no Arduino
+dependencies), `solver.cpp/.h` (positions, mic positions, calibration mode), and on the
+laptop `tools/calibrate.py` (the calibration fit). Pins and timings go in `config.h`; a
+channel mask says which connectors are fitted.
 
 ## Steps
 
-Each step ends with a bench test the user runs. The next step starts only when it passes,
+The decisions behind the next steps (mic layout, model, who calibrates) are in
+`../PLAN.md`. Each step ends with a bench test the user runs. The next step starts only when it passes,
 so a problem shows up in the step that caused it.
 
 | # | Step | Status |
 |---|---|---|
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
-| 3 | Solver and calibration | planned |
+| 3 | Solver and calibration | first try built (simulated tests 3a-3d to run); extended by ../PLAN.md phase 0 (mic height, k per channel, one corner mic slid along its edge, 5 channels, blasts) |
 | 4 | Validity checks | planned |
 | 5 | Protocol and app | planned |
 | 6 | Wi-Fi and MQTT | planned |
@@ -277,16 +282,95 @@ channels, polarity is confirmed, and there are no half-cycle-late trips.
 ### 3. Solver and calibration
 
 Build:
-- TDOA solver: single-precision Gauss–Newton, 3–5 iterations from the first-hit mic,
-  speed of sound from the DS18B20. Output x, y and the fit residual.
-- Calibration mode: prints raw arrival times per spark. The fit of mic positions, offsets
-  and k over 9–16 template points runs on the laptop (a script first, the app in step 5);
-  the firmware stores the results in NVS.
-- Solved shots replace the BOOT test shot as the shot source (the BOOT test shot stays
-  available as a setting).
+- **Solver** (`tdoa.h`, `solver.cpp`): t0_i = T + |p − m_i| / c, fitted by Gauss–Newton
+  over x, y and the emission time T, in single precision: coordinates relative to the
+  mics' centroid, times relative to the event's first edge. Starts halfway between the
+  first-hit mic and the centroid (at a mic the direction is undefined); stops when a step
+  moves the point less than 0.001 mm (3–5 iterations inside the mics, at most 10). Speed
+  of sound 331.3 + 0.606·T m/s from the air temperature. Every fitted channel with a t0
+  goes in, at least 3. Under the arrival lines: `pos x … y … mm, residual … ns rms (n ch,
+  i iter)`, or `pos -:` and why. Checked on the PC on the linear model's edges sampled at
+  100 ns: 0.015 mm rms, 0.044 mm worst inside ±100 mm, at most 4 iterations. A 1 °C error
+  in the air temperature costs 0.15 mm rms (0.24 worst), 10 °C 1.5 mm.
+- **Mic positions**: `mic <ch> <x> <y>` (NVS `"measure"`: `mx1`..`mx8`, `my1`..`my8`),
+  `mic` lists them and checks the largest distance between fitted mics against `span`,
+  `mic default`: the corners of a 210 mm square, CH1/CH5 bottom left, then
+  counter-clockwise. The shot protocol's frame: mm from the card centre, x right, y up as
+  the shooter sees the card.
+- **Shots**: an event with a t0 on every fitted channel and a converged fit becomes a shot
+  (shot buffer, app); `pos … not every channel: not a shot` otherwise. Step 4 adds the
+  other checks. The BOOT test shot: `testshot on|off` (NVS `"sensor"`), off by default
+  (step 1's tests with test shots need `testshot on`).
+- **Calibration mode**: `cal on|off`, `cal point <x> <y>` (the template point the next
+  sparks are made at; turns the mode on). `cal on` prints the firmware's calibration, the
+  fit's starting values:
+  `cal config k=0.33333 CH1=-105.000,-105.000,0.0 …` (per channel x, y, offset); then each
+  event adds `cal evt=12 pt=-50.000,30.000 air=18.06 CH1=1200,1500 CH2=-,- …`: the raw
+  t1,t2 (ns from the first edge; `-` no rise) of every fitted channel, so the fit finds k
+  and the offsets itself, the point (`pt=-` if none; while the simulator runs, its true
+  position) and the air temperature. With a point set, the pos line also shows the error
+  to it, and `cal`, the next `cal point` and `cal off` print that point's mean error,
+  spread and worst.
+- **Fit** (`tools/calibrate.py LOG`, numpy and scipy): per spark j and channel c,
+  t1 − k·(t2 − t1) − offset_c = T_j + |p_j − m_c| / v(air_j), least squares over the mic
+  positions, the offsets (mean 0: a delay common to every channel only moves T_j) and one
+  k. Outliers (a late trip) are found from a robust fit and dropped, then the plain fit.
+  Prints the fit with ±1σ, the position error per point before and after, and the serial
+  commands that store it (`k`, `offset`, `mic`). `--fix-k`, `--fix-mics`, `--fix-offsets`.
+  Checked on synthetic logs (mics moved up to 1 mm, offsets up to 300 ns, one 24 µs late
+  trip; 9 points × 10 sparks, or 200 random points): 0.6 mm rms before, 0.015 mm after,
+  the late trip dropped, mics back to ~0.02 mm. With points inside the mic square the
+  offsets and the mics' radial positions trade off (±50 ns with 9 points) without moving
+  the shots. With sparks all equally loud, k is weakly determined (t2 − t1 then grows with
+  distance like the travel time itself); real sparks vary.
+- **Simulator**: the solved position against the true one, its own verdict after the
+  capture's: `sim: position PASS/FAIL` (limit 0.1 mm), naming where the firmware's
+  calibration differs from the simulated sensors (mics, offsets, k, air temperature). Its
+  air temperature now follows the firmware's (`sim temp auto`; it was a fixed 20 °C).
+  Simulated shots are shots: they go to the app.
 
-Bench test: spark through a template at 9–16 known points, then at other known points.
-Done when: positions are within 0.2–0.5 mm after calibration.
+Bench test, simulated (bare NodeMCU, as step 2: `mask 0`, `span 300`, `deadtime 30`; and
+`mic default`, `offset clear`, `k 0.33333`). Step 2's tests keep their `sim: PASS` line; the
+position line is new (`sim offset 6 500` alone moves shots up to ~0.12 mm: position FAIL,
+"CH6 offset" differs):
+- **3a, solver.** `sim at 60 -30 20`: every shot within a few hundredths of a mm of (60, −30),
+  position PASS.
+  `sim random 500`: position PASS, rms about 0.015 mm, worst about 0.05, none "with every
+  t0 but no position"; `sim: PASS` as before. `sim model sine`, `sim random 100`: still
+  PASS (the curved rise adds ≤ ~30 ns); `sim model linear`.
+- **3b, air temperature.** `sim temp 19`, `sim random 100`: position FAIL, "air
+  temperature" differs, rms about 0.15 mm, worst about 0.25. `sim temp 28`: rms about 1.5
+  mm, worst about 2.3. `sim temp auto`.
+- **3c, shots to the app.** App connected, a fresh series: `sim at 60 -30 5`: 5 shots right
+  of and below the centre. `sim random 200`: 200 more in the series. `sim fault missing 8`,
+  `sim at 30 30 5`: `not every channel: not a shot`, nothing in the app; `sim fault none`.
+  BOOT short press: no shot; `testshot on`: a test shot; `testshot off`.
+- **3d, calibration from simulated sparks.** Make the simulated sensors differ from the
+  firmware's calibration: `sim mic 6 106 -104.5`, `sim mic 7 104.8 105.3`, `sim offset 6
+  300`, `sim offset 8 -150`. `sim random 100`: position FAIL, rms about 0.36 mm, worst
+  about 0.8. Log to a file (`pio device monitor -d firmware --echo --filter log2file`),
+  `cal on`, `sim random 200`, `cal off`, then `python3 firmware/tools/calibrate.py <log>`:
+  residual about 40 ns rms, mics within about 0.05 mm of the simulated ones, offsets about
+  −37/+262/−37/−188 ns (the set ones less their mean), rms about 0.015 mm after. Paste the
+  commands it prints; `sim random 200`: position PASS (the differences it lists are the
+  fit's last few hundredths). Back: `mic default`, `offset clear`, `k 0.33333`, and the EN
+  button (the simulator's settings are in RAM).
+
+Bench test, real (after step 2's real tests):
+1. A template: a sheet with 9–16 marked points spread over the card (a 3 × 3 or 4 × 4 grid
+   to about ±80 mm), its centre on the card centre, mounted where the card goes. The mics'
+   positions measured roughly (±2 mm) and entered with `mic`; `span` at least the
+   largest distance.
+2. Logging to a file, `cal on`. Per point: `cal point <x> <y>`, 10 sparks at the point.
+   `cal off`.
+3. `calibrate.py` on the log: note the residual, the outliers, how far the mics moved,
+   the offsets and k. Paste the commands.
+4. Other known points (not the template's), `cal point` and 10 sparks each: mean error and
+   spread per point.
+5. Point 4 again later, warmer or colder: what the air temperature leaves.
+
+Done when: the simulated tests pass, and real sparks at other known points are within
+0.2–0.5 mm (1σ) after calibration.
 
 ### 4. Validity checks
 
@@ -334,6 +418,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-21 | 3 | Built, not tested yet | Solver (`tdoa.h`, `solver.cpp`), `mic`, calibration mode (`cal`), `tools/calibrate.py`, the simulator's position check, solved shots to the app, `testshot`. Checked on the PC only: the solver on the linear model's sampled edges 0.015 mm rms, 0.044 worst, ≤ 4 iterations; calibrate.py on synthetic logs 0.6 → 0.015 mm rms. Run 3a-3d. |
 | 2026-11-21 | 2 | 2d without a DS18B20 | **PASS (user report).** `temp` says 18.0 °C assumed; event lines end in "air 18.0 °C (assumed)". With a sensor: when the host board arrives (real-board test 5). Step 2's simulated tests are done. |
 | 2026-11-21 | 2 | 2c retest after the relink fix: double shots at `deadtime 1`, `selftest 1050 200`, `sim random 100` | **All PASS (user report); 2c done.** No second shot lost or partial; the self-test and random shots unchanged by the fix in the capture's main path. |
 | 2026-11-21 | 2 | 2c retest, `span 300`: double shots, `deadtime 30` then `deadtime 1` | `deadtime 30`: **PASS** (20 ignored inside the dead time). `deadtime 1` (1.4 ms in effect): FAIL, 7 MISSED and **13 lost: a capture bug.** The first ring block after a relink was never scanned (its ring neighbour is from before the freeze, so it was skipped), a 200 µs blind spot after every event. Here the relink came ~2.3-2.5 ms after the first edge, so each second shot landed in the spares (MISSED) or in that block (lost). Fixed: that block is scanned against the last spare block's last sample, and a window opened there starts at it (no pre-block, the spare's sample as the state before). A shot found in a spare finished after the relink also gets its dead time. |

@@ -76,12 +76,19 @@ const int      SYNC_PIN             = 15;
 const float    ARRIVAL_K_DEFAULT    = 1.0f / 3;
 
 // Simulator: 4 mics on CH5-CH8 (their pins can be outputs; CH1/CH2 are input-only), at
-// the corners of a square around the card, mm from its centre. CH5 bottom left, then
-// counter-clockwise. Those connectors must have no sensor board plugged in while it runs.
+// the default mic positions. Those connectors must have no sensor board plugged in while it
+// runs.
 const int      SIM_FIRST_CHANNEL    = 4;      // CH5, 0-based
 const int      SIM_CHANNELS         = 4;
-const float    SIM_MIC_MM           = 105.0f;
 const float    SIM_CARD_MM          = 100.0f; // random shots land within +-this of the centre
+
+// --- Step 3 (see ../MEASUREMENT.md) ---
+// Default mic positions (a setting: serial `mic`, NVS), mm from the card centre, x right,
+// y up as the shooter sees it: the corners of a 210 mm square, CH1 and CH5 bottom left,
+// then counter-clockwise (CH2/CH6 bottom right, CH3/CH7 top right, CH4/CH8 top left).
+const float    MIC_DEFAULT_MM       = 105.0f;
+inline float micDefaultX(int ch) { return (ch % 4 == 1 || ch % 4 == 2) ? MIC_DEFAULT_MM : -MIC_DEFAULT_MM; }
+inline float micDefaultY(int ch) { return (ch % 4 >= 2) ? MIC_DEFAULT_MM : -MIC_DEFAULT_MM; }
 
 // Air temperature: a DS18B20 on DQ, read through UART2 as a 1-Wire bus (the UART times the
 // slots, so no interrupts are held off), by a task on core 0, once a minute. 4.7 k pull-up
