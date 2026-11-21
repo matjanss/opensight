@@ -1,6 +1,7 @@
 // OpenSights - the air for the speed of sound (measurement steps 2-3): a BME280 (or BMP280)
 // on I2C, or a DS18B20 on 1-Wire, on the host board's J5, read once a minute by a
-// housekeeping task on core 0. See airtemp.cpp.
+// housekeeping task on core 0. With none found within two minutes it stops looking until
+// airScan(). See airtemp.cpp.
 #pragma once
 #include <Arduino.h>
 
@@ -26,6 +27,9 @@ Air air();
 
 // The speed of sound for these values (measure::soundSpeedMs), m/s.
 float airSoundSpeed(float tC, float rh, float hPa);
+
+// Look for a sensor again now (`temp scan`): AIR_PROBE_TRIES more tries, a period apart.
+void airScan();
 
 // "air: ..." lines for `stat` and the `temp` command.
 void airPrintStatus();

@@ -188,7 +188,8 @@ hardware/host-board/          host board, KiCad 10
   - `firmware/tools/calibrate.py`: the fit, with a global k.
 - `airtemp.cpp`: the air sensor on J5, read by a task on core 0 once a minute: a BME280
   or BMP280 on I2C (SDA 14, SCL 15; compensation in `lib/bme280/`), or a DS18B20 on
-  GPIO 14 through UART2 as a 1-Wire bus. Missing values are assumed (18 °C, 50 % RH,
+  GPIO 14 through UART2 as a 1-Wire bus. It looks for one 3 times, a minute apart, then
+  stops until `temp scan`. Missing values are assumed (18 °C, 50 % RH,
   1013.25 hPa, marked "assumed"). The speed of sound (Cramer) is in `lib/measure/air.h`,
   the start of the portable measurement core (step 3b).
 - `main.cpp`: the main loop and the shot buffer.

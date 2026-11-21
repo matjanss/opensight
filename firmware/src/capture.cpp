@@ -829,7 +829,8 @@ void captureCommand(const char* line) {
                    "  selftest [ns] [n] [pulse]  n pulse pairs on CH8 (unplugged!), OUT_H ns\n"
                    "                       after OUT_L, OUT_H pulse ns long (default 1000 ns,\n"
                    "                       20 pairs, 10000 ns)\n"
-                   "  temp                 the air: sensor, temperature, humidity, pressure, speed of sound");
+                   "  temp                 the air: sensor, temperature, humidity, pressure, speed of sound\n"
+                   "  temp scan            look for an air sensor on J5 again (it stops after 2 min)");
     arrivalHelp();
     simHelp();
   } else if (!running) {
@@ -874,7 +875,14 @@ void captureCommand(const char* line) {
     sscanf(line, "%*s %lu %lu %lu", &a, &b, &c);
     selftestStart(a, b, c);
   } else if (!strcmp(cmd, "temp")) {
-    airPrintStatus();
+    char arg[8] = "";
+    sscanf(line, "%*s %7s", arg);
+    if (!strcmp(arg, "scan")) {
+      airScan();
+      Serial.println("air: looking for a sensor on J5 again (`temp` in a few seconds)");
+    } else {
+      airPrintStatus();
+    }
   } else if (!arrivalCommand(cmd, line) && !simCommand(cmd, line)) {
     Serial.printf("unknown command '%s', type 'help'\n", cmd);
   }

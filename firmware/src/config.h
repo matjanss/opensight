@@ -91,6 +91,7 @@ const float    SIM_CARD_MM          = 100.0f; // random shots land within +-this
 const int      AIR_SDA_PIN          = 14;      // also the DS18B20's DQ
 const int      AIR_SCL_PIN          = 15;
 const uint32_t AIR_TEMP_PERIOD_MS   = 60000;
+const uint32_t AIR_PROBE_TRIES      = 3;       // look for a sensor this often, a period apart, then stop
 const uint32_t AIR_TEMP_STALE_MS    = 600000;  // no good reading for this long: use the defaults
 const float    AIR_TEMP_DEFAULT_C   = 18.0f;   // without a reading
 const float    AIR_RH_DEFAULT       = 50.0f;   // % RH, without a BME280

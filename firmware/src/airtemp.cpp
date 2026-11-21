@@ -3,8 +3,9 @@
 // about 0.01 mm, 1 % RH by about 0.003 mm, and the air changes slowly, so a reading a
 // minute is plenty.
 //
-// J5 takes one of two sensors, and the task finds which (at boot, and once a minute while
-// none answers; three failed readings in a row and it looks again):
+// J5 takes one of two sensors, and the task finds which: at boot and then once a minute,
+// AIR_PROBE_TRIES times in all (so for two minutes), then it stops looking until `temp scan`
+// (airScan). Three failed readings in a row and it looks again, the same way:
 //
 // - **BME280 / BMP280** on I2C (SDA AIR_SDA_PIN, SCL AIR_SCL_PIN, address 0x76 or 0x77).
 //   Forced mode, oversampling x1 for each value, no filter (Bosch's "weather monitoring"
@@ -43,6 +44,8 @@ static float     lastT = 0, lastRh = 0, lastHPa = 0;
 static uint32_t  lastAtMs = 0;
 static bool      haveReading = false;
 static uint32_t  reads = 0, fails = 0, probes = 0;
+static uint32_t  probesLeft = AIR_PROBE_TRIES;   // 0 with no sensor: stopped looking
+static TaskHandle_t task = nullptr;
 static uint8_t   lastFail = 0;
 
 enum : uint8_t { FAIL_NONE, FAIL_NO_SENSOR, FAIL_BUS, FAIL_CRC, FAIL_VALUE };
@@ -241,13 +244,14 @@ static void airTask(void*) {
   int failsInRow = 0;
   for (;;) {
     AirSensor s = sensor;
-    if (s == AIR_NONE) {
+    if (s == AIR_NONE && probesLeft > 0) {
       s = bmeProbe();
       if (s == AIR_NONE && dsProbe()) s = AIR_DS18B20;
       if (s == AIR_NONE) useI2C();   // between probes, leave the pins as I2C (idle high)
       portENTER_CRITICAL(&lock);
       sensor = s;
       probes++;
+      probesLeft = s == AIR_NONE ? probesLeft - 1 : AIR_PROBE_TRIES;
       portEXIT_CRITICAL(&lock);
       failsInRow = 0;
     }
@@ -272,15 +276,27 @@ static void airTask(void*) {
       if (failsInRow >= 3) {   // gone, or another sensor plugged in: look again next time
         portENTER_CRITICAL(&lock);
         sensor = AIR_NONE;
+        probesLeft = AIR_PROBE_TRIES;
         portEXIT_CRITICAL(&lock);
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(AIR_TEMP_PERIOD_MS));
+    // Wait a period, or for good once it has stopped looking; `temp scan` wakes it early.
+    const bool stopped = sensor == AIR_NONE && probesLeft == 0;
+    if (ulTaskNotifyTake(pdTRUE, stopped ? portMAX_DELAY : pdMS_TO_TICKS(AIR_TEMP_PERIOD_MS))) {
+      portENTER_CRITICAL(&lock);
+      sensor = AIR_NONE;   // look again from scratch (also finds a sensor swapped for another)
+      probesLeft = AIR_PROBE_TRIES;
+      portEXIT_CRITICAL(&lock);
+    }
   }
 }
 
 void airBegin() {
-  xTaskCreatePinnedToCore(airTask, "air", 3072, nullptr, 1, nullptr, 0);
+  xTaskCreatePinnedToCore(airTask, "air", 3072, nullptr, 1, &task, 0);
+}
+
+void airScan() {
+  if (task) xTaskNotifyGive(task);
 }
 
 float airSoundSpeed(float tC, float rh, float hPa) {
@@ -319,7 +335,7 @@ int airFormat(char* out, size_t size, const Air& a) {
 void airPrintStatus() {
   Air a = air();
   portENTER_CRITICAL(&lock);
-  const uint32_t r = reads, f = fails, pr = probes;
+  const uint32_t r = reads, f = fails, pr = probes, left = probesLeft;
   const uint8_t lf = lastFail;
   const bool have = haveReading;
   const uint8_t addr = bmeAddr;
@@ -327,6 +343,7 @@ void airPrintStatus() {
   if (a.sensor == AIR_NONE) {
     Serial.printf("air: no sensor on J5 (BME280/BMP280 on GPIO %d/%d, DS18B20 on GPIO %d), "
                   "looked %u times", AIR_SDA_PIN, AIR_SCL_PIN, AIR_SDA_PIN, (unsigned)pr);
+    if (left == 0) Serial.print(", stopped looking (`temp scan` to look again)");
     if (have) Serial.printf("; the last reading was %u min ago (%s)", (unsigned)(a.ageS / 60), FAIL_TEXT[lf]);
     Serial.println();
   } else if (a.sensor == AIR_DS18B20) {

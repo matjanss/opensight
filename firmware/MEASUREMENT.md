@@ -84,7 +84,7 @@ so a problem shows up in the step that caused it.
 |---|---|---|
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
-| 3 | Solver and calibration | in progress on `step3-solver`: 3a-1 and 3a-2 pass; 3a-3/3a-4 (DS18B20, BME280) later, with the parts; 3b passes (PC); 3c-3e planned (a first try is archived as the tag `archive/step3-first-try`) |
+| 3 | Solver and calibration | in progress on `step3-solver`: 3a-1 and 3a-2 pass; 3a-5 (the search stops) to run; 3a-3/3a-4 (DS18B20, BME280) later, with the parts; 3b passes (PC); 3c-3e planned (a first try is archived as the tag `archive/step3-first-try`) |
 | 4 | Validity checks | planned |
 | 5 | Protocol and app | planned |
 | 6 | Wi-Fi and MQTT | planned |
@@ -299,13 +299,18 @@ Build:
 - **The sync loopback moves from GPIO 15 to GPIO 12** (`SYNC_PIN`), because GPIO 15
   becomes the BME280's SCL. GPIO 12 is a strapping pin (flash voltage): nothing may pull
   it up at boot, and the firmware only drives it after boot, inside the chip.
-- **J5 takes either sensor** (`airtemp.cpp`). At boot, and once a minute while none
-  answers, the task looks for:
+- **J5 takes either sensor** (`airtemp.cpp`). At boot, then once a minute, 3 times in all
+  (`AIR_PROBE_TRIES`), the task looks for:
   - a BME280 on I2C (SDA 14, SCL 15, address 0x76 or 0x77, chip ID 0x60): temperature,
     humidity and pressure, in forced mode once a minute, compensated with the datasheet's
     integer formulas;
   - a BMP280 (chip ID 0x58): temperature and pressure, humidity assumed;
   - a DS18B20 on GPIO 14 (1-Wire through UART2, as in step 2): temperature only.
+
+  With none found after the third try (2 minutes after boot) it stops looking, and `temp`
+  says so; `temp scan` looks again, 3 more tries. A sensor that fails 3 readings in a row
+  counts as gone, and the search starts again the same way. So plug a sensor in before
+  boot, or type `temp scan` after plugging it in.
 
   Missing values are assumed: 18 °C, 50 % RH, 1013.25 hPa, each marked "(assumed)". A
   reading older than 10 minutes counts as missing. The BME280's readings are checked for
@@ -330,10 +335,14 @@ Bench test, bare NodeMCU, nothing on GPIO 12, `mask 0`:
 - **3a-2, the sync pin.** Step 2a again: `selftest`, `selftest 1050 200`, `selftest 0`,
   `selftest 100000`, then `sim raw 0 0 0 0 200` and
   `sim raw 0 100000 200000 300000 100 1500`. PASS as before, 0 late starts.
-- **3a-3, a DS18B20** (data on GPIO 14, 4.7 k to 3V3): found within a minute, T measured,
+- **3a-5, it stops looking.** No sensor, 3 minutes after boot: `temp` says "looked 3
+  times, stopped looking", and the count stays at 3 a minute later. `temp scan`: the count
+  goes to 4 at once, 6 two minutes later, then stays.
+- **3a-3, a DS18B20** (data on GPIO 14, 4.7 k to 3V3; plugged in before boot, or
+  `temp scan` after): found within a minute, T measured,
   RH and p still assumed.
 - **3a-4, a BME280 breakout** (SDA 14, SCL 15, 3V3, GND; most breakouts have their own
-  pull-ups): found within a minute as a BME280 at 0x76 or 0x77. T within about 1 °C of a
+  pull-ups; before boot, or `temp scan`): found within a minute as a BME280 at 0x76 or 0x77. T within about 1 °C of a
   room thermometer; RH plausible indoors (30-60 %), and up by several % within a minute of
   breathing on it; p within a few hPa of the local weather station's pressure at your
   altitude (not the sea-level QNH). c matches the reference table for those values. With
@@ -542,6 +551,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-21 | 3a | Built: the search stops | At the user's request, the air task no longer looks for a sensor once a minute for ever: 3 tries (boot, 1 and 2 min), then it stops until `temp scan`. Run 3a-5. |
 | 2026-11-21 | 3a | 3a-1 recheck: `sim at 0 0 1`, `temp`, no sensor | **PASS (user report).** The run's first line now gives the firmware's air (18.0 °C, 342.74 m/s), the same as the event lines; `temp` says no sensor on J5 and the assumed values. 3a-1 done. |
 | 2026-11-21 | 3a | 3a-2, the sync pin on GPIO 12: bare NodeMCU, `mask 0`, `span 300`, `deadtime 30` | **PASS (user report).** All four self-tests and both `sim raw` runs pass, 0 late starts. `selftest 1050 200`: 200 of 200 pairs, 95 × 1000 ns and 105 × 1100 ns (52 % at 1100), mean 1052.5 ns (rounding alone ±3.5 ns); L by quarter of its DMA block 43/41/52/64; L and H in different blocks 4 times (about 1.1 expected; split pairs were measured right). `sim raw 0 100000 200000 300000 100 1500`: every line at its set time (+0 ns vs set), t0 differences exactly +100000/+200000/+300000 ns, CH8 (unit 1) not a sample off. A mistyped `sim raw 100000 200000 300000 0` was +0 on every line too. The sync loopback works on GPIO 12. The printed t0 of −499.9 ns for a 1500 ns gap shows a stored k of 0.3333, not the default 1/3 (harmless; k moves to the calibration in 3c). |
 | 2026-11-21 | 3b | PC: `pio test -e native`, 9 tests | **PASS.** Speed of sound: 160 cases, within 5e-7 m/s of `model.py`. BMP280 datasheet example exact. Noise-free 5 mm grid, h 10.5 and 21.5 mm, D1/D2 layout: 3362 points within 0.00008 mm, at most 6 iterations, never the second start. 50 ns noise per channel, 4000 shots at each of 5 points: the rms error matches the reported σ within 2 % (0.010 mm in the centre, 0.019 mm at (80, 80)), bias under 0.0003 mm. Vectors: 310 fits and 100 drop-one cases agree with Python to 0.00006 mm (residuals 0.26 ns, τ 0.11 ns, σ 0.005 %); every late or early channel found; all 60 outside points converged to the truth; none of 60 blasts scored. 0.35 µs per solve on this PC. **Found on the way:** the final tiny step was dropped when the cost didn't fall (float can't resolve it at the minimum), leaving up to 0.0008 mm; the step is now always taken. |
