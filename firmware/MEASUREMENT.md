@@ -40,7 +40,7 @@ bench-tested on the v0.2 map; v0.3 moves every line, see Bench results.)
 | CH8 | 4 | 16 |
 
 Other: IR_IN 13, IR_EN 27, DQ 14 (DS18B20, 4.7 k pull-up), STAT 2 (blue LED + panel LED),
-BOOT 0. Spare: 5 (the capture clock loopback), 12, 15. Empty connectors are held low by 100 k pull-downs. A breadboard
+BOOT 0. Spare: 5 (the capture clock loopback), 12, 15 (the pulse generator's sync loopback). Empty connectors are held low by 100 k pull-downs. A breadboard
 setup uses the same map, so nothing changes when the host board arrives.
 
 ## Pipeline
@@ -55,13 +55,16 @@ setup uses the same map, so nothing changes when the host board arrives.
 | Validity checks | Measurement task | Residual, loudness pattern, edge sharpness, dead time | Shot or reject reason |
 | Shot buffer | `loop()` (existing) | Indicates shots to the app, resends after a link drop | Protocol v2 shot |
 
-Tasks: NimBLE runs on core 0. Arduino's `loop()` also runs on core 1; it stays the light
+Tasks: NimBLE runs on core 0, and so does the DS18B20 housekeeping task (once a minute).
+Arduino's `loop()` runs on core 1; it stays the light
 10 ms loop (button, LED, BLE requests, shot buffer). The measurement task runs on core 1 at
 a higher priority and hands finished shots to `loop()` through a queue. The DMA interrupt
 and the code it calls live in IRAM, because NVS writes (name, PIN) stall the flash cache.
 
-Code: a new `capture.cpp/.h` (I2S, ring, activity scan, edge extraction), later
-`solver.cpp/.h`. Pins and timings go in `config.h`; a channel mask says which connectors
+Code: `capture.cpp/.h` (I2S, ring, activity scan, edge extraction, output, commands, the
+self-test), `event.h` (the event result), `pulsegen.cpp/.h` (MCPWM pulse pairs for the
+self-test and the simulator), `arrival.cpp/.h` (t0), `simulate.cpp/.h` (the sensor
+simulator), `airtemp.cpp/.h` (DS18B20), later `solver.cpp/.h`. Pins and timings go in `config.h`; a channel mask says which connectors
 are fitted.
 
 ## Steps
@@ -72,7 +75,7 @@ so a problem shows up in the step that caused it.
 | # | Step | Status |
 |---|---|---|
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
-| 2 | Arrival times | planned |
+| 2 | Arrival times | built; simulated bench tests 2a-2d to run; real-board tests wait for the boards |
 | 3 | Solver and calibration | planned |
 | 4 | Validity checks | planned |
 | 5 | Protocol and app | planned |
@@ -178,14 +181,77 @@ so three channels with both lines), and revisit the design for 4+ channels.
 
 ### 2. Arrival times
 
-Build:
-- t0 = t1 − k·(t2 − t1) − offset per channel; k and offset as settings (k = 1/3, offset
-  0 to start), stored in NVS under their own keys so firmware updates keep them.
-- The dump adds t2 − t1, t0, and the t0 differences to the first channel.
-- Read the DS18B20 every few seconds and print the temperature with each event (the solver
-  needs it in step 3).
+Until the sensor boards arrive, a simulator stands in for them: shots at known positions,
+made as hardware-timed edges on CH5-CH8's own pins and captured like real ones. It checks
+everything from the pins on (capture, t0, later the solver) against the truth; it can't
+check the analog side (mics, preamp, thresholds, polarity, noise). The real-board tests
+below stay.
 
-Bench test (sensor boards and host board):
+Build:
+- **t0 = t1 − k·(t2 − t1) − offset** per channel (`arrival.cpp`). For a signal rising in a
+  straight line both comparators trip late by an amount that grows as the rise gets
+  slower; k = VL / (VH − VL) takes it out (k = 1/3 for VH = 4·VL). Serial `k <value>` and
+  `offset <ch> <ns>` (`offset` lists, `offset clear`), stored in NVS (`"measure"`: `k`,
+  `off1`..`off8`), so firmware updates keep them.
+- Under each event line: t0 and t2 − t1 per channel, then the t0 differences to the first
+  channel that has one, and the air temperature (not for self-test events).
+- **Pulse generator** (`pulsegen.cpp`), for the self-test and the simulator: one MCPWM
+  operator per channel, its two comparators set when L and H rise, both fall at the end of
+  the run. Channels 0-2 on MCPWM unit 0 (one timer: exact against each other), 3-5 on unit 1.
+  Both timers take their count from edges on GPIO 15 (looped back inside the chip): a sync
+  edge sets both stopped counts to 0, both timers are started, a second edge sets both to 0
+  again at the same moment. All from IRAM with interrupts off, by register (the driver's
+  start runs from flash); the rises come ≥ 20 µs later, and every run that took longer to
+  start is counted as a late start. The self-test now runs on it (1 channel).
+- **Simulator** (`simulate.cpp`, `sim ...`): 4 mics on CH5-CH8 (GPIO 22/23, 19/21, 17/18,
+  4/16; CH1/CH2 are input-only) at the corners of a 210 mm square, a speed of sound from a
+  simulated temperature (20 °C), and a trip model: the pulse rises like A·sin(πt/2T)
+  (`sim model sine`) or its straight start (`linear`, default), T = 12 µs, OUT_L trips at 1
+  and OUT_H at 4, A = amp·100 mm / distance (`sim amp`, default 40). 25 ns ticks; each shot
+  at a random point in a sample and a DMA block. Per shot it prints t0's error against
+  t0 from the edges it sent (only the 100 ns sampling between them: within ±(1 + 2k)
+  samples + one tick, about 56 ns rms) and against the true arrival (the t0 model); the
+  summary has mean, rms and worst per channel and PASS/FAIL.
+  `sim at <x> <y> [n]`, `sim random [n]`, `sim raw <a> <b> <c> <d> [n] [gap]` (fixed edges,
+  to check the generator), `sim fault late|missing|honly <ch>` (+24 µs on a channel, a
+  channel with no edges, H without L), `sim fault double <us>` (a second shot: measured,
+  `MISSED`, or ignored inside the dead time, never silently lost), `sim offset <ch> <ns>`
+  (a channel's own delay), `sim mic`, `sim temp`, `sim stop`. CH5-CH8 must have no sensor
+  boards plugged in while it runs.
+- **Air temperature** (`airtemp.cpp`): a DS18B20 on GPIO 14, read by a task on core 0 once
+  a minute through UART2 as a 1-Wire bus (the UART times the slots, no interrupts held off).
+  Checked by CRC, the configuration byte's fixed bits, the 85 °C power-on value and a
+  −20..60 °C range. No sensor, or no good reading for 10 minutes: 18 °C, marked
+  "(assumed)". 0.1 °C is about 0.01 mm, so once a minute is plenty. `temp` and `stat` show
+  it.
+
+Bench test, simulated (bare NodeMCU, nothing on CH5-CH8 and GPIO 15), `mask 0`:
+- **2a, generator.** Step 1 test 3 again (`selftest`, `selftest 1050 200`, `selftest 0`,
+  `selftest 100000`): PASS as before, now on the new generator, 0 late starts. Then
+  `sim raw 0 0 0 0 200`: every line within a sample of CH5 L. CH6 and CH7 share CH5's
+  timer: mean about 0. A mean on CH8 alone is an offset between the two MCPWM units (fine up
+  to a tick, 25 ns). Then `sim raw 0 100000 200000 300000 100 1500`: the same, at
+  different times.
+- **2b, t0.** `sim at 0 0 100` and `sim at 60 -30 100`: every t0 error within the limit,
+  rms about 56 ns, mean about 0, and 0 ± a tick against the true arrival (linear model,
+  k = 1/3). Then `k 0.25`, `sim at 60 -30 50`: still PASS against the edges sent, but
+  against the true arrival a clear error that grows with distance (the wrong k). `k 0.3333`
+  back. `sim model sine`, `sim random 100`: what the straight-line formula leaves on a
+  curved rise (note it in Bench results); `sim model linear` back.
+- **2c, random shots and faults.** `sim random 500` with the app connected and a rename or
+  two during it: PASS. `sim offset 6 500` then `sim random 50`: CH6 about +500 ns against
+  the true arrival; `offset 6 500` (the firmware's): back to about 0; then `offset clear`,
+  `sim offset 6 0`. `sim fault late 7`, `sim at 30 30 20`: CH7 +24000 ns against the true
+  arrival, still PASS against the edges sent. `sim fault missing 8` and `sim fault honly 8`:
+  CH8 has no t0, as set. `sim fault double 2500`, `sim at 0 0 20`: with `deadtime 30` all
+  ignored inside the dead time; with `deadtime 1`, each second shot measured or `MISSED`,
+  none lost. `sim fault none`, `deadtime 30`.
+- **2d, temperature.** Without a DS18B20: `temp` says 18.0 °C assumed, the event lines end
+  in "air 18.0 °C (assumed)". With one (data on GPIO 14, 4.7 k to 3V3): the reading
+  appears within a minute and updates every minute; `stat`'s interrupt load and longest
+  interrupt unchanged; the app stays connected through 10 minutes.
+
+Bench test, real (sensor boards and host board):
 1. Per board, the initial calibration from the project doc (VMID, gain, thresholds).
 2. Piezo-lighter spark or snapped pencil lead near one mic: OUT_L before OUT_H, and the
    verbose dump matches the scope on SIG and OUT_L/OUT_H.
@@ -193,9 +259,11 @@ Bench test (sensor boards and host board):
    on one channel.
 4. Spark at the centre of the mounted frame, 20 times: the four t0 agree within a few
    hundred ns after per-channel offsets.
+5. The DS18B20 on the host board against a thermometer next to the mics, in the closed
+   target: the board may read warm (IR LEDs, regulator).
 
-Done when: centre sparks give consistent t0 on all four channels, polarity is confirmed,
-and there are no half-cycle-late trips.
+Done when: the simulated tests pass, centre sparks give consistent t0 on all four
+channels, polarity is confirmed, and there are no half-cycle-late trips.
 
 ### 3. Solver and calibration
 
@@ -244,6 +312,10 @@ FUTURE_ARCHITECTURE.md step 2. Check the GPIO 36/39 erratum here (see Risks).
   self-test shows wrong or repeated windows; fallback: stop and restart the DMA.
 - **GPIO 36/39 (CH1):** ESP32 erratum: spurious pulses on these pins while Wi-Fi or ADC1
   is active. Not an issue with BLE only; check again in step 6.
+- **The two MCPWM units starting together:** both take their count from one edge on
+  GPIO 15, but their prescalers may not line up: up to a tick (25 ns) between CH5-CH7 and
+  CH8. Settled by test 2a; if it is more, or not stable, the simulator corrects for a
+  fixed offset or drops to 3 channels.
 - **Edge shape, mic polarity, half-cycle-late trips, range noise:** can't be settled on
   paper; all show up in the step 2 dump.
 
@@ -253,6 +325,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-21 | 2 | Built, not tested yet | t0 and its settings, the pulse generator (self-test moved onto it), the simulator on CH5-CH8, the DS18B20 task. Run 2a-2d in order; 2a also re-checks the self-test on the new generator. |
 | 2026-11-21 | 1 | Host board v0.3 map (no test yet) | The pins moved: every channel's L and H, IR_EN 16 → 27, DQ 17 → 14 (`config.h`). CH8, and so the self-test, is now on GPIO 4 (L) and 16 (H); the self-test pins follow the map. Nothing else in the capture depends on which GPIO a line is on. Retest: test 3 (self-test on the new pins), test 14 (every line, jumper from GPIO 4), and test 15 once. |
 | 2026-11-20 | 1 | Extra and break-it tests after the boundary, summary and serial fixes | All pass (user report). Pin map of CH1/CH2 (GPIO 36, 39, 34, 35) confirmed with jumpers from GPIO 19, so all 16 lines are now checked except CH5-CH7, which go through the same routing. Flood with a finger on CH1, `deadtime 1`, `verbose on`: test shots and heartbeat reach the app, commands work. Step 1 closed; step 2 waits for the sensor boards. |
 | 2026-11-20 | 1 | Break-it: `mask 03` floating, then CH1 jumpered, then a finger on CH1 with `verbose on`, app connected | Floating inputs alone stay quiet (no events). Jumper GPIO 19 → CH1: CH1 had edges with CH8, PASS (other lines are a note, not a failure). Finger: a stream of events, heartbeat kept coming, **test shots didn't**: `loop()` printed every queued event and blocked on the UART once the 2 KB buffer was full, so the button was sampled too rarely to see a short press. Events are now printed only while they fit in the serial buffer (the rest wait in the queue, or count as not printed), transitions only with room to spare. Retest 15. |

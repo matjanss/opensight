@@ -14,6 +14,7 @@
 #include "config.h"
 #include "protocol.h"
 #include "ble_link.h"
+#include "airtemp.h"
 #include "capture.h"
 
 static Preferences prefs;
@@ -236,6 +237,7 @@ void setup() {
     Serial.println("New firmware: told bonded computers to re-read the services");
   }
   captureBegin();   // after BLE: the DMA ring takes 64 KB
+  airTempBegin();   // DS18B20, once a minute, on core 0
 }
 
 void loop() {

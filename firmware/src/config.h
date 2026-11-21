@@ -65,3 +65,28 @@ const uint32_t CAPTURE_DEADTIME_DEFAULT = 30;     // ms after an event with no n
 constexpr int  SELFTEST_PIN_L       = CAPTURE_LINE_PINS[14];   // CH8 OUT_L, GPIO 4
 constexpr int  SELFTEST_PIN_H       = CAPTURE_LINE_PINS[15];   // CH8 OUT_H, GPIO 16
 const uint32_t SELFTEST_PULSE_US    = 10;   // OUT_L pulse length; OUT_H ends with it
+
+// The pulse generator (self-test and simulator) starts its MCPWM units from an edge on this
+// pin, driven and read back inside the chip: leave it unconnected (spare on the host
+// board). A strapping pin, but only driven after boot.
+const int      SYNC_PIN             = 15;
+
+// --- Step 2 (see ../MEASUREMENT.md) ---
+// Arrival time t0 = t1 - k (t2 - t1) - offset; k and the offsets are settings (NVS).
+const float    ARRIVAL_K_DEFAULT    = 1.0f / 3;
+
+// Simulator: 4 mics on CH5-CH8 (their pins can be outputs; CH1/CH2 are input-only), at
+// the corners of a square around the card, mm from its centre. CH5 bottom left, then
+// counter-clockwise. Those connectors must have no sensor board plugged in while it runs.
+const int      SIM_FIRST_CHANNEL    = 4;      // CH5, 0-based
+const int      SIM_CHANNELS         = 4;
+const float    SIM_MIC_MM           = 105.0f;
+const float    SIM_CARD_MM          = 100.0f; // random shots land within +-this of the centre
+
+// Air temperature: a DS18B20 on DQ, read through UART2 as a 1-Wire bus (the UART times the
+// slots, so no interrupts are held off), by a task on core 0, once a minute. 4.7 k pull-up
+// to 3V3 on the host board.
+const int      DQ_PIN               = 14;
+const uint32_t AIR_TEMP_PERIOD_MS   = 60000;
+const uint32_t AIR_TEMP_STALE_MS    = 600000;  // no good reading for this long: use the default
+const float    AIR_TEMP_DEFAULT_C   = 18.0f;   // without a sensor

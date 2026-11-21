@@ -30,9 +30,15 @@ app could misread new firmware or the reverse.
   (register level: IDF 5 has no driver for it); an IRAM interrupt scans each finished
   block and freezes the ring around an event (spare DMA blocks), a task on core 1 extracts
   the edges, and `loop()` prints them. The window length follows from the mic span. Serial
-  commands (`help`) set the channel mask, dead time and mic span and run the self-test:
-  MCPWM drives a pulse pair with a hardware-timed gap out on CH8's pins (a CPU-driven
-  generator is not exact under BLE load).
+  commands (`help`) set the channel mask, dead time and mic span and run the self-test
+  (a pulse pair on CH8's pins). `event.h` holds the event result the other modules read.
+- `pulsegen.cpp`: hardware-timed pulse pairs (MCPWM, one operator per channel, both units
+  started from edges on GPIO 15, by register from IRAM) for the self-test and the
+  simulator; a CPU-driven generator is not exact under BLE load.
+- `arrival.cpp`: t0 = t1 − k·(t2 − t1) − offset per channel; `k` and `offset` in NVS.
+  `simulate.cpp` (`sim ...`): simulated shots at known positions on CH5-CH8, checked
+  against the truth, until the sensor boards arrive. `airtemp.cpp`: DS18B20 on GPIO 14
+  through UART2 as a 1-Wire bus, a task on core 0 once a minute; 18 °C without a sensor.
 - `main.cpp`: button (short press = test shot, 2 s hold = pairing mode, 10 s hold = PIN
   reset), heartbeat, name and PIN in NVS (namespace `"sensor"`), the status LED (pairing blink, PIN reset, shot flash; the app can't switch it), and the shot
   buffer: the last 64 shots, indicated one at a time until the app confirms each
