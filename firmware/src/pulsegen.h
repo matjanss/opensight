@@ -14,6 +14,10 @@ bool pulsegenCreate(int nCh, const int pins[][2], uint32_t hz, uint32_t periodTi
 // (1 .. periodTicks - 2). A line that is off stays low.
 bool pulsegenSet(int ch, uint32_t riseL, uint32_t riseH, bool onL = true, bool onH = true);
 
+// A new run length (at most the one pulsegenCreate was given), for the next runs. Call it
+// before pulsegenSet when the rises move earlier.
+bool pulsegenSetPeriod(uint32_t periodTicks);
+
 // One run. Returns how long the start took in ns (start of the first timer to the sync
 // edge that lines both units up); a rise earlier than that would have come too soon.
 uint32_t pulsegenFire();

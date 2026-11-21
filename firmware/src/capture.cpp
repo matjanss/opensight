@@ -177,7 +177,9 @@ static void IRAM_ATTR captureIsr(void*) {
       trigTime = t;
       evPost = post;
       endDesc = end;
-      quietUntil = t + deadBlocks;
+      // Anything inside the window belongs to this event, so the dead time is never shorter
+      // than the window (a second shot inside it would be merged in, unreported).
+      quietUntil = t + (deadBlocks > post ? deadBlocks : post);
       missedThisFreeze = false;
       evState = EV_COLLECTING;
     }
@@ -287,6 +289,10 @@ bool captureIdle() { return evState == EV_IDLE; }
 uint32_t captureMissedCount() { return missedCount; }
 uint32_t captureWindowUs() { return coveredUs(postBlocks); }
 uint32_t captureDeadtimeMs() { return deadtimeMs; }
+uint32_t captureDeadUs() {
+  uint32_t windowUs = postBlocks * BLOCK_US;   // from the trigger block's start
+  return deadtimeMs * 1000 > windowUs ? deadtimeMs * 1000 : windowUs;
+}
 
 void captureTestChannels(uint16_t channels) {
   savedMask = channelMask;
@@ -608,8 +614,9 @@ static void printStatus() {
                 "with nothing floating)\n", (unsigned)startHighCount);
   Serial.printf("capture: ring frozen %.1f ms in all, longest %.1f ms\n",
                 spareBlocks * BLOCK_US / 1000.0, frozenMax * BLOCK_US / 1000.0);
-  Serial.printf("capture: channel mask %02X, dead time %u ms, mic span %u mm (window covers "
+  Serial.printf("capture: channel mask %02X, dead time %u ms (in effect %.1f), mic span %u mm (window covers "
                 "%u us after the first edge), verbose %s\n", channelMask, (unsigned)deadtimeMs,
+                captureDeadUs() / 1000.0,
                 (unsigned)spanMm, (unsigned)coveredUs(postBlocks), verbose ? "on" : "off");
   airTempPrintStatus();
   Serial.printf("memory: %u bytes free, %u DMA-capable, largest DMA block %u\n",
@@ -812,7 +819,11 @@ void captureCommand(const char* line) {
     deadtimeMs = a;
     deadBlocks = deadtimeMs * 1000 / BLOCK_US;
     prefs.putUInt("deadtime", deadtimeMs);
-    Serial.printf("dead time %u ms\n", (unsigned)deadtimeMs);
+    Serial.printf("dead time %u ms", (unsigned)deadtimeMs);
+    if (captureDeadUs() > deadtimeMs * 1000)
+      Serial.printf(" (the event window makes it %.1f ms: a dead time is never shorter than the "
+                    "window)", captureDeadUs() / 1000.0);
+    Serial.println();
   } else if (!strcmp(cmd, "span")) {
     if (n < 2 || sscanf(arg, "%lu", &a) != 1 || a < 50 || postBlocksFor(a) > POST_MAX) {
       uint32_t max = 50;

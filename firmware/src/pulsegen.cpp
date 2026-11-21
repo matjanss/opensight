@@ -30,7 +30,7 @@ static_assert(SYNC_PIN < 32, "pulsegenFire drives SYNC_PIN through GPIO_OUT_W1TS
 static const int GROUPS = 2, OPS_PER_GROUP = 3;
 
 static int      nChannels = 0, nGroups = 0;
-static uint32_t genHz = 0, genPeriod = 0;
+static uint32_t genHz = 0, genPeriod = 0, maxPeriod = 0;
 static mcpwm_timer_handle_t timer[GROUPS] = {};
 static mcpwm_sync_handle_t  syncSrc[GROUPS] = {};
 static bool                 phaseSet[GROUPS] = {};
@@ -106,7 +106,7 @@ bool pulsegenCreate(int nCh, const int pins[][2], uint32_t hz, uint32_t periodTi
   nChannels = nCh;
   nGroups = (nCh + OPS_PER_GROUP - 1) / OPS_PER_GROUP;
   genHz = hz;
-  genPeriod = periodTicks;
+  genPeriod = maxPeriod = periodTicks;
 
   // The sync pin: low before anything listens to it.
   gpio_reset_pin((gpio_num_t)SYNC_PIN);
@@ -180,6 +180,14 @@ bool pulsegenCreate(int nCh, const int pins[][2], uint32_t hz, uint32_t periodTi
     }
   }
   fireGroups = nGroups;
+  return true;
+}
+
+bool pulsegenSetPeriod(uint32_t periodTicks) {
+  if (!nGroups || periodTicks < 4 || periodTicks > maxPeriod) return false;
+  for (int g = 0; g < nGroups; g++)
+    if (mcpwm_timer_set_period(timer[g], periodTicks) != ESP_OK) return false;   // takes effect at once
+  genPeriod = periodTicks;
   return true;
 }
 

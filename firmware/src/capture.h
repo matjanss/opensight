@@ -22,7 +22,8 @@ bool     captureIdle();               // no event being collected or read
 bool     captureSelftestActive();
 uint32_t captureMissedCount();        // activity in the frozen ring after the dead time
 uint32_t captureWindowUs();           // the event window covers this long after the first edge
-uint32_t captureDeadtimeMs();
+uint32_t captureDeadtimeMs();         // the setting
+uint32_t captureDeadUs();             // in effect: at least the event window
 void     captureTestChannels(uint16_t channels);   // add channels (bit n = CH(n+1)), not stored
 void     captureEndTestChannels();                 // back to the stored mask
 void     captureLinesToInputs(uint16_t lines);     // pins back to plain inputs into the I2S

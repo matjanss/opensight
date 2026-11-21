@@ -355,7 +355,7 @@ static void closeShot() {
       Serial.printf("sim: the second shot of %u came out as a partial event%s\n",
                     (unsigned)run.sent, missed ? " after its MISSED" : "");
     } else if (missed) run.second[1]++;
-    else if (run.doubleWaitUs < captureDeadtimeMs() * 1000) run.second[2]++;
+    else if (run.doubleWaitUs < captureDeadUs()) run.second[2]++;
     else {
       run.second[3]++;
       Serial.printf("sim: the second shot of %u was lost (after the dead time, not reported)\n",
@@ -387,6 +387,13 @@ void simService(uint32_t now) {
     run.nextAt = now + run.spacingMs;
     return;
   }
+  // Lines fall together at the end of the run: end it soon after the last rise, so a shot
+  // isn't kept high longer than a real comparator pulse needs to be.
+  uint32_t last = LEAD_TICKS;
+  for (int i = 0; i < N; i++)
+    for (int h = 0; h < 2; h++)
+      if (s.on[i][h] && s.rise[i][h] > last) last = s.rise[i][h];
+  pulsegenSetPeriod(last + HOLD_TICKS + 1);
   for (int i = 0; i < N; i++)
     pulsegenSet(i, s.rise[i][0], s.rise[i][1], s.on[i][0], s.on[i][1]);
   // At a random point in a DMA block and in a sample, as real sound comes (step 1).
@@ -476,10 +483,10 @@ static void finish() {
   }
   if (run.fault == F_DOUBLE) {
     Serial.printf("sim: second shots %u us after the first: %u measured as their own event, %u "
-                  "reported MISSED, %u ignored inside the dead time (%u ms), %u lost, %u partial "
+                  "reported MISSED, %u ignored inside the dead time (%u ms in effect), %u lost, %u partial "
                   "events (a window opened in the middle of a shot)\n",
                   (unsigned)run.doubleWaitUs, (unsigned)run.second[0], (unsigned)run.second[1],
-                  (unsigned)run.second[2], (unsigned)captureDeadtimeMs(), (unsigned)run.second[3],
+                  (unsigned)run.second[2], (unsigned)(captureDeadUs() / 1000), (unsigned)run.second[3],
                   (unsigned)run.second[4]);
     if (run.second[3] || run.second[4]) pass = false;
   }

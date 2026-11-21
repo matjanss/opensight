@@ -110,7 +110,10 @@ Build:
 - Edge extraction: XOR with the previous sample, then the changed bits; stop once every
   line has its first rising edge. Times in ns from the window start; block numbers from
   the DMA descriptors.
-- Dead time after an event, 30 ms to start (a setting).
+- Dead time after an event, 30 ms to start (a setting), never shorter than the event
+  window: anything inside the window belongs to the event (a second shot there would be
+  merged in, unreported). After a freeze that saw a `MISSED` shot it starts again at the
+  relink, so that shot's remainder can't open a window in its middle.
 - Serial output, one line per event: event number, then per channel t1 and t2 in ns and
   the pulse length of each line; quiet lines marked `-`, a line already high at the window
   start `<x` (it rose more than x ns before the first edge). A verbose mode lists every
@@ -207,7 +210,9 @@ Build:
   4/16; CH1/CH2 are input-only) at the corners of a 210 mm square, a speed of sound from a
   simulated temperature (20 °C), and a trip model: the pulse rises like A·sin(πt/2T)
   (`sim model sine`) or its straight start (`linear`, default), T = 12 µs, OUT_L trips at 1
-  and OUT_H at 4, A = amp·100 mm / distance (`sim amp`, default 40). 25 ns ticks; each shot
+  and OUT_H at 4, A = amp·100 mm / distance (`sim amp`, default 40). 25 ns ticks; all lines
+  fall together 10 µs after the shot's last rise (the generator can't end them one by one,
+  so the first mic's pulse is as long as the spread between the mics); each shot
   at a random point in a sample and a DMA block. Per shot it prints t0's error against
   t0 from the edges it sent (only the 100 ns sampling between them: within ±(1 + 2k)
   samples + one tick, about 56 ns rms) and against the true arrival (the t0 model); the
@@ -225,7 +230,8 @@ Build:
   "(assumed)". 0.1 °C is about 0.01 mm, so once a minute is plenty. `temp` and `stat` show
   it.
 
-Bench test, simulated (bare NodeMCU, nothing on CH5-CH8 and GPIO 15), `mask 0`:
+Bench test, simulated (bare NodeMCU, nothing on CH5-CH8 and GPIO 15), `mask 0`, `span 300`,
+`deadtime 30` (both are stored: check with `stat`):
 - **2a, generator.** Step 1 test 3 again (`selftest`, `selftest 1050 200`, `selftest 0`,
   `selftest 100000`): PASS as before, now on the new generator, 0 late starts. Then
   `sim raw 0 0 0 0 200`: every line within a sample of CH5 L. CH6 and CH7 share CH5's
@@ -326,6 +332,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-21 | 2 | 2c retest: double shots, `deadtime 30` then `deadtime 1`, then verbose | `deadtime 30`: **PASS**, 20 of 20 second shots ignored inside the dead time. `deadtime 1`: FAIL (14 MISSED, 5 partial, 1 lost). Verbose showed why: the stored mic span was still 600 mm (step 1 test 8), so the window covered 2.4-2.6 ms and the simulator's lines stayed high 1.62 ms (every line falls at the end of the run, which was as long as the window allowed). (1) A second shot 2.5 ms later sometimes rose inside the first window and was merged in, unreported ("lost"): **the dead time is now never shorter than the window.** (2) A missed shot's lines outlasted the restarted 1 ms dead time, so their falls still opened a partial window: the simulator now ends each run 10 µs after the shot's last rise. Rerun with `span 300`. |
 | 2026-11-21 | 2 | 2c: `sim fault double 2500`, `sim at 0 0 20` (the stored dead time was still 1 ms from step 1's flood test) | **FAIL, two bugs, the capture's main duty held:** all 20 second shots (2.5 ms after the first, while the ring was frozen) were reported `MISSED`, none lost. (1) Capture: in 9 of 20 a junk event followed, all lines already high at its start and no rising edges: the missed shot's remainder opened a window after the unfreeze. Fixed: a freeze that saw a missed shot restarts the dead time when the ring is relinked. Open: those windows started 4.8-4.9 ms after the first edge, while the second shot's lines should have been high only from 2.5 to ~3.7 ms; a verbose rerun shows where the edges really are. (2) Simulator: it counted those as "measured"; now a second shot is measured (with t0s), MISSED, ignored (dead time), lost, or a partial event (FAIL). The first run read `sim at 0 0 20` as 1 shot: a typo corrected with backspace reached the firmware as a backspace character; backspace now edits the line. |
 | 2026-11-21 | 2 | 2c: `sim fault missing 8` and `sim fault honly 8`, `sim at 30 30 20` each | **PASS both.** CH8 had no t0 in all 20 shots, as set (no edges; H without L: t0 needs both, so none from H alone); CH6/CH7 timed as without the fault, every shot seen. Step 4 rejects shots without a t0 on every channel. |
 | 2026-11-21 | 2 | 2c: `sim fault late 7`, `sim at 30 30 20` | **PASS.** CH7 +23998.4 ns against the true arrival in every shot (24 µs less one 25 ns tick), the others within the ticks; against the edges sent all within the limit. CH7, the nearest mic, still came first, 223 µs ahead of CH5 instead of 247: step 4's fit residual must reject such shots. `offset clear` logged a NOT_FOUND error per key never stored (harmless); it now removes only stored keys. |
