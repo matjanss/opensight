@@ -483,10 +483,10 @@ static void finish() {
   }
   if (run.fault == F_DOUBLE) {
     Serial.printf("sim: second shots %u us after the first: %u measured as their own event, %u "
-                  "reported MISSED, %u ignored inside the dead time (%u ms in effect), %u lost, %u partial "
+                  "reported MISSED, %u ignored inside the dead time (%.1f ms in effect), %u lost, %u partial "
                   "events (a window opened in the middle of a shot)\n",
                   (unsigned)run.doubleWaitUs, (unsigned)run.second[0], (unsigned)run.second[1],
-                  (unsigned)run.second[2], (unsigned)(captureDeadUs() / 1000), (unsigned)run.second[3],
+                  (unsigned)run.second[2], captureDeadUs() / 1000.0, (unsigned)run.second[3],
                   (unsigned)run.second[4]);
     if (run.second[3] || run.second[4]) pass = false;
   }

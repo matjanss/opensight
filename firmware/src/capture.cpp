@@ -81,6 +81,13 @@ static volatile uint8_t  evState = EV_IDLE;
 static volatile uint32_t trigRing = 0;       // ring block with the first activity
 static volatile uint32_t trigTime = 0;       // ... and its time in blocks
 static volatile uint32_t evPost = 0;         // postBlocks of this event
+static volatile uint32_t evPre = PRE_BLOCKS; // blocks before the trigger block in this window
+static volatile uint32_t evStartWord = 0;    // with evPre 0: the word just before the window
+// The first ring block after a relink follows the last spare block in time, not the ring
+// block before it: it is scanned against the spare's last word.
+static volatile bool     afterFreeze = false;
+static volatile uint32_t lastSpareWord = 0;
+static volatile bool     spareWordFresh = false;
 static volatile uint32_t endDesc = 0;        // ring descriptor of the window's last block
 static volatile uint32_t quietUntil = 0;     // no new event before this time (dead time)
 static volatile uint32_t spareBlocks = 0;    // blocks into the spares (frozen ring)
@@ -164,9 +171,16 @@ static void IRAM_ATTR captureIsr(void*) {
   uint32_t mask = lineMask32;
   for (uint32_t k = 0; k < n; k++) {
     uint32_t rb = ringDone, t = blocksDone;
-    if (evState == EV_IDLE && rb >= contigFrom + PRE_BLOCKS && (int32_t)(t - quietUntil) >= 0 &&
-        blockActive(ring[rb % CAPTURE_RING_BLOCKS], mask,
-                    ring[(rb - 1) % CAPTURE_RING_BLOCKS][WORDS_PER_BLOCK - 1])) {
+    // The first block after a relink: its ring neighbour is from before the freeze, so it is
+    // scanned against the spare block the DMA filled just before it, and a window starting
+    // there has no block before the trigger (bench 2c: second shots in this block were lost
+    // when it wasn't scanned at all).
+    bool firstAfter = afterFreeze && rb == contigFrom;
+    uint32_t before = firstAfter ? (spareWordFresh ? lastSpareWord : ring[rb % CAPTURE_RING_BLOCKS][0])
+                                 : ring[(rb - 1) % CAPTURE_RING_BLOCKS][WORDS_PER_BLOCK - 1];
+    if (evState == EV_IDLE && (rb >= contigFrom + PRE_BLOCKS || firstAfter) &&
+        (int32_t)(t - quietUntil) >= 0 &&
+        blockActive(ring[rb % CAPTURE_RING_BLOCKS], mask, before)) {
       // Freeze: the window's last descriptor leads into the spares, which loop.
       uint32_t post = postBlocks;
       uint32_t end = (rb + post - 1) % CAPTURE_RING_BLOCKS;
@@ -176,6 +190,8 @@ static void IRAM_ATTR captureIsr(void*) {
       trigRing = rb;
       trigTime = t;
       evPost = post;
+      evPre = firstAfter ? 0 : PRE_BLOCKS;
+      evStartWord = before;
       endDesc = end;
       // Anything inside the window belongs to this event, so the dead time is never shorter
       // than the window (a second shot inside it would be merged in, unreported).
@@ -183,6 +199,8 @@ static void IRAM_ATTR captureIsr(void*) {
       missedThisFreeze = false;
       evState = EV_COLLECTING;
     }
+    if (firstAfter) afterFreeze = false;
+    spareWordFresh = false;
     ringDone = rb + 1;
     blocksDone = t + 1;
   }
@@ -193,7 +211,12 @@ static void IRAM_ATTR captureIsr(void*) {
     if (!missedThisFreeze && (int32_t)(t - quietUntil) >= 0 && blockActive(spareBuf[sp], mask, spareBuf[sp][0])) {
       missedThisFreeze = true;
       missedCount = missedCount + 1;
+      // In a spare finished after the relink: that shot gets its dead time from here, so the
+      // rest of it can't open a window in its middle.
+      if (evState == EV_IDLE) quietUntil = t + deadBlocks;
     }
+    lastSpareWord = spareBuf[sp][WORDS_PER_BLOCK - 1];
+    spareWordFresh = true;
   }
 
   BaseType_t woken = pdFALSE;
@@ -210,7 +233,9 @@ static void IRAM_ATTR captureIsr(void*) {
 
 // ---- Edge extraction (measureTask) ----
 
-static void extract(EventResult& r, uint32_t first, uint32_t blocks) {
+// before: the word just before the window, if the ring block before it isn't (a window that
+// starts at the first block after a relink); otherwise the window's own first sample.
+static void extract(EventResult& r, uint32_t first, uint32_t blocks, const uint32_t* before) {
   const uint16_t mask = lineMask32 & 0xFFFF;
   r.lines = mask;
   for (int l = 0; l < LINES; l++) {
@@ -221,7 +246,8 @@ static void extract(EventResult& r, uint32_t first, uint32_t blocks) {
   }
 
   const uint32_t* w0 = ring[first % CAPTURE_RING_BLOCKS];
-  uint16_t prev = (CAPTURE_HIGH_HALF_FIRST ? (w0[0] >> 16) : (w0[0] & 0xFFFF)) & mask;
+  uint16_t prev = before ? (CAPTURE_HIGH_HALF_FIRST ? (*before & 0xFFFF) : (*before >> 16)) & mask
+                         : (CAPTURE_HIGH_HALF_FIRST ? (w0[0] >> 16) : (w0[0] & 0xFFFF)) & mask;
   r.highAtStart = prev;
   uint32_t idle = prev | ((uint32_t)prev << 16);
   int idx = 0;
@@ -258,11 +284,13 @@ static void measureTask(void*) {
   static EventResult r;   // static: too big for this task's stack
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    uint32_t blocks = PRE_BLOCKS + evPost;
+    const uint32_t pre = evPre;
+    const uint32_t startWord = evStartWord;
+    uint32_t blocks = pre + evPost;
     r.number = ++eventCount;
-    r.firstTime = trigTime - PRE_BLOCKS;
+    r.firstTime = trigTime - pre;
     r.blocks = blocks;
-    extract(r, trigRing - PRE_BLOCKS, blocks);
+    extract(r, trigRing - pre, blocks, pre ? nullptr : &startWord);
     if (r.highAtStart) startHighCount++;
 
     // Unfreeze: the DMA is in the spares; link the ring back in after the window's last
@@ -270,10 +298,11 @@ static void measureTask(void*) {
     uint32_t frozen = blocksDone - (trigTime + evPost);
     if (frozen > frozenMax) frozenMax = frozen;
     lldesc_t* next = &desc[(endDesc + 1) % CAPTURE_RING_BLOCKS];
+    contigFrom = trigRing + evPost;   // the next ring block follows the spares in time
+    afterFreeze = true;
     desc[endDesc].qe.stqe_next = next;
     spare[0].qe.stqe_next = next;
     spare[1].qe.stqe_next = next;
-    contigFrom = trigRing + evPost;   // the next ring block follows a gap in time
     // A shot came while frozen (MISSED) and may still be going on: its remaining edges (lines
     // still high, ringing) would open a window in its middle, with no first edges in it
     // (bench, step 2c). It gets a dead time of its own from here, like any shot's ringing.
