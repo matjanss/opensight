@@ -1,9 +1,9 @@
 // OpenSights - replay a serial log through the measurement core on the PC (MEASUREMENT.md
-// steps 3c-3e). Reads the `cfg` and `rec` lines a target printed (lib/measure/record.h),
-// solves every event again with lib/measure (measure::solveEvent), exactly as the target did,
-// and prints the shots. If the log has the target's own `shot` lines, it compares them; if
-// the events carry their true point (`pt`: the simulator's, or calibration mode's), it gives
-// the position error.
+// steps 3c-4a). Reads the `cfg` and `rec` lines a target printed (lib/measure/record.h),
+// solves and judges every event again with lib/measure (measure::solveEvent), exactly as the
+// target did, and prints the shots and verdicts. If the log has the target's own `shot`
+// lines, it compares positions and verdicts; if the events carry their true point (`pt`:
+// the simulator's, or calibration mode's), it gives the position error.
 //
 // Settings can be changed for the replay, to see what they do to the same events:
 //   --h <mm>          every mic's height
@@ -12,6 +12,10 @@
 //   --without <ch>    leave a channel out (repeatable): e.g. 5 mics instead of 6
 //   --reslimit <ns>   the residual limit for "would be sent" (default: the log's cfg)
 //   --dropone on|off  drop-one (default: the log's cfg)
+//   --lost <n>|off    validity (MODEL.md "Validity"; default: the log's cfg): mic channels
+//   --area <mm>|off     that may be lost, the area, the together limit, the longest pulse
+//   --together <us>|off
+//   --pulse <us>|off
 //   --fit-c           fit one factor on every event's speed of sound (the least total
 //                     residual) and say what air temperature that means
 //   --quiet           the summary only
@@ -42,10 +46,13 @@ namespace {
 struct Options {
   float h = NAN, tempC = NAN, cMs = NAN, resLimitNs = NAN;
   int dropOne = -1;   // -1: the cfg's
+  int maxLost = -2;   // -2: the cfg's, -1: off
+  float areaMm = NAN, togetherNs = NAN, pulseMaxNs = NAN;   // NAN: the cfg's, 0: off
   uint8_t without = 0;
   bool quiet = false, fitC = false;
   bool changed() const {
-    return !isnan(h) || !isnan(tempC) || !isnan(cMs) || !isnan(resLimitNs) || dropOne >= 0 || without;
+    return !isnan(h) || !isnan(tempC) || !isnan(cMs) || !isnan(resLimitNs) || dropOne >= 0 || without ||
+           maxLost != -2 || !isnan(areaMm) || !isnan(togetherNs) || !isnan(pulseMaxNs);
   }
 };
 
@@ -53,13 +60,16 @@ struct Options {
 struct Item {
   Cfg   cfg;
   Rec   rec;
-  bool  board;   // the board's own shot line came with it
+  bool  board;   // the board's own shot line came with it, with a position
   float boardX, boardY;
+  bool  boardHasVerdict;   // ... and its verdict tag (4a: "[ok]")
+  Verdict boardVerdict;
 };
 
 void usage() {
   fprintf(stderr, "usage: replay [--h mm] [--temp C] [--c m/s] [--without ch]... "
-                  "[--reslimit ns] [--dropone on|off] [--fit-c] [--quiet] log...\n");
+                  "[--reslimit ns] [--dropone on|off] [--lost n|off] [--area mm|off] "
+                  "[--together us|off] [--pulse us|off] [--fit-c] [--quiet] log...\n");
   exit(2);
 }
 
@@ -102,7 +112,16 @@ int main(int argc, char** argv) {
     else if (!strcmp(a, "--temp")) opt.tempC = strtof(value(), nullptr);
     else if (!strcmp(a, "--c")) opt.cMs = strtof(value(), nullptr);
     else if (!strcmp(a, "--reslimit")) opt.resLimitNs = strtof(value(), nullptr);
-    else if (!strcmp(a, "--dropone")) {
+    else if (!strcmp(a, "--lost")) {
+      const char* v = value();
+      opt.maxLost = !strcmp(v, "off") ? -1 : atoi(v);
+      if (opt.maxLost < -1 || opt.maxLost > 8) usage();
+    } else if (!strcmp(a, "--area") || !strcmp(a, "--together") || !strcmp(a, "--pulse")) {
+      const char* v = value();
+      const float f = !strcmp(v, "off") ? 0 : strtof(v, nullptr) * (strcmp(a, "--area") ? 1000 : 1);
+      if (!(f >= 0)) usage();
+      (!strcmp(a, "--area") ? opt.areaMm : !strcmp(a, "--together") ? opt.togetherNs : opt.pulseMaxNs) = f;
+    } else if (!strcmp(a, "--dropone")) {
       const char* v = value();
       if (strcmp(v, "on") && strcmp(v, "off")) usage();
       opt.dropOne = !strcmp(v, "on");
@@ -130,9 +149,10 @@ int main(int argc, char** argv) {
     }
     char line[2048];
     // The target prints an event's `shot` line just before its `rec` line.
-    bool haveBoard = false;
+    bool haveBoard = false, havePos = false, haveVerdict = false;
     unsigned boardN = 0;
     float boardX = 0, boardY = 0;
+    Verdict boardVerdict = V_OK;
     while (fgets(line, sizeof line, f)) {
       Cfg cfg;
       uint32_t id;
@@ -143,17 +163,28 @@ int main(int argc, char** argv) {
       const char* sl = strstr(line, "shot ");
       unsigned n;
       float x, y;
-      if (sl && sscanf(sl, "shot %u: x %f y %f", &n, &x, &y) == 3) {
+      char dash;
+      if (sl && (sscanf(sl, "shot %u: x %f y %f", &n, &x, &y) == 3 ||
+                 sscanf(sl, "shot %u %c", &n, &dash) == 2)) {
         haveBoard = true;
+        havePos = sscanf(sl, "shot %u: x %f y %f", &n, &x, &y) == 3;
         boardN = n;
-        boardX = x;
-        boardY = y;
+        boardX = havePos ? x : 0;
+        boardY = havePos ? y : 0;
+        // The verdict tag, "[ok]" (4a); a log from before has none.
+        haveVerdict = false;
+        const char* tag = strrchr(sl, '[');
+        char name[16];
+        if (tag && sscanf(tag, "[%15[a-z]]", name) == 1) haveVerdict = parseVerdict(name, &boardVerdict);
         continue;
       }
       Item it = {};
       if (!parseRec(line, it.rec)) continue;
       recs++;
-      it.board = haveBoard && boardN == it.rec.n;
+      const bool mine = haveBoard && boardN == it.rec.n;
+      it.board = mine && havePos;
+      it.boardHasVerdict = mine && haveVerdict;
+      it.boardVerdict = boardVerdict;
       haveBoard = false;
       it.boardX = boardX;
       it.boardY = boardY;
@@ -170,6 +201,10 @@ int main(int argc, char** argv) {
       }
       if (!isnan(opt.resLimitNs)) it.cfg.resLimitNs = opt.resLimitNs;
       if (opt.dropOne >= 0) it.cfg.dropOne = opt.dropOne;
+      if (opt.maxLost != -2) it.cfg.maxLost = (int8_t)opt.maxLost;
+      if (!isnan(opt.areaMm)) it.cfg.areaMm = opt.areaMm;
+      if (!isnan(opt.togetherNs)) it.cfg.togetherNs = opt.togetherNs;
+      if (!isnan(opt.pulseMaxNs)) it.cfg.pulseMaxNs = opt.pulseMaxNs;
       if (!isnan(opt.cMs)) it.rec.cMs = opt.cMs;
       else if (!isnan(opt.tempC))
         it.rec.cMs = (float)soundSpeedMs(opt.tempC, it.rec.rh, it.rec.hPa * 100.0);
@@ -200,14 +235,27 @@ int main(int argc, char** argv) {
   }
 
   int tooFew = 0, solved = 0, converged = 0, good = 0, dropped = 0, compared = 0, withPt = 0;
+  int verdicts[V_COUNT] = {}, verdictsCompared = 0, verdictsDiffer = 0;
   double worstDiff = 0, sumDiff2 = 0, worstPt = 0, sumPt2 = 0;
   for (const Item& it : items) {
     Rec rec = it.rec;
     rec.cMs = (float)(rec.cMs * scale);
     const EventFit f = solveEvent(it.cfg, rec);
+    verdicts[f.verdict]++;
+    bool differs = false;
+    if (it.boardHasVerdict) {
+      verdictsCompared++;
+      differs = it.boardVerdict != f.verdict;
+      if (differs) verdictsDiffer++;
+    }
     if (!f.solved) {
       tooFew++;
-      if (!opt.quiet) printf("replay %u -: %d channels with a mic and both edges\n", (unsigned)rec.n, f.used);
+      if (!opt.quiet) {
+        printf("replay %u -: %d channels with a mic, both edges and a good pulse [%s]", (unsigned)rec.n,
+               f.used, verdictName(f.verdict));
+        if (differs) printf("; board [%s]", verdictName(it.boardVerdict));
+        printf("\n");
+      }
       continue;
     }
     const Solution& s = f.s;
@@ -220,7 +268,8 @@ int main(int argc, char** argv) {
              (unsigned)rec.n, s.x, s.y, s.rmsNs, s.major, s.iterations);
       for (int c = 0; c < MAX_MICS; c++)
         if (f.mask & (1 << c)) printf(" CH%d %+.0f%s", c + 1, s.resNs[c], c == s.dropped ? " (dropped)" : "");
-      printf("%s", !s.converged ? "; did not converge" : f.good ? "" : "; over the limit");
+      printf(" [%s]", verdictName(f.verdict));
+      if (differs) printf("; board [%s]", verdictName(it.boardVerdict));
     }
     if (it.board && s.converged) {
       // The board prints 3 decimals: compare as printed.
@@ -243,9 +292,14 @@ int main(int argc, char** argv) {
     if (!opt.quiet) printf("\n");
   }
 
-  const float limit = items.empty() ? RES_LIMIT_DEFAULT_NS : items.back().cfg.resLimitNs;
-  printf("replay: %d events, %d solved (%d converged, %d within %.0f ns, %d with a channel "
-         "dropped), %d with too few channels\n", recs, solved, converged, good, limit, dropped, tooFew);
+  printf("replay: %d events, %d solved (%d converged, %d shots, %d with a channel dropped), %d "
+         "with too few channels\n", recs, solved, converged, good, dropped, tooFew);
+  printf("replay: verdicts:");
+  for (int v = 0; v < V_COUNT; v++) printf(" %s %d", verdictName((Verdict)v), verdicts[v]);
+  printf("\n");
+  if (verdictsCompared)
+    printf("replay: against the board's verdicts: %d compared, %d differ%s\n", verdictsCompared,
+           verdictsDiffer, opt.changed() || opt.fitC ? " (settings changed for the replay: differences expected)" : "");
   if (noCfg) {
     printf("replay: %d events without their cfg line in the log:", noCfg);
     for (auto& m : missingIds) printf(" %08X (%d)", (unsigned)m.first, m.second);

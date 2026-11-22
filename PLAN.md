@@ -473,6 +473,7 @@ copies, re-solving from raw data.
   archived first try supplies parts of the solver (`tdoa.h`), the simulator's position
   check and the Python fit.
 - **MEASUREMENT step 4:** the residual limit and the drop-one search move forward to step
-  3d. The loudness and edge-sharpness checks wait for real pulses.
+  3d. The loudness and edge-sharpness checks wait for real pulses (4c). 4a (2026-11-22)
+  gives every event a verdict from what can be simulated; 4b adds the curtain (D9).
 - **The summary doc:** D1 and D2 answer its open question on breaking the corner
   symmetry, and the mic height corrects its error budget (Q3).

@@ -139,6 +139,33 @@ the result, is the caller's (MEASUREMENT steps 3d and 4).
    that didn't, then the lowest rms. Its `dropped` says which mic. Its rms may still be
    over the limit.
 
+## Validity
+
+`measure::solveEvent` judges every event after its fit (MEASUREMENT step 4a). The verdict
+is `ok` (a shot: it goes to the app) or the first of these checks it fails, in this order:
+
+| Verdict | When | Limit (`cfg` key, firmware default) |
+|---|---|---|
+| `few` | Fewer than 4 channels to fit (a mic, both edges, a pulse shape in range) | – |
+| `together` | Every first edge (t1) of the channels to fit within the limit: an electrical spike, or a blast from straight ahead | `tog`, 20 000 ns. A real shot spreads over 126 µs or more anywhere in the frame (D2 layout; 147 µs with the corner mic out on the diagonal) |
+| `nofit` | The fit did not converge | – |
+| `residual` | rms residual over the limit, after drop-one if it is on | `lim`, 1500 ns |
+| `lost` | More of the event's mic channels left out of the final fit than allowed: no edge, a pulse shape out of range, or dropped | `lost`, 1 |
+| `outside` | The hole beyond ±area in x or y | `area`, 105 mm (the mics' edge: a hole further out would hit the frame) |
+
+- **The pulse shape** is checked per channel before the fit, in `measure::solveInput`: with
+  `pmax` (firmware default 10 000 ns), a channel is left out unless 0 ≤ t2 − t1 ≤ `pmax`.
+  A long t2 − t1 means a pulse barely over the high threshold, whose t0 the straight-line
+  model gets wrong. It counts as lost, so with `lost` 1 one bad pulse costs a channel but
+  not the shot.
+- **Off:** `tog`, `area` and `pmax` 0, `lost` −1. A `cfg` line without these keys (before
+  4a) means off, so an old log replays with the verdicts it had then: a shot was good if
+  it converged within `lim`.
+- **Why `lost` 1:** with 6 mics every set of 5 rejects blasts (D2), while two lost channels
+  leave 4, which may not.
+- **Still to come:** the curtain's gate (4b), and loudness and edge sharpness (4c, from
+  real pulses).
+
 ## Log lines
 
 The target logs every event on serial so it can be solved again on the PC (`tools/replay`,
@@ -151,18 +178,20 @@ monitor's timestamp) is ignored, and so are unknown keys (later firmware may add
 a `sim` run:
 
 ```
-cfg id=0262A982 CH1=-105,-105,10.5,0.333333343,0,50 ... CH7=- CH8=- lim=1500 drop=1
+cfg id=0262A982 CH1=-105,-105,10.5,0.333333343,0,50 ... CH7=- CH8=- lim=1500 drop=1 lost=1 area=105 tog=20000 pmax=10000
 ```
 
 - `CHn=x,y,h,k,offset,sigma` (mm, mm, mm, -, ns, ns), or `-` for a channel without a mic.
 - `lim`: the residual limit (ns), `drop`: drop-one on (1) or off (0): the policy
   `measure::solveEvent` applies. A line without them (3c) means 1500 and 0.
+- `lost`, `area` (mm), `tog` (ns), `pmax` (ns): the validity limits (see Validity). A line
+  without them (before 4a) means off.
 - Floats with 9 significant digits: they read back to the same bits.
 - `id`: the CRC-32 (IEEE, as zlib's) of the text after `id=XXXXXXXX `. A line whose id
   doesn't match its text is rejected.
 - The **calibration id** (`measure::calibrationId`, the `cal` record's) is the CRC-32 of
-  the channel fields alone, up to ` lim=`: changing the policy doesn't make a calibration
-  stale. `tools/calibrate.py` computes it the same way.
+  the channel fields alone, up to ` lim=`: changing the policy or the validity limits
+  doesn't make a calibration stale. `tools/calibrate.py` computes it the same way.
 
 **`rec`**, one event:
 
@@ -184,9 +213,13 @@ rec n=2161 t=876.1903407 cfg=0262A982 T=18.00 RH=50.0 p=1013.25 meas=--- c=342.7
 | `cal`, `stale` | The calibration record's id and whether it is stale (`cal=1A2B3C4D stale=0`), or `cal=-` for none |
 
 The solver's input: t0 = arrivalT0(t1, t2, k, offset) per channel, in float, for every
-channel that has a mic and both edges; c from `c`. `measure::solveEvent` then fits them if
-there are 4 or more (with `drop`, through drop-one when 5 or more), and calls the shot good
-if it converged within `lim`.
+channel that has a mic, both edges and (with `pmax`) a pulse shape in range; c from `c`.
+`measure::solveEvent` then fits them if there are 4 or more (with `drop`, through drop-one
+when 5 or more), and gives the verdict (see Validity).
+
+The firmware's `shot` line, just before the `rec` line, ends with the verdict in brackets
+(`; sent as shot 12 [ok]`, `; not sent [residual]: ...`), which the replay compares with
+its own.
 
 ## Test vectors
 

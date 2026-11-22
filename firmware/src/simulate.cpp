@@ -16,8 +16,10 @@
 //     firmware's mics, air, offsets and model the same as the simulator's (`mic sim`), only
 //     the sampling is left: about 0.013 mm rms, 0.06 mm worst with 6 mics (a PC
 //     simulation). With a late or early channel, drop-one must leave that one out.
-// Faults: a channel late or early by a half cycle (24 us), its edges missing or H only,
-// a second shot, or a blast: a point source metres in front, which must never score.
+// Faults: a channel late or early by a half cycle (24 us), its edges missing or H only (one
+// channel or two), its pulse too slow (H 40 us after L), a second shot, a blast (a point
+// source metres in front, which must never score) or an electrical spike (every line at
+// once). Step 4a: each run expects a verdict (MODEL.md "Validity") and counts the ones it got.
 // `sim raw` sends fixed edges instead, to check the generator itself: equal times on all
 // channels show any offset between the two MCPWM units.
 //
@@ -41,6 +43,8 @@ static const uint32_t LEAD_TICKS = 800;        // 20 us from the start to the fi
 static const uint32_t HOLD_TICKS = 400;        // every line stays high >= 10 us
 static const double   RISE_NS    = 12000;      // quarter period of the simulated pulse
 static const double   LATE_NS    = 24000;      // a half-cycle-late (or early) trip
+static const double   SLOW_NS    = 40000;      // F_SLOW: H this long after L
+static const double   SPIKE_NS   = 300;        // F_SPIKE: H this long after L, on every line
 static const int      MAX_COUNT  = 2000;
 
 // ---- Settings (RAM; `sim` shows them) ----
@@ -51,10 +55,12 @@ static float simTempC = NAN;   // NAN: the firmware's own air (airtemp.h); else 
 static float simAmp = 40.0f;      // pulse amplitude at 100 mm, in units of the default OUT_L level
 static bool  sineModel = false;
 static float thrL[N], thrH[N];    // trip levels per channel, same units (`sim thr`)
-enum Fault : uint8_t { F_NONE, F_LATE, F_EARLY, F_MISSING, F_HONLY, F_DOUBLE, F_BLAST };
-static const char* const FAULT_TEXT[] = {"none", "late", "early", "missing", "honly", "double", "blast"};
+enum Fault : uint8_t { F_NONE, F_LATE, F_EARLY, F_MISSING, F_HONLY, F_DOUBLE, F_BLAST, F_SPIKE, F_SLOW };
+static const char* const FAULT_TEXT[] = {"none", "late", "early", "missing", "honly", "double", "blast",
+                                         "spike", "slow"};
 static Fault    fault = F_NONE;
 static int      faultCh = 0;        // 0..N-1
+static int      faultCh2 = -1;      // missing, honly, slow: a second channel, or -1
 static uint32_t doubleUs = 2500;
 static float    blastM = 10, blastOffMm = 0;   // F_BLAST: metres in front, mm off the axis
 
@@ -114,7 +120,7 @@ static struct {
   uint32_t rawGapNs;
   Shot     shot;
   Fault    fault;
-  int      faultCh;
+  int      faultCh, faultCh2;
   double   limitNs;                // capture error limit
   Stat     err[N], model[N];       // t0: vs the edges sent, vs the true arrival
   Stat     raw[N][2];              // M_RAW: each line vs the first sim channel's L
@@ -129,7 +135,16 @@ static struct {
   double   posDx, posDy;           // sums, for the mean error
   uint32_t posUnsolved, posNotConverged;
   uint32_t second[5];              // double: measured, MISSED, ignored (dead time), lost, partial
+  // The verdict check (4a): what every shot of the run must get.
+  measure::Verdict expect;
+  bool     expectReject;           // anything but ok (a blast)
+  bool     expectEither;           // ok or outside (a point on the area's edge)
+  uint32_t verdicts[measure::V_COUNT], verdictWrong;
 } run;
+
+static bool onFaultCh(int i) { return i == run.faultCh || i == run.faultCh2; }
+static bool channelFault(Fault f) { return f == F_LATE || f == F_EARLY || f == F_MISSING || f == F_HONLY || f == F_SLOW; }
+static bool noPoint(Fault f) { return f == F_BLAST || f == F_SPIKE; }
 
 bool simActive() { return run.active; }
 
@@ -168,14 +183,14 @@ static const char* positionMismatch(Fault fl) {
     if (!ch.mic || fabsf(ch.x - micX[i]) > 0.005f || fabsf(ch.y - micY[i]) > 0.005f)
       return "the firmware's mics are not the simulator's (`mic sim`)";
     if (fabsf(ch.h - micH[i]) > 0.005f) return "the firmware's mic heights are not the simulator's";
-    if (fl == F_BLAST) continue;
+    if (noPoint(fl)) continue;
     if (fabsf(ch.offsetNs - trueOffsetNs[i]) > 0.5f) return "the firmware's offsets are not the simulator's";
     if (!sineModel && fabsf(ch.k - trueK(i)) > 0.001f)
       return "the firmware's k is not the simulator's (L / (H - L) per channel: `sim`, `k`)";
   }
   if (!isnan(simTempC)) return "`sim temp` gives the simulator other air than the firmware's";
   if (calibMode()) return "calibration mode (nothing is sent to the app)";
-  if (fl == F_BLAST) return nullptr;
+  if (noPoint(fl)) return nullptr;
   if (sineModel) return "the sine model (t0's formula is exact for the linear one only)";
   if (fl == F_DOUBLE) return "the double-shot fault";
   if ((fl == F_LATE || fl == F_EARLY) && !cfg.dropOne) return "a late or early channel with drop-one off";
@@ -210,7 +225,7 @@ static double uniform(double lo, double hi);
 static bool makeShot(float x, float y, Shot& s) {
   const double c = speedMmPerNs(simAir());
   const double scale = 2 * RISE_NS / M_PI;
-  const bool blast = run.fault == F_BLAST;
+  const bool blast = run.fault == F_BLAST, spike = run.fault == F_SPIKE;
   double t[N][2];
   double first = 1e18;
   double bx = 0, by = 0;
@@ -220,9 +235,18 @@ static bool makeShot(float x, float y, Shot& s) {
     by = blastOffMm * sin(phi);
     x = y = NAN;
   }
+  if (spike) x = y = NAN;
   s.x = x;
   s.y = y;
   for (int i = 0; i < N; i++) {
+    if (spike) {
+      s.geo[i] = 0;
+      s.on[i][0] = s.on[i][1] = true;
+      t[i][0] = 0;
+      t[i][1] = SPIKE_NS;
+      first = 0;
+      continue;
+    }
     double d;
     if (blast) {
       const double dx = micX[i] - bx, dy = micY[i] - by, dz = blastM * 1000.0 + micH[i];
@@ -245,11 +269,12 @@ static bool makeShot(float x, float y, Shot& s) {
       th = scale * thrH[i] / a;
     }
     double late = run.faultCh != i ? 0 : run.fault == F_LATE ? LATE_NS : run.fault == F_EARLY ? -LATE_NS : 0;
-    bool gone = (run.fault == F_MISSING || run.fault == F_HONLY) && run.faultCh == i;
+    bool gone = (run.fault == F_MISSING || run.fault == F_HONLY) && onFaultCh(i);
     s.on[i][0] = lOn && !gone;
-    s.on[i][1] = hOn && !(run.fault == F_MISSING && run.faultCh == i);
+    s.on[i][1] = hOn && !(run.fault == F_MISSING && onFaultCh(i));
     t[i][0] = s.geo[i] + trueOffsetNs[i] + tl + late;
     t[i][1] = s.geo[i] + trueOffsetNs[i] + th + late;
+    if (run.fault == F_SLOW && onFaultCh(i)) t[i][1] = t[i][0] + SLOW_NS;
     for (int h = 0; h < 2; h++)
       if (s.on[i][h] && t[i][h] < first) first = t[i][h];
   }
@@ -285,7 +310,7 @@ static void startCommon(Mode m, uint32_t count) {
   uint64_t period = LEAD_TICKS + windowTicks;
   if (period > 65534) period = 65534;
   Fault fl = fault;
-  int fc = faultCh;
+  int fc = faultCh, fc2 = faultCh2;
   bool rawMode = m == M_RAW;
   float px = run.px, py = run.py;
   uint32_t rawRise[N], rawGap = run.rawGapNs;
@@ -297,6 +322,7 @@ static void startCommon(Mode m, uint32_t count) {
   run.periodTicks = (uint32_t)period;
   run.fault = rawMode ? F_NONE : fl;
   run.faultCh = fc;
+  run.faultCh2 = run.fault == F_MISSING || run.fault == F_HONLY || run.fault == F_SLOW ? fc2 : -1;
   run.px = px;
   run.py = py;
   memcpy(run.rawRiseNs, rawRise, sizeof rawRise);
@@ -308,10 +334,27 @@ static void startCommon(Mode m, uint32_t count) {
   run.limitNs = (1 + 2 * k) * NS_PER_SAMPLE + TICK_NS + 5;
   run.posWhyNot = rawMode ? "raw edges are not a shot" : positionMismatch(run.fault);
   run.posCounts = !run.posWhyNot;
-  // A late or early channel must be dropped; without it (or its t0) 5 mics are left.
-  run.expectDrop = run.fault == F_LATE || run.fault == F_EARLY ? F + run.faultCh : -1;
-  run.posLimitMm = run.fault == F_LATE || run.fault == F_EARLY || run.fault == F_MISSING ||
-                   run.fault == F_HONLY ? SIM_POS_LIMIT_DROP_MM : SIM_POS_LIMIT_MM;
+  // A late or early channel must be dropped; without it (or its t0) 5 mics are left. A slow
+  // pulse is left out for its shape (`valid pulse`), or with that off, dropped.
+  const measure::Cfg& vc = calibCfg();
+  const bool pulseCheck = vc.pulseMaxNs > 0 && SLOW_NS > vc.pulseMaxNs;
+  run.expectDrop = run.fault == F_LATE || run.fault == F_EARLY ||
+                   (run.fault == F_SLOW && !pulseCheck && run.faultCh2 < 0) ? F + run.faultCh : -1;
+  run.posLimitMm = channelFault(run.fault) ? SIM_POS_LIMIT_DROP_MM : SIM_POS_LIMIT_MM;
+  // The verdict every shot must get (MODEL.md "Validity", with the firmware's limits).
+  const int lostN = !channelFault(run.fault) ? 0 : run.faultCh2 >= 0 ? 2 : 1;
+  run.expect = measure::V_OK;
+  if (run.fault == F_BLAST) run.expectReject = true;
+  else if (run.fault == F_SPIKE) {
+    if (vc.togetherNs > 0) run.expect = measure::V_TOGETHER;
+    else run.expectReject = true;
+  } else if (run.fault == F_SLOW && run.faultCh2 >= 0 && !pulseCheck) run.expectReject = true;
+  else if (vc.maxLost >= 0 && lostN > vc.maxLost) run.expect = measure::V_LOST;
+  else if (m == M_POINT && vc.areaMm > 0) {
+    const float edge = fmaxf(fabsf(px), fabsf(py)) - vc.areaMm;
+    if (edge > 0.5f) run.expect = measure::V_OUTSIDE;
+    else if (edge > -0.5f) run.expectEither = true;
+  }
 
   // Check the first shot fits before setting anything up.
   Shot probe;
@@ -367,11 +410,19 @@ static void startCommon(Mode m, uint32_t count) {
                 isnan(simTempC) ? "the firmware's" : "sim temp", sa.c, k, FAULT_TEXT[run.fault]);
   if (run.fault == F_DOUBLE) Serial.printf(" (second shot %u us later)", (unsigned)run.doubleWaitUs);
   else if (run.fault == F_BLAST) Serial.printf(" (%.0f m in front, %.0f mm off the axis)", blastM, blastOffMm);
-  else if (run.fault != F_NONE) Serial.printf(" on CH%d", F + 1 + run.faultCh);
+  else if (channelFault(run.fault)) {
+    Serial.printf(" on CH%d", F + 1 + run.faultCh);
+    if (run.faultCh2 >= 0) Serial.printf(" and CH%d", F + 1 + run.faultCh2);
+  }
   Serial.printf("; every %u ms\n", (unsigned)run.spacingMs);
-  if (run.fault == F_BLAST)
-    Serial.printf(run.posCounts ? "sim: blast check on: none may be sent to the app\n"
-                                : "sim: blast check for information only: %s\n", run.posWhyNot);
+  if (run.fault != F_DOUBLE)
+    Serial.printf("sim: verdict check %s: every shot %s%s%s\n", run.posCounts ? "on" : "for information only",
+                  run.expectReject ? "anything but ok" : run.expectEither ? "ok or outside"
+                                                       : measure::verdictName(run.expect),
+                  run.posCounts ? "" : ": ", run.posCounts ? "" : run.posWhyNot);
+  if (noPoint(run.fault))
+    Serial.printf(run.posCounts ? "sim: %s check on: none may be sent to the app\n"
+                                : "sim: %s check for information only: %s\n", FAULT_TEXT[run.fault], run.posWhyNot);
   else if (run.posCounts)
     Serial.printf("sim: position check on: the firmware has the simulator's mics and air (limit %.2f "
                   "mm)%s\n", run.posLimitMm, run.expectDrop >= 0 ? "; drop-one must leave the faulty channel out" : "");
@@ -424,8 +475,8 @@ static void recordShot(const EventResult& r, const Arrival& a, const Position& p
     if (ref < 0 && expOn[i] && got[i]) ref = i;
   }
   char line[260];
-  const bool blast = run.fault == F_BLAST;
-  int n = blast ? snprintf(line, sizeof line, "  sim blast, t0 error ns vs sent/vs true:")
+  const bool blast = noPoint(run.fault);
+  int n = blast ? snprintf(line, sizeof line, "  sim %s, t0 error ns vs sent/vs true:", FAULT_TEXT[run.fault])
                 : snprintf(line, sizeof line, "  sim (%.1f, %.1f) mm, t0 error ns vs sent/vs true:", s.x, s.y);
   for (int i = 0; i < N; i++) {
     if (i == ref) continue;
@@ -442,6 +493,15 @@ static void recordShot(const EventResult& r, const Arrival& a, const Position& p
                   fabs(e) > run.limitNs ? " (!)" : "");
   }
   if (p.sent) run.sentToApp++;
+  // The verdict (4a).
+  const measure::Verdict v = p.verdict;
+  if (v < measure::V_COUNT) run.verdicts[v]++;
+  const bool wrong = run.expectReject ? v == measure::V_OK
+                   : run.expectEither ? v != measure::V_OK && v != measure::V_OUTSIDE
+                                      : v != run.expect;
+  if (run.fault != F_DOUBLE && wrong) run.verdictWrong++;
+  n += snprintf(line + n, sizeof line - n, "; [%s]%s", measure::verdictName(v),
+                run.fault != F_DOUBLE && wrong && run.posCounts ? " (!)" : "");
   if (blast) {
     n += snprintf(line + n, sizeof line - n, "; %s", p.sent ? "SENT to the app (!)" : "not sent");
     Serial.println(line);
@@ -620,7 +680,7 @@ static void finish() {
     const double rmsExp = S * sqrt(2 * ((1 + k) * (1 + k) + k * k) / 12);
     const Stat& st = run.err[i];
     const Stat& md = run.model[i];
-    bool faulty = run.fault != F_NONE && run.fault != F_DOUBLE && run.fault != F_BLAST && run.faultCh == i;
+    bool faulty = channelFault(run.fault) && onFaultCh(i);
     if (st.n) {
       double mean = st.sum / st.n, rms = sqrt(st.sumSq / st.n);
       bool meanOff = fabs(mean) > 3 * rmsExp / sqrt((double)st.n) + 2;
@@ -632,6 +692,7 @@ static void finish() {
                     md.sum / md.n, md.maxAbs,
                     faulty && run.fault == F_LATE    ? " (the late trip: drop-one must leave it out)"
                     : faulty && run.fault == F_EARLY ? " (the early trip: drop-one must leave it out)"
+                    : faulty && run.fault == F_SLOW  ? " (the slow pulse: its t0 is off, it must be left out)"
                                                      : "");
       if (st.outside) pass = false;
     }
@@ -641,8 +702,7 @@ static void finish() {
       Serial.printf("sim: CH%d: a t0 in %u shots without one\n", F + 1 + i, (unsigned)run.extraT0[i]);
     if (run.noT0[i] || run.extraT0[i]) pass = false;
     if (faulty && (run.fault == F_MISSING || run.fault == F_HONLY))
-      Serial.printf("sim: CH%d had no t0, as the fault set it (the fit has the other %d)\n",
-                    F + 1 + i, N - 1);
+      Serial.printf("sim: CH%d had no t0, as the fault set it\n", F + 1 + i);
   }
   if (run.fault == F_DOUBLE) {
     Serial.printf("sim: second shots %u us after the first: %u measured as their own event, %u "
@@ -653,17 +713,34 @@ static void finish() {
                   (unsigned)run.second[4]);
     if (run.second[3] || run.second[4]) pass = false;
   }
-  // The position check (a blast: whether any scored).
+  // The verdicts (4a).
+  if (run.fault != F_DOUBLE) {
+    Serial.print("sim: verdicts:");
+    for (int v = 0; v < measure::V_COUNT; v++)
+      if (run.verdicts[v]) Serial.printf(" %s %u", measure::verdictName((measure::Verdict)v), (unsigned)run.verdicts[v]);
+    Serial.printf(" (expected: every shot %s)", run.expectReject ? "anything but ok"
+                  : run.expectEither ? "ok or outside" : measure::verdictName(run.expect));
+    if (run.posCounts) {
+      Serial.printf("; verdict check %s\n", run.verdictWrong ? "FAIL" : "PASS");
+      if (run.verdictWrong) pass = false;
+    } else {
+      Serial.printf("; not part of PASS: %s\n", run.posWhyNot);
+    }
+  }
+  // The position check (a blast or a spike: whether any scored).
   const Stat& pe = run.posErr;
   const uint32_t tried = pe.n + run.posUnsolved + run.posNotConverged;
-  if (run.fault == F_BLAST) {
-    Serial.printf("sim: blasts %.0f m in front, %.0f mm off the axis: %u of %u sent to the app\n",
-                  blastM, blastOffMm, (unsigned)run.sentToApp, (unsigned)run.seen);
+  if (noPoint(run.fault)) {
+    if (run.fault == F_BLAST)
+      Serial.printf("sim: blasts %.0f m in front, %.0f mm off the axis: %u of %u sent to the app\n",
+                    blastM, blastOffMm, (unsigned)run.sentToApp, (unsigned)run.seen);
+    else
+      Serial.printf("sim: spikes: %u of %u sent to the app\n", (unsigned)run.sentToApp, (unsigned)run.seen);
     if (run.posCounts) {
-      Serial.printf("sim: blast check %s (none may score)\n", run.sentToApp ? "FAIL" : "PASS");
+      Serial.printf("sim: %s check %s (none may score)\n", FAULT_TEXT[run.fault], run.sentToApp ? "FAIL" : "PASS");
       if (run.sentToApp) pass = false;
     } else {
-      Serial.printf("sim: blast check not part of PASS: %s\n", run.posWhyNot);
+      Serial.printf("sim: %s check not part of PASS: %s\n", FAULT_TEXT[run.fault], run.posWhyNot);
     }
   } else if (tried) {
     Serial.printf("sim: position vs the truth: %u of %u shots solved and converged", (unsigned)pe.n,
@@ -680,11 +757,20 @@ static void finish() {
     else
       Serial.printf("a channel dropped in %u\n", (unsigned)run.dropWrong);
     if (run.posCounts) {
+      // Shots that must be sent: all of them, and the error counts. Outside the area (beyond
+      // the mics, where the error grows) or two channels lost (4 mics): only whether they
+      // converged, and none was dropped.
       const bool drops = run.expectDrop >= 0 ? run.dropRight == tried : run.dropWrong == 0;
-      const bool ok = pe.n == tried && pe.outside == 0 && run.sentToApp == tried && drops;
-      Serial.printf("sim: position check %s (every shot solved and sent, %s, worst error within "
-                    "%.2f mm)\n", ok ? "PASS" : "FAIL",
-                    run.expectDrop >= 0 ? "the faulty channel dropped" : "none dropped", run.posLimitMm);
+      const bool sends = !run.expectReject && !run.expectEither && run.expect == measure::V_OK;
+      const bool errCounts = sends;
+      const bool ok = pe.n == tried && (!errCounts || pe.outside == 0) && drops &&
+                      (run.expectEither || run.sentToApp == (sends ? tried : 0));
+      Serial.printf("sim: position check %s (every shot solved, %s, %s, %s)\n", ok ? "PASS" : "FAIL",
+                    run.expectEither ? "sent or not" : sends ? "every one sent" : "none sent",
+                    run.expectDrop >= 0 ? "the faulty channel dropped" : "none dropped",
+                    errCounts ? (run.posLimitMm > SIM_POS_LIMIT_MM ? "worst error within 0.15 mm"
+                                                                   : "worst error within 0.10 mm")
+                              : "the error for information only");
       if (!ok) pass = false;
     } else {
       Serial.printf("sim: position check not part of PASS: %s\n", run.posWhyNot);
@@ -701,8 +787,9 @@ void simHelp() {
                  "  sim random [n]       n shots at random points on the card, default 100\n"
                  "  sim raw <t3>..<t8> [n] [gap]  L of CH3-CH8 at these ns, H gap ns later\n"
                  "                       (default 1000), n runs (default 20)\n"
-                 "  sim fault none | late <ch> | early <ch> | missing <ch> | honly <ch> |\n"
-                 "                       double <us> | blast <m> <mm off the axis>\n"
+                 "  sim fault none | late <ch> | early <ch> | missing <ch> [ch] |\n"
+                 "                       honly <ch> [ch] | slow <ch> [ch] | double <us> |\n"
+                 "                       blast <m> <mm off the axis> | spike\n"
                  "  sim model linear|sine, sim amp <n>, sim temp <C>|air, sim offset <ch> <ns>,\n"
                  "  sim thr <ch> <L> <H>  a channel's trip levels (default 1 4: k = L / (H - L))\n"
                  "  sim cal truth|reset  the simulator's mics, delays and k set off from the\n"
@@ -720,7 +807,10 @@ static void printSettings() {
                 isnan(simTempC) ? "the firmware's" : "sim temp", sa.c, FAULT_TEXT[fault]);
   if (fault == F_DOUBLE) Serial.printf(" %u us", (unsigned)doubleUs);
   else if (fault == F_BLAST) Serial.printf(" %.0f m in front, %.0f mm off the axis", blastM, blastOffMm);
-  else if (fault != F_NONE) Serial.printf(" CH%d", F + 1 + faultCh);
+  else if (fault != F_NONE && fault != F_SPIKE) {
+    Serial.printf(" CH%d", F + 1 + faultCh);
+    if (faultCh2 >= 0) Serial.printf(" and CH%d", F + 1 + faultCh2);
+  }
   Serial.println();
   for (int i = 0; i < N; i++)
     Serial.printf("sim: CH%d mic at (%.3f, %.3f) mm, h %.1f mm, own delay %.1f ns, trips at %g/%g "
@@ -803,7 +893,10 @@ bool simCommand(const char* cmd, const char* line) {
     int ch = 0;
     unsigned long us = 0;
     float m, off;
+    int ch2 = 0;
+    const int nch = sscanf(line, "%*s %*s %*s %d %d", &ch, &ch2);
     if (!strcmp(word, "none")) fault = F_NONE;
+    else if (!strcmp(word, "spike")) fault = F_SPIKE;
     else if (!strcmp(word, "blast") && sscanf(line, "%*s %*s %*s %f %f", &m, &off) == 2 && m >= 1 &&
              m <= 100 && off >= 0 && off <= 10000) {
       fault = F_BLAST;
@@ -813,15 +906,18 @@ bool simCommand(const char* cmd, const char* line) {
              us <= 100000) {
       fault = F_DOUBLE;
       doubleUs = us;
-    } else if (sscanf(line, "%*s %*s %*s %d", &ch) == 1 && simChannelArg(ch) >= 0 &&
+    } else if (nch >= 1 && simChannelArg(ch) >= 0 &&
                (!strcmp(word, "late") || !strcmp(word, "early") || !strcmp(word, "missing") ||
-                !strcmp(word, "honly"))) {
+                !strcmp(word, "honly") || !strcmp(word, "slow")) &&
+               (nch == 1 || (strcmp(word, "late") && strcmp(word, "early") && simChannelArg(ch2) >= 0 &&
+                             ch2 != ch))) {
       fault = !strcmp(word, "late") ? F_LATE : !strcmp(word, "early") ? F_EARLY
-            : !strcmp(word, "missing") ? F_MISSING : F_HONLY;
+            : !strcmp(word, "missing") ? F_MISSING : !strcmp(word, "honly") ? F_HONLY : F_SLOW;
       faultCh = simChannelArg(ch);
+      faultCh2 = nch == 2 ? simChannelArg(ch2) : -1;
     } else {
-      Serial.printf("sim fault none | late|early|missing|honly <ch> (ch %d..%d) | "
-                    "double <100..100000 us> | blast <1..100 m> <0..10000 mm>\n", F + 1, F + N);
+      Serial.printf("sim fault none | late|early <ch> | missing|honly|slow <ch> [ch] (ch %d..%d) | "
+                    "double <100..100000 us> | blast <1..100 m> <0..10000 mm> | spike\n", F + 1, F + N);
       return true;
     }
   } else if (!strcmp(sub, "cal")) {

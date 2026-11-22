@@ -1,6 +1,8 @@
 // OpenSights measurement core - the log lines: see record.h and ../../MODEL.md "Log lines".
 #include "record.h"
+#include <math.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,7 +31,8 @@ int formatFields(char* out, size_t size, const Cfg& cfg) {
     else n = add(out, size, n, "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g", ch.x, ch.y, ch.h, ch.k,
                  ch.offsetNs, ch.sigmaNs);
   }
-  return add(out, size, n, " lim=%.9g drop=%d", cfg.resLimitNs, cfg.dropOne ? 1 : 0);
+  return add(out, size, n, " lim=%.9g drop=%d lost=%d area=%.9g tog=%.9g pmax=%.9g", cfg.resLimitNs,
+             cfg.dropOne ? 1 : 0, cfg.maxLost, cfg.areaMm, cfg.togetherNs, cfg.pulseMaxNs);
 }
 
 // The next space-separated token of s from *p, as "key=value": false at the end.
@@ -104,6 +107,7 @@ bool parseCfg(const char* line, Cfg& cfg, uint32_t* id) {
   Cfg out = {};
   out.resLimitNs = RES_LIMIT_DEFAULT_NS;   // logs from before 3d have neither
   out.dropOne = false;
+  out.maxLost = -1;                        // and before 4a, no validity limits
   int seen = 0;
   const char* q = fields;
   char key[8];
@@ -116,6 +120,18 @@ bool parseCfg(const char* line, Cfg& cfg, uint32_t* id) {
     }
     if (!strcmp(key, "drop")) {
       out.dropOne = value[0] == '1';
+      continue;
+    }
+    if (!strcmp(key, "lost")) {
+      out.maxLost = (int8_t)strtol(value, &end, 10);
+      if (end == value) return false;
+      continue;
+    }
+    float* f = !strcmp(key, "area") ? &out.areaMm : !strcmp(key, "tog") ? &out.togetherNs
+             : !strcmp(key, "pmax") ? &out.pulseMaxNs : nullptr;
+    if (f) {
+      *f = strtof(value, &end);
+      if (end == value) return false;
       continue;
     }
     const int c = channelOf(key);
@@ -222,8 +238,9 @@ bool parseRec(const char* line, Rec& rec) {
   return true;
 }
 
-uint8_t solveInput(const Cfg& cfg, const Rec& rec, SolveInput& in) {
+uint8_t solveInput(const Cfg& cfg, const Rec& rec, SolveInput& in, uint8_t* shapeBad) {
   uint8_t mask = 0;
+  if (shapeBad) *shapeBad = 0;
   in.n = MAX_MICS;
   in.c = mmPerNs(rec.cMs);
   for (int c = 0; c < MAX_MICS; c++) {
@@ -233,22 +250,61 @@ uint8_t solveInput(const Cfg& cfg, const Rec& rec, SolveInput& in) {
     in.t0[c] = 0;
     if (!ch.mic || !((rec.channels >> c) & 1) || rec.t1[c] == NO_EDGE || rec.t2[c] == NO_EDGE)
       continue;
+    if (cfg.pulseMaxNs > 0) {
+      const int32_t w = rec.t2[c] - rec.t1[c];
+      if (w < 0 || (float)w > cfg.pulseMaxNs) {
+        if (shapeBad) *shapeBad |= 1 << c;
+        continue;
+      }
+    }
     in.t0[c] = arrivalT0((float)rec.t1[c], (float)rec.t2[c], ch.k, ch.offsetNs);
     mask |= 1 << c;
   }
   return mask;
 }
 
+static const char* const VERDICT_NAMES[V_COUNT] = {"ok", "few", "together", "nofit", "residual",
+                                                     "lost", "outside"};
+
+const char* verdictName(Verdict v) { return v < V_COUNT ? VERDICT_NAMES[v] : "?"; }
+
+bool parseVerdict(const char* name, Verdict* v) {
+  for (int i = 0; i < V_COUNT; i++)
+    if (!strcmp(name, VERDICT_NAMES[i])) {
+      *v = (Verdict)i;
+      return true;
+    }
+  return false;
+}
+
 EventFit solveEvent(const Cfg& cfg, const Rec& rec) {
   EventFit f = {};
   SolveInput in;
-  f.mask = solveInput(cfg, rec, in);
+  for (int c = 0; c < MAX_MICS; c++)
+    if (cfg.ch[c].mic && ((rec.channels >> c) & 1)) f.mics |= 1 << c;
+  f.mask = solveInput(cfg, rec, in, &f.shapeBad);
   f.used = __builtin_popcount(f.mask);
+  f.lost = __builtin_popcount(f.mics) - f.used;
   f.s.dropped = -1;
+  f.verdict = V_FEW;
   if (f.used < 4) return f;
+  int32_t lo = INT32_MAX, hi = INT32_MIN;
+  for (int c = 0; c < MAX_MICS; c++)
+    if ((f.mask >> c) & 1) {
+      if (rec.t1[c] < lo) lo = rec.t1[c];
+      if (rec.t1[c] > hi) hi = rec.t1[c];
+    }
+  f.spreadNs = (float)(hi - lo);
   f.solved = true;
   f.s = cfg.dropOne ? solveDropOne(in, cfg.resLimitNs, f.mask) : solve(in, f.mask);
-  f.good = f.s.converged && f.s.rmsNs <= cfg.resLimitNs;
+  f.lost = __builtin_popcount(f.mics) - __builtin_popcount(f.s.used);
+  if (cfg.togetherNs > 0 && f.spreadNs < cfg.togetherNs) f.verdict = V_TOGETHER;
+  else if (!f.s.converged) f.verdict = V_NOFIT;
+  else if (f.s.rmsNs > cfg.resLimitNs) f.verdict = V_RESIDUAL;
+  else if (cfg.maxLost >= 0 && f.lost > cfg.maxLost) f.verdict = V_LOST;
+  else if (cfg.areaMm > 0 && (fabsf(f.s.x) > cfg.areaMm || fabsf(f.s.y) > cfg.areaMm)) f.verdict = V_OUTSIDE;
+  else f.verdict = V_OK;
+  f.good = f.verdict == V_OK;
   return f;
 }
 

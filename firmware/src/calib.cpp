@@ -118,6 +118,11 @@ void calibBegin() {
   }
   if (!(cfg.resLimitNs > 0 && cfg.resLimitNs <= RES_LIMIT_MAX_NS))
     cfg.resLimitNs = measure::RES_LIMIT_DEFAULT_NS;
+  // Validity (step 4a): 0 (or -1 for lost) is off.
+  cfg.maxLost = prefs.getChar("lost", measure::MAX_LOST_DEFAULT);
+  cfg.areaMm = prefs.getFloat("area", measure::AREA_DEFAULT_MM);
+  cfg.togetherNs = prefs.getFloat("together", measure::TOGETHER_DEFAULT_NS);
+  cfg.pulseMaxNs = prefs.getFloat("pulsemax", measure::PULSE_MAX_DEFAULT_NS);
   haveRec = prefs.isKey("calrec") && prefs.getBytes("calrec", &rec, sizeof rec) == sizeof rec &&
             rec.version == CALREC_VERSION;
   if (!any) {
@@ -212,6 +217,12 @@ void calibHelp() {
                  "                       within this (stored, default 1500)\n"
                  "  dropone on|off       over the limit, the best fit with one channel left\n"
                  "                       out (stored, default on)\n"
+                 "  valid                the validity limits (stored; MODEL.md \"Validity\"):\n"
+                 "  valid lost <n>|off   mic channels that may be lost (no edge, pulse, dropped), 1\n"
+                 "  valid area <mm>|off  the hole within +-this of the centre, 105\n"
+                 "  valid together <us>|off  every first edge within this: a spike, 20\n"
+                 "  valid pulse <us>|off t2 - t1 up to this, or the channel is left out, 10\n"
+                 "  valid default        all four back to their defaults\n"
                  "  sigma [ch] [ns]      a channel's timing error, 1 sigma: the fit's weight\n"
                  "                       (stored, default 50; `sigma` lists them)\n"
                  "  cal                  the calibration record and calibration mode\n"
@@ -402,6 +413,68 @@ static bool policyCommand(const char* cmd, const char* line) {
   return true;
 }
 
+static void printValid() {
+  Serial.printf("valid: lost ");
+  if (cfg.maxLost < 0) Serial.print("off");
+  else Serial.printf("%d", cfg.maxLost);
+  Serial.print(", area ");
+  if (cfg.areaMm > 0) Serial.printf("+-%.0f mm", cfg.areaMm);
+  else Serial.print("off");
+  Serial.print(", together ");
+  if (cfg.togetherNs > 0) Serial.printf("%.1f us", cfg.togetherNs / 1000);
+  else Serial.print("off");
+  Serial.print(", pulse ");
+  if (cfg.pulseMaxNs > 0) Serial.printf("%.1f us", cfg.pulseMaxNs / 1000);
+  else Serial.print("off");
+  Serial.printf("; reslimit %.0f ns, drop-one %s\n", cfg.resLimitNs, cfg.dropOne ? "on" : "off");
+}
+
+// `valid`: the validity limits (MODEL.md "Validity", MEASUREMENT 4a).
+static bool validCommand(const char* line) {
+  char what[12] = "", arg[12] = "";
+  const int n = sscanf(line, "%*s %11s %11s", what, arg);
+  if (n < 1) {
+    printValid();
+    return true;
+  }
+  if (!strcmp(what, "default")) {
+    cfg.maxLost = measure::MAX_LOST_DEFAULT;
+    cfg.areaMm = measure::AREA_DEFAULT_MM;
+    cfg.togetherNs = measure::TOGETHER_DEFAULT_NS;
+    cfg.pulseMaxNs = measure::PULSE_MAX_DEFAULT_NS;
+    for (const char* k : {"lost", "area", "together", "pulsemax"})
+      if (prefs.isKey(k)) prefs.remove(k);   // a missing key would log an error
+    printValid();
+    changed();
+    return true;
+  }
+  const bool off = !strcmp(arg, "off");
+  char* end;
+  const float v = strtof(arg, &end);
+  const bool num = n == 2 && end != arg && *end == 0;
+  if (!strcmp(what, "lost") && (off || (num && v >= 0 && v <= 4 && v == (int)v))) {
+    cfg.maxLost = off ? -1 : (int8_t)v;
+    prefs.putChar("lost", cfg.maxLost);
+  } else if (!strcmp(what, "area") && (off || (num && v >= 10 && v <= 1000))) {
+    cfg.areaMm = off ? 0 : v;
+    prefs.putFloat("area", cfg.areaMm);
+  } else if (!strcmp(what, "together") && (off || (num && v > 0 && v <= 100))) {
+    cfg.togetherNs = off ? 0 : v * 1000;
+    prefs.putFloat("together", cfg.togetherNs);
+  } else if (!strcmp(what, "pulse") && (off || (num && v > 0 && v <= 100))) {
+    cfg.pulseMaxNs = off ? 0 : v * 1000;
+    prefs.putFloat("pulsemax", cfg.pulseMaxNs);
+  } else {
+    Serial.println("valid [default] | lost <0..4>|off | area <10..1000 mm>|off | together "
+                   "<us>|off | pulse <us>|off");
+    return true;
+  }
+  printValid();
+  if (!strcmp(what, "area")) Serial.println("valid: `mic` runs the blast check for the new area");
+  changed();
+  return true;
+}
+
 static bool sigmaCommand(const char* line) {
   int ch = 0;
   float v = NAN;
@@ -492,6 +565,7 @@ bool calibCommand(const char* cmd, const char* line) {
   if (!strcmp(cmd, "sigma")) return sigmaCommand(line);
   if (!strcmp(cmd, "cal")) return calCommand(line);
   if (!strcmp(cmd, "reslimit") || !strcmp(cmd, "dropone")) return policyCommand(cmd, line);
+  if (!strcmp(cmd, "valid")) return validCommand(line);
   if (!strcmp(cmd, "mic")) return micCommand(line);
   if (!strcmp(cmd, "k")) return kCommand(line);
   if (!strcmp(cmd, "offset")) return offsetCommand(line);

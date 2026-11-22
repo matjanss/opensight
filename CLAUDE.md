@@ -50,7 +50,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Part | Where it stands | Next (see) |
 |---|---|---|
 | Firmware: BLE, pairing, shot buffer | Done; protocol v2 | Flash shot store, uplink interface (PLAN D6, phase 3–4) |
-| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration, PLAN phase 0) passes all its simulated tests on a bare NodeMCU (2026-11-22, merged to `main`): the solver on the board, drop-one, the blast check, calibration mode and `tools/calibrate.py`. The DS18B20 and BME280 tests (3a-3, 3a-4) wait for the parts | Step 4 (validity) or the boards' arrival (PLAN phase 1: the same tests on real sensors); 3a-3/3a-4 when the parts are there |
+| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration, PLAN phase 0) passes all its simulated tests on a bare NodeMCU (2026-11-22, merged to `main`): the solver on the board, drop-one, the blast check, calibration mode and `tools/calibrate.py`. The DS18B20 and BME280 tests (3a-3, 3a-4) wait for the parts. Step 4a (the verdict) passes its simulated bench tests (2026-11-22, on `step4-validity`) | Merge 4a; then 4b (the curtain, simulated) or the boards' arrival (PLAN phase 1); 3a-3/3a-4 when the parts are there |
 | Sensor board (`hardware/acoustic-sensor/`) | v0.3 designed (KiCad 10), not yet on the bench | Its "check before ordering" list; then the summary's initial calibration, polarity, PLAN phase 1 |
 | Host board (`hardware/host-board/`) | v0.3 designed and routed, not yet on the bench; firmware already on its pin map | Order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner moved out along the diagonal (d about 15–25 mm, PLAN D1's update; principle in `hardware/frame/top-right-holder.svg`), plus bottom-middle and right-middle mics; the user designs and prints the holders. The firmware defaults still use the old slid position (65, 105) until d is fixed |
@@ -102,7 +102,8 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   -I lib/measure -o tools/replay tools/replay.cpp lib/measure/solver.cpp
   lib/measure/record.cpp` (FMA like the ESP32, so it matches the board to 0.001 mm; no
   `-mfma` on ARM), then
-  `tools/replay [--h mm] [--temp C] [--without ch] <log>` (also built in CI).
+  `tools/replay [--h mm] [--temp C] [--without ch] [--lost n|off] [--area mm|off]
+  [--together us|off] [--pulse us|off] <log>` (also built in CI).
 - **Release:** `git tag vX.Y.Z && git push origin vX.Y.Z`.
 - **Hardware can't be tested here: the user runs every bench test.** The radio link and
   the measurement can only be checked by compiling (and by host-side checks of pure code,
@@ -192,18 +193,24 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
 - `arrival.cpp`: t0 = t1 − k·(t2 − t1) − offset per channel (`measure::arrivalT0`), for
   the printed t0 lines and the simulator.
 - `position.cpp`: every event (but the self-test's) solved in `loop()` by
-  `measure::solveEvent` (4+ channels with a mic and both edges; drop-one when the full
-  fit is over `reslimit`); prints the `shot` and `rec` lines; sends a good shot to the app
-  (`shots.h`, the buffer in `main.cpp`). Also `testshot`, `stat`'s solver line, and the
+  `measure::solveEvent` (4+ channels with a mic, both edges and a pulse shape in range;
+  drop-one when the full fit is over `reslimit`), which also gives the verdict (step 4a,
+  MODEL.md "Validity": `ok`, `few`, `together`, `nofit`, `residual`, `lost`, `outside`);
+  prints the `shot` line (ending in the verdict, `[ok]`) and the `rec` line; sends an `ok`
+  shot to the app (`shots.h`, the buffer in `main.cpp`). The limits (`valid` in
+  `calib.cpp`) are in the `cfg` line (`lost= area= tog= pmax=`; missing means off, so
+  old logs replay as before). Also `testshot`, `stat`'s solver line, and the
   blast check `mic` runs (`lib/measure/blast.h`). `tools/replay` solves a log through the
-  same `solveEvent`, so it gets what the board got.
+  same `solveEvent`, so it gets what the board got, verdicts included.
 - `simulate.cpp` (`sim ...`): simulated shots at known positions on CH3–CH8 (6 mics, the
   D1/D2 layout; the pins drive their own inputs), checked against the truth: the capture,
-  t0 and the position. Faults: late, early, missing, H only, double, blast; trip levels
-  per channel (`sim thr`). It stands in until the sensor boards arrive. It takes the
+  t0, the position and the verdict. Faults: late, early, missing, H only (one channel or
+  two), slow (a pulse out of shape), double, blast, spike; trip levels per channel (`sim
+  thr`). It stands in until the sensor boards arrive. It takes the
   firmware's air by default; `sim temp` sets another temperature. Its position check counts
   for PASS only when the firmware has its mics (`mic sim`), air, offsets and k; with a
-  late or early channel, drop-one must drop it; a blast must not be sent.
+  late or early channel, drop-one must drop it; a blast or a spike must not be sent; every
+  shot must get the run's expected verdict.
 - `tools/calibrate.py`: the calibration fit (mics, k, offset per channel from sparks at
   known points; Deming-scaled residuals, see PLAN D5), `--selftest`. The tag
   `archive/step3-first-try` holds a first try that was set aside (it never ran on the board).
@@ -316,8 +323,9 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   - **Solver** (D12): on the ESP, x, y and the emission time by Levenberg–Marquardt in
     float, residuals and an uncertainty per shot, drop-one; a portable core tested on the
     PC; shots to the app in the v2 message, the rest on serial until protocol v3.
-  - **Validity** (step 4): residual, drop-one, loudness, sharpness, curtain, dead time.
-    Every event is logged.
+  - **Validity** (step 4): 4a the verdict (pulse shape, all at once, residual, lost
+    channels, area), 4b the curtain, 4c loudness and sharpness from real pulses. Every
+    event is logged with its verdict.
   - **Ground truth** (D11): scanned cards.
 - **Firmware structure** (D6):
   - a portable measurement core, tested on the PC with replay of recorded events;

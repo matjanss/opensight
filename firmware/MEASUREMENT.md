@@ -56,7 +56,7 @@ setup uses the same map, so nothing changes when the host board arrives.
 | Edge extraction | Measurement task, core 1 | First rising edge per line in the window, plus pulse length | t1 (L), t2 (H) per channel |
 | Arrival times | Measurement task | t0 = t1 − k·(t2 − t1) − offset per channel | t0 per channel |
 | Position solver | `loop()` (microseconds per event) | Fit of x, y and the emission time over 4–8 mics (PLAN D12), speed of sound from T, RH, p | x, y in mm, residuals, uncertainty |
-| Validity checks | Measurement task | Residual, loudness pattern, edge sharpness, dead time | Shot or reject reason |
+| Validity checks | `loop()`, with the solve (`measure::solveEvent`) | Pulse shape, all-at-once, residual, lost channels, area (4a); curtain (4b); loudness, sharpness (4c). Dead time: the capture | A verdict: `ok` or the reason |
 | Shot buffer | `loop()` (existing) | Indicates shots to the app, resends after a link drop | Protocol v2 shot |
 
 Tasks: NimBLE runs on core 0, and so does the air sensor task (once a minute).
@@ -85,7 +85,7 @@ so a problem shows up in the step that caused it.
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
 | 3 | Solver and calibration | **simulated tests pass** (bare NodeMCU, 2026-11-22; merged to `main`): 3a-1, 3a-2, 3a-5, 3b (PC), 3c, 3d, 3e. Waiting for the parts: 3a-3 and 3a-4 (DS18B20, BME280). With the boards: the same solver and calibration on real sensors (PLAN phase 1) |
-| 4 | Validity checks | planned |
+| 4 | Validity checks | 4a (the verdict) passes its simulated bench tests on a bare NodeMCU (2026-11-22); 4b (curtain) and 4c (loudness, sharpness) planned |
 | 5 | Protocol and app | planned |
 | 6 | Wi-Fi and MQTT | planned |
 
@@ -606,20 +606,335 @@ Bench test, bare NodeMCU, as 3d (`mic sim`, `sim fault none`, `k 0.33333`):
   without a sensor), `sim random 200`, logged. `tools/replay --fit-c <log>`: "+2.0 °C",
   to about 0.1 °C. `sim temp air`.
 
-Afterwards `sim cal reset`, `mic default`, `cal clear`.
+Afterwards `sim cal reset`, `mic default`, `cal clear`, `offset clear`, `sigma 50` (the
+fitted offsets and sigmas stay in NVS otherwise).
 
 The exact commands of 3d and 3e may still change as they are built; this file is updated
 with them.
 
 ### 4. Validity checks
 
-Build: in order, all channels inside the window (a channel with no edge: reject); acoustic pulse shape (t2 − t1 in range, not
-identical on all channels); fit residual ≤ ~1.5 µs; inside the scoring area; loudness
-matches distance; edge sharpness; outside dead time. Every event is logged with its reject
-reason.
+Every event gets a verdict: `ok` (a shot, sent to the app) or the first check it failed.
+In three parts, because only the first can be tested before the boards and the curtain
+are there:
 
-Bench test: on the range, with other lanes firing. Done when: no false shots from blasts
-or electrical spikes, and real shots are accepted.
+- **4a, the verdict** (passes, simulated): the checks that need only the edges and the fit.
+- **4b, the curtain:** IR_IN (GPIO 13) timed against the shot's emission time, the gate
+  (a dip 45–100 µs later, PLAN D9), and a dip with no acoustic event (a shot through an
+  existing hole: reported without a position, protocol v3). Simulated with a dip on GPIO
+  13; the real test waits for the curtain's bench test (PLAN phase 1.6).
+- **4c, loudness and sharpness:** the nearest mic must be the loudest (shortest t2 − t1)
+  and the edges sharp. Tuned from real pulses (PLAN phase 1–2); nothing to simulate yet.
+- **Then, on the range** (PLAN phase 2): no false shots from blasts or electrical
+  spikes, and real shots accepted. Every event is logged with its verdict, so the limits
+  are tuned by replaying range logs (`tools/replay --lost/--area/--together/--pulse`).
+
+The dead time stays in the capture (a second event inside it is `MISSED`, step 2).
+
+#### 4a. The verdict
+
+Build (on `step4-validity`):
+- **In the core** (`lib/measure/record.h`, MODEL.md "Validity"): `measure::solveEvent`
+  gives `ok` or the first failed check, in this order: `few` (under 4 channels to fit),
+  `together` (every first edge within 20 µs: a spike, or a blast head-on; a real shot
+  spreads over 126 µs or more), `nofit`, `residual` (over `reslimit`), `lost` (more than 1
+  of the event's mic channels left out: no edge, pulse shape, dropped), `outside` (beyond
+  ±105 mm). Before the fit, a channel whose t2 − t1 is not within 0–10 µs is left out
+  (pulse shape).
+- **The limits** go in the `cfg` line (`lost= area= tog= pmax=`), so a replay judges as the
+  board did; a `cfg` line without them (before 4a) means off. They are not part of the
+  calibration id.
+- **`valid`** lists them; `valid lost <n>|off`, `valid area <mm>|off`, `valid together
+  <us>|off`, `valid pulse <us>|off`, `valid default`. Stored in NVS `"cal"`.
+- **The `shot` line** ends with the verdict: `; sent as shot 12 [ok]`, `; not sent
+  [lost]: 2 channels lost (CH5 CH7), 1 allowed`. A channel left out for its pulse says so.
+  `stat` counts the verdicts since boot.
+- **The blast check** (`mic`) counts a blast as scored inside the validity area (105 mm)
+  instead of the card (100 mm). D2: still 0 with every mic and with any one dropped.
+- **The simulator** expects a verdict per run and counts the ones it got (`sim: verdicts:
+  ...; verdict check PASS`). New faults: `sim fault spike` (every line at once), `sim
+  fault slow <ch> [ch]` (H 40 µs after L), and a second channel for `missing` and `honly`.
+  Expected: one faulty channel `ok` (dropped or left out); two `lost`; a spike `together`;
+  a blast anything but `ok`; `sim at` beyond ±105 mm `outside`.
+- **The replay** gives the verdicts, compares them with the board's (`against the board's
+  verdicts: N compared, 0 differ`), and takes `--lost`, `--area`, `--together`,
+  `--pulse` to try other limits on a recorded log.
+- **Found on the PC:** a t0 5 µs early on one channel leaves an rms residual of 1291 ns,
+  under the 1500 ns limit, with the shot 0.47 mm off. The simulator's residuals stay under
+  100 ns, so `reslimit` can probably come down a lot once real pulses show their spread
+  (phase 1.2). Not changed yet.
+
+On the 3d log (1300 events), the replay with the 4a limits turns the 200 `sim raw` runs
+(every line at 0 ns, a perfect centre fit on four mics) and the head-on blasts into
+`together`; the rest keeps its verdicts.
+
+##### 4a bench test
+
+**What it shows:** every simulated event gets the verdict it should, an `ok` shot is
+sent to the app and nothing else is, and the replay on the PC gives the board's verdicts
+from the log alone.
+
+**Setup:** the bare NodeMCU on USB, nothing connected to CH3–CH8 (the simulator drives
+those pins itself) or GPIO 12. The app may stay connected; `ok` shots then show up on its
+card. From the repository root:
+
+```
+pio run -d firmware -t upload
+pio device monitor -d firmware --echo --filter log2file
+```
+
+Keep this one monitor session (and its log file) open for 4a-0 to 4a-6: 4a-7 replays it.
+The log is a `device-monitor-<date>-<time>.log` file in the folder the monitor was started
+from (your earlier ones are in `firmware/logs/`). Every `sim` run prints the `cfg` line first, so the log carries its own settings.
+
+How to read a run. Each simulated shot prints:
+- the event's `evt` and t0 lines (as in step 2);
+- the board's `shot` line, ending with the verdict in brackets: `; sent as shot 7 [ok]`,
+  or `; not sent [lost]: ...` with the reason; then its `rec` line (for the replay);
+- the simulator's line `sim (30.0, 30.0) mm, t0 error ns vs sent/vs true: ...; [ok];
+  position error 0.009 mm`; a `(!)` there marks a shot that broke the check.
+
+Then the run's summary, with these lines (the numbers per test are below):
+
+```
+sim: verdicts: ok 20 (expected: every shot ok); verdict check PASS
+sim: position vs the truth: 20 of 20 shots solved and converged, error rms ..., worst ...
+sim: 20 of 20 sent to the app; drop-one: ...
+sim: position check PASS (every shot solved, every one sent, none dropped, worst error within 0.10 mm)
+sim: PASS
+```
+
+If a run starts with `verdict check for information only` or `position check for
+information only: the firmware's offsets are not the simulator's`, the settings are not
+clean: the final `sim: PASS` then covers the capture only. Do 4a-0 again, then the run.
+
+The last line is the result of the test. The expected values come from a simulation of
+the simulator on the PC (the same core, 25 ns ticks, 100 ns sampling at a random phase).
+The board is a little noisier: the error up to about 1.5 times the values given.
+
+**4a-0, the settings.**
+
+Start from clean settings. The offsets and sigmas a calibration (3e) stored stay in NVS
+until cleared, and so do the `valid` limits of an earlier run (4a-4 leaves `together off`
+if it is not finished).
+
+```
+valid default
+offset clear
+sigma 50
+mic default
+mic sim
+k 0.33333
+sim fault none
+stat
+```
+
+- After each of them the `cfg` line ends in
+  `lim=1500 drop=1 lost=1 area=105 tog=20000 pmax=10000`.
+- `valid default`: `valid: lost 1, area +-105 mm, together 20.0 us, pulse 10.0 us;
+  reslimit 1500 ns, drop-one on`.
+- `offset clear`, `sigma 50`: every channel `0`, every channel `50`. In the `cfg` line each
+  mic reads `...,0.333330005,0,50` after `k`.
+- `mic default` and `mic sim` each run the blast check. The first line reads `scored = a
+  fit inside +-105 mm within the 1500 ns limit` (it said ±100 mm before 4a). Then seven
+  lines, `every mic` and `without CH..` for each mic, all `0 of 624 scored`. The smallest
+  residuals are about 34.3, 34.7, 13.5, 37.5, 37.3, 22.1 and 35.4 µs, the same as in 3d.
+  The last line: `mic: no blast scores, with every mic or with any one dropped`.
+  `mic sim` gives the same numbers, for CH3–CH8.
+- `stat` ends with `verdicts since boot: ok 0 few 0 together 0 nofit 0 residual 0 lost 0
+  outside 0` (plus any events since boot, e.g. BOOT test shots).
+
+**4a-1, clean shots.**
+
+```
+sim random 200
+```
+
+- At the start: `sim: verdict check on: every shot ok` and `sim: position check on: the
+  firmware has the simulator's mics and air (limit 0.10 mm)`.
+- Every `shot` line ends `; sent as shot N [ok]`. 200 shots appear in the app.
+- Summary: `verdicts: ok 200 ... verdict check PASS`; the position error about 0.013 mm
+  rms, worst about 0.06 mm (as 3d-2); `200 of 200 sent`; `a channel dropped in 0`;
+  `position check PASS`; `sim: PASS`.
+
+**4a-2, one bad channel: still a shot.** Four runs of 20 shots at (30, 30). CH5 is the
+slid top-right mic.
+
+```
+sim fault late 5
+sim at 30 30 20
+sim fault missing 5
+sim at 30 30 20
+sim fault slow 5
+sim at 30 30 20
+valid pulse off
+sim at 30 30 20
+valid pulse 10
+sim fault none
+```
+
+Every run: `verdict check on: every shot ok`, the position check's limit 0.15 mm, every
+`shot` line `[ok]` and sent, `verdicts: ok 20`, `20 of 20 sent to the app`, the error
+about 0.009 mm rms, worst about 0.015 mm, `sim: PASS`. What differs:
+
+| Run | In each `shot` line | `drop-one:` in the summary |
+|---|---|---|
+| late 5 | `CH5 +2xxxx (dropped)`, about +24 000 ns | `CH5 dropped in 20, another channel in 0, none in 0` |
+| missing 5 | no CH5 in the residuals; the sim line says `CH5 - (as sent)` | `a channel dropped in 0` |
+| slow 5 | no CH5 in the residuals, and `; pulse shape out of range on CH5 (t2 - t1 not within 0-10000 ns: left out)` | `a channel dropped in 0` |
+| slow 5, `valid pulse off` | CH5 back in, about −13 000 ns `(dropped)`: its t0 is 13 µs early, and drop-one catches it instead | `CH5 dropped in 20, another channel in 0, none in 0` |
+
+- With the slow pulse, the summary also says `CH5 t0 vs true arrival: mean -13xxx ns ...
+  (the slow pulse: its t0 is off, it must be left out)`. That is the model's error on
+  that channel, not a capture error, and it doesn't fail the test.
+- `valid pulse off` and `valid pulse 10` each print the `valid` line (`pulse off`, then
+  `pulse 10.0 us`) and a new `cfg` line (`pmax=0`, then `pmax=10000`).
+
+**4a-3, two bad channels: not a shot.**
+
+```
+sim fault missing 5 7
+sim at 30 30 20
+valid lost 2
+sim at 30 30 20
+valid lost 1
+sim fault none
+```
+
+- `sim fault missing 5 7` prints `fault missing CH5 and CH7`.
+- First run: `verdict check on: every shot lost`.
+  - Every `shot` line, with residuals for CH3, CH4, CH6 and CH8 only, ends `; not sent
+    [lost]: 2 channels lost (CH5 CH7), 1 allowed`. Nothing appears in the app.
+  - Summary: `verdicts: lost 20 (expected: every shot lost); verdict check PASS`, `0 of 20
+    sent`, `position check PASS (every shot solved, none sent, none dropped, the error for
+    information only)`, `sim: PASS`.
+  - The error is shown anyway: about 0.013 mm rms, worst about 0.025 mm.
+- After `valid lost 2` (the `cfg` line now has `lost=2`): `every shot ok`. The same four
+  mics are now accepted, `[ok]`, `20 of 20 sent`, the error checked (limit 0.15 mm),
+  `sim: PASS`.
+
+**4a-4, an electrical spike: every line at once.**
+
+```
+sim fault spike
+sim at 0 0 20
+valid together off
+sim at 0 0 20
+valid together 20
+sim fault none
+```
+
+- At the start: `sim: spike check on: none may be sent to the app` and `verdict check on:
+  every shot together`.
+- Each `shot` line:
+  - is a nonsense fit (about (−26, +10) mm in the PC simulation, rms about 21 600 ns, one
+    channel `(dropped)`);
+  - ends `; not sent [together]: every first edge within 0.0 us (limit 20): an electrical
+    spike, or a blast from straight ahead`. It may read 0.1 us when the two MCPWM units
+    are a tick apart.
+- The sim lines start `sim spike, t0 error ns vs sent/vs true:` and end `[together]; not
+  sent`.
+- Summary: `verdicts: together 20 ... PASS`, `spikes: 0 of 20 sent to the app`, `spike
+  check PASS (none may score)`, `sim: PASS`.
+- With `valid together off` (`tog=0`): `verdict check on: every shot anything but ok`.
+  Every shot is `[residual]` (`rms over the 1500 ns limit even with one channel
+  dropped`), 0 of 20 sent, PASS. The fit's residual alone rejects it here, but the
+  `together` reason says what it was.
+
+**4a-5, the area.**
+
+```
+sim at 115 0 20
+sim at 100 0 20
+```
+
+- (115, 0) lies beyond the right-middle mic. At the start: `verdict check on: every shot
+  outside`.
+  - Each shot: x about +115.0, `; not sent [outside]: outside the +-105 mm area`.
+  - Summary: `verdicts: outside 20`, `0 of 20 sent`, `position check PASS (every shot
+    solved, none sent, none dropped, the error for information only)`, `sim: PASS`.
+  - The error is about 0.035 mm rms, worst about 0.06 mm. It grows out there, which is
+    why it isn't checked.
+- (100, 0): `every shot ok`, `[ok]`, `20 of 20 sent`, the error about 0.012 mm rms,
+  `sim: PASS`.
+
+**4a-6, blasts.**
+
+```
+sim fault blast 10 0
+sim at 0 0 20
+sim fault blast 10 500
+sim at 0 0 20
+sim fault blast 25 2000
+sim at 0 0 20
+sim fault none
+stat
+```
+
+- Every run: `blast check on: none may be sent to the app` and `verdict check on: every
+  shot anything but ok`. The rms is about 21 000–23 000 ns with one channel dropped.
+  Summary: `blasts ...: 0 of 20 sent to the app`, `blast check PASS (none may score)`,
+  `verdict check PASS`, `sim: PASS`.
+- `blast 10 0` (straight ahead): every shot `[together]`, `every first edge within 1.6
+  us` or so.
+- `blast 10 500` and `blast 25 2000`: every shot `[residual]`. The spread is 30–50 µs,
+  over the together limit, and the residual rejects them.
+- `stat`, if 4a-1 to 4a-6 each ran once since boot: `verdicts since boot: ok 320 few 0
+  together 40 nofit 0 residual 60 lost 20 outside 20`.
+
+**4a-7, replay on the PC.** Stop the monitor (Ctrl-C) so the log is complete. Build the
+replay and run it on the log, from `firmware/`. If the monitor was restarted between
+tests, give every log of 4a-0 to 4a-6, in order: `<log>` stands for that list (for
+example `logs/device-monitor-261122-1847*.log logs/device-monitor-261122-1851*.log ...`).
+Leave out logs of runs that were done again.
+
+```
+g++ -std=gnu++17 -O2 -mfma -ffp-contract=fast -I lib/measure -o tools/replay tools/replay.cpp lib/measure/solver.cpp lib/measure/record.cpp
+tools/replay --quiet <log>
+tools/replay --quiet --together off <log>
+tools/replay --quiet --lost 2 <log>
+```
+
+- **As logged:** `replay: 460 events, ...`. Then:
+  - `verdicts: ok 320 few 0 together 40 nofit 0 residual 60 lost 20 outside 20`, the same
+    as `stat`;
+  - `against the board's shot lines (as printed, 0.001 mm steps): 460 compared, ...
+    worst 0.0010 mm` (or 0.0000);
+  - `against the board's verdicts: 460 compared, 0 differ`.
+
+  Any difference is a fault: the replay and the board don't judge alike. The counts are
+  for 4a-1 to 4a-6 run once each; repeated runs add to them.
+- **`--together off`:** `together 0`, `residual 100`: the 20 spikes and the 20 head-on
+  blasts fall to the residual check instead. `ok` stays 320. The verdict line says `40
+  differ (settings changed for the replay: differences expected)`.
+- **`--lost 2`:** `ok 340`, `lost 0`: 4a-3's first run would have been sent on four
+  mics. `20 differ`.
+
+**4a-8, stored settings.** Start the monitor again (no log needed).
+
+```
+valid area 110
+```
+
+- It prints `valid: ... area +-110 mm ...`, then `valid: `mic` runs the blast check for
+  the new area`, and a `cfg` line with `area=110`.
+- Press EN (reset). The boot's `cfg` line has `area=110`, and `valid` says `area +-110
+  mm`.
+
+```
+valid default
+valid foo
+mic default
+```
+
+- `valid default` gives the 4a-0 line again (`area +-105 mm`), with a `cfg` line `lost=1
+  area=105 tog=20000 pmax=10000`.
+- `valid foo` prints the usage: `valid [default] | lost <0..4>|off | area <10..1000
+  mm>|off | together <us>|off | pulse <us>|off`.
+- `mic default` sets the D1/D2 layout back for the real sensors.
+
+**Report back:** the `sim: PASS`/`FAIL` line of each run, the error numbers of 4a-1, the
+`stat` line of 4a-6, and the replay's three summaries. For any FAIL, send the log too.
 
 ### 5. Protocol and app
 
@@ -657,6 +972,12 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-22 | 4a | 4a-8, bare NodeMCU, serial console (user report, pasted) | **PASS; step 4a passes.** `valid area 110`: `area +-110 mm`, the hint "`mic` runs the blast check for the new area", `area=110` in the `cfg` line. After the EN reset the boot `cfg` line and `valid` still read 110 (stored in NVS). `valid default`: back to `lost 1, area +-105 mm, together 20.0 us, pulse 10.0 us`, `cfg` id 5C14D0AC again (the same settings give the same id). `valid foo`: the usage line. `mic default`: the blast check 0 of 624 everywhere, `area=105`. At boot, with nothing on J5, the Arduino I2C driver logs four lines `i2cWriteReadNonStop ... ESP_ERR_INVALID_STATE` (error 259): the BME280 probe got no acknowledge. They were already in the logs of 3b-3e; harmless, the `air:` line reports no sensor. All of 4a-0 to 4a-8 pass. |
+| 2026-11-22 | 4a | 4a-6's missing run, bare NodeMCU, the same log (`-185126.log`); 4a-7 again on both logs | **PASS.** Blast 10 m/500 mm: 20 of 20 `[residual]` (rms 20500-22100 ns, fits at x −19 to −33, y +3 to +16 mm), 0 sent, blast check PASS. 4a-7 on all 480 events: ok 320, together 60, residual 60, lost 20, outside 20 (the doc's counts plus the repeated 10 m/0 run, 20 more together). 0 of 480 verdicts differ from the board's. `--together off`: residual 120, 60 differ. `--lost 2`: ok 340, 20 differ. True points 0.0120 mm rms, worst 0.0315 mm. Left: 4a-8. |
+| 2026-11-22 | 4a | 4a-4 to 4a-6, bare NodeMCU, logged (`logs/device-monitor-261122-185126.log`, after 4a-3); 4a-7 on the PC on that log and `-184742.log` | **PASS, but one blast run is still to do.** 4a-4 spike: 20 of 20 `[together]`, "every first edge within 0.0 us", fit (−26.291, +9.846) mm, rms 21572 ns, CH4 dropped, 0 sent. With `valid together off`: 20 of 20 `[residual]`, 0 sent. 4a-5: (115, 0) 20 of 20 `[outside]`, 0 sent, error 0.0347 mm rms, worst 0.0622 mm (PC 0.035). (100, 0) 20 of 20 `[ok]`, 0.0120 mm rms, worst 0.0128 mm (PC 0.012). 4a-6 blast 10 m/0 mm: 20 of 20 `[together]`, "within 1.6 us", rms about 21300 ns, 0 sent. A typo (`saim`) left the next command unrun, so that blast ran twice and 10 m/500 mm is missing. Blast 25 m/2000 mm: 20 of 20 `[residual]`, rms 20000-22700 ns, 0 sent. `stat` since boot: ok 920, together 80, residual 60, lost 60, outside 20; the solve took 422 µs mean, 1.27 ms longest. 4a-7: 460 events, ok 320, together 60, residual 40, lost 20, outside 20 (the doc's 40/60 with the missing run; the second 10 m/0 run in its place). Against the board, 0 of 460 verdicts differ, shot lines 0.0000 mm worst. True points: 320 good, 0.0120 mm rms, worst 0.0315 mm. `--together off`: together 0, residual 100, 60 differ. `--lost 2`: ok 340, lost 0, 20 differ. To do: 4a-6's 10 m/500 mm, then 4a-8. |
+| 2026-11-22 | 4a | 4a-3, bare NodeMCU, logged (`logs/device-monitor-261122-185126.log`, a new monitor session) | **PASS.** `sim fault missing 5 7`: 20 of 20 `not sent [lost]: 2 channels lost (CH5 CH7), 1 allowed`, verdict check PASS (lost 20), 0 sent; residuals on CH3, CH4, CH6 and CH8 only, the error 0.0128 mm rms, worst 0.0236 mm, for information (PC: 0.013, 0.025). `valid lost 2` (`lost=2` in the `cfg` line): 20 of 20 `[ok]` and sent, verdict check PASS, 0.0134 mm rms, worst 0.0236 mm. `valid lost 1` restored `lost=1`. **Changed:** those shots said `(with a channel lost)` with two lost; the shot line now says `(with 2 channels lost)` (from the next upload; the replay reads only the `[ok]`). 4a-7 now says the replay takes every log of 4a-0 to 4a-6 when the monitor was restarted. |
+| 2026-11-22 | 4a | 4a-0 to 4a-2 again, bare NodeMCU, clean settings, logged (`logs/device-monitor-261122-184742.log`) | **PASS.** 4a-0: `valid default`, `offset clear` (all 0), `sigma 50` (all 50); the `cfg` line ends `lost=1 area=105 tog=20000 pmax=10000`. The blast check found 0 of 624 everywhere, smallest 34.3, 34.7, 13.5, 37.5, 37.3, 22.1, 35.4 µs, exactly as in 3d. `k` was typed as 0.3333 (0.333299994 in the `cfg` line, not 0.33333); that makes no visible difference. 4a-1 `sim random 200`: verdict check PASS (ok 200), error rms 0.0127 mm, worst 0.0315 mm, mean (−0.0007, +0.0004) mm, residual mean 26 ns, worst 51 ns; 200 of 200 sent, none dropped (PC: 0.013, 0.06). 4a-2, 20 shots each at (30, 30), all `[ok]` and sent, 0 `(!)`: late CH5 dropped in 20 (residual +23914 to +24088 ns), rms 0.0086 mm; missing CH5 rms 0.0094 mm; slow CH5 with the shape note in 20 of 20, none dropped, rms 0.0100 mm; slow with `valid pulse off` CH5 dropped in 20 (−13251 to −13077 ns), rms 0.0095 mm. Worst 0.0154 mm in every 4a-2 run (PC: 0.009 rms, 0.015 worst). |
+| 2026-11-22 | 4a | 4a-0 to 4a-2, bare NodeMCU, logged (`logs/device-monitor-261122-154003.log`, `-184123.log`) | **Verdicts right, numbers not counted: the settings were not clean.** The offsets and sigmas of the 3e calibration were still in NVS (CH3 +130.7, CH4 −108.8, CH5 −476.0, CH6 +395.4, CH7 +169.8, CH8 −111.1 ns; sigma 36-41 ns). The second session also had `together off`, left by 4a-4 in the first. So every run said "for information only", and its `sim: PASS` covered only the capture. What did hold: 4a-0's blast check found 0 of 624 everywhere (smallest 34.5, 34.9, 13.5, 37.6, 37.6, 22.2, 35.5 µs; 3d: 34.3, 34.7, 13.5, 37.5, 37.3, 22.1, 35.4). 4a-1: 200 of 200 `[ok]` and sent, none dropped. 4a-2: every shot `[ok] (with a channel lost)` and sent. Late CH5 was dropped (residual +24564 ns, expected about +24000). Missing CH5 shows as `-`. Slow CH5 gets the shape note "t2 - t1 not within 0-10000 ns: left out" (t2 − t1 = 40000 ns). With `valid pulse off` it was dropped instead (residual −12458 ns, expected about −13000). The position errors carry the offsets' bias: 4a-1 0.141 mm rms, worst 0.343 mm, mean (−0.122, −0.047) mm, residual mean 170 ns (expected 0.013 mm, 0.06 mm). 4a-2 0.085 mm rms (expected 0.009); it is lower there because CH5, the largest offset, is out of the fit. **Changed:** 4a-0 now starts with `valid default`, `offset clear`, `sigma 50`. "How to read a run" says what "for information only" means. 3e's clean-up ends with `offset clear`, `sigma 50`. To do: 4a-0 to 4a-2 again. |
 | 2026-11-22 | 3e | 3e-1 to 3e-4, bare NodeMCU, logged | **PASS (user report; numbers from the logs).** 3e-1 after `sim cal truth`: error 1.30 mm rms, worst 1.74 mm, residual mean 882 ns (more than the 0.5 mm expected: this truth's k were 0.35-0.49 against the firmware's 1/3). 3e-2: 160 sparks; `calibrate.py`: residual 39-40 ns, the error over the 16 points 1.0 → 0.014 mm rms; against the truth k within 0.024 and the offsets within 61 ns (mean removed). The record was stored ("in use"). 3e-3: `sim random 200` 0.0140 mm rms, worst 0.0612 mm, residual mean 29 ns (3d-2: 0.0125); `mic h` made the record stale, and it stayed stale after the value was set back. 3e-4 (`sim temp 20`): error 0.365 mm rms; `replay --fit-c`: +1.99 °C, and with it the error against the true points 0.0152 mm rms. **Found:** the stored record said 116 points and 260 sparks: `calibrate.py` took every event with a `pt`, including 3e-1's 100 random simulated shots (right here, as the truth hadn't changed, but a log with an earlier truth would have spoiled the fit; run on the whole log afterwards, it picked the post-calibration runs, the wrong-temperature one included: 575 ns). It now uses calibration mode's sparks only (`--any-pt` for the simulator's other shots), from the newest session; on the same log: 160 sparks, 16 points, the same values within the noise. `sim` lists the simulator's mics to 0.001 mm now (0.1 before, too coarse to compare). Step 3's simulated tests are done. |
 | 2026-11-22 | 3e | Built; PC checks | Calibration mode (`cal on`, `cal pt`), `pt`/`mode`/`cal`/`stale` in the `rec` line, the calibration record (`cal ch`, `cal id`, stale on any change), `sigma`, `sim cal truth|reset|<n>`, `tools/calibrate.py`, `replay --fit-c`. **Found on the way:** the fit with plain residuals pulled every k low by 0.02-0.05 and the offsets with it (noise in t2 − t1, errors in variables); dividing each residual by √((1 + k)² + k²) fixes it (Deming), with the plain robust fit first and k bounded (the scaled cost has a false minimum at k → ∞; one seed ran away to k = 656). `calibrate.py --selftest`, 6 seeds: residual 37-40 ns, mics within 0.03 mm, k within 0.03 (≤ 1.8 sd), offsets within 85 ns (≤ 2.4 sd), position 0.51 → 0.013 mm rms. The `cal id` the PC prints matches the board's (the same lines read with `sscanf`). `--fit-c` on a log 2 °C off: +1.96 °C. 14 native tests pass; the firmware builds. Run 3e-1 to 3e-4. |
 | 2026-11-22 | 3d | 3d-0 to 3d-5, bare NodeMCU | **PASS (user report; numbers from the log).** 3d-1 `sim raw 0 0 0 0 0 0 200`: PASS, 0 late starts. 3d-2 `mic sim`: blast check 0 scored everywhere (smallest 34.3, 34.7, 13.5, 37.5, 37.3, 22.1, 35.4 µs, as on the PC); `sim random 500`: error rms 0.0125 mm, worst 0.0516 mm, residual mean 27 ns, worst 52 ns, none dropped (PC: 0.013, 0.06, 26, 60). 3d-3 late CH5: 100 of 100 sent with CH5 dropped, rms 0.0154 mm, worst 0.0433 mm; early CH8: 100 of 100 with CH8 dropped, rms 0.0154 mm, worst 0.0436 mm. `stat` after them: 477 µs per event mean, 2.4 ms longest (drop-one's 7 fits). 3d-4: blasts 10 m/0, 10 m/500 mm, 25 m/2 m: 0 of 20 sent each. The square: the four corners plus both middles score 0 with every set (5 or 6 mics, never only the square); with CH7 cleared (the square plus the right middle) the check flags "without CH8": 484, since dropping the right middle leaves the square; with CH7 and CH8 cleared, 484 of 624, and 20 of 20 frontal blasts sent at (0, 0). The blast check takes 1.0 s with 6 mics (7 sets). 3d-5 `sim thr 4 1 3`: rms 0.016-0.017 mm, residual mean 41-42 ns, and a bias: mean (−0.007, +0.007) mm; `k 4 0.5`: PASS, rms 0.0121 mm, mean within 0.001 mm. A wrong k shows more as a bias than as spread. |

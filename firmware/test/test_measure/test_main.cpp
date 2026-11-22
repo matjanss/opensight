@@ -270,6 +270,7 @@ static Cfg sampleCfg() {
   cfg.ch[6].k = 0.25f;   // no mic, but its own k
   cfg.resLimitNs = 1234.5f;
   cfg.dropOne = true;
+  cfg.maxLost = -1;   // validity off, as before 4a (test_validity turns it on)
   return cfg;
 }
 
@@ -291,11 +292,27 @@ static void test_cfg_round_trip() {
                      cfg.ch[c].offsetNs == back.ch[c].offsetNs && cfg.ch[c].sigmaNs == back.ch[c].sigmaNs);
   }
   TEST_ASSERT_TRUE(back.resLimitNs == cfg.resLimitNs && back.dropOne);
+  TEST_ASSERT_TRUE(back.maxLost == -1 && back.areaMm == 0 && back.togetherNs == 0 && back.pulseMaxNs == 0);
+  // The validity limits (4a) round-trip too, and change the cfg's id but not the calibration's.
+  Cfg v = cfg;
+  v.maxLost = 1;
+  v.areaMm = 105;
+  v.togetherNs = 20000;
+  v.pulseMaxNs = 10000.5f;
+  char vline[640];
+  formatCfg(vline, sizeof vline, v);
+  printf("%s\n", vline);
+  TEST_ASSERT_TRUE(parseCfg(vline, back, &id));
+  TEST_ASSERT_TRUE(back.maxLost == 1 && back.areaMm == 105 && back.togetherNs == 20000 &&
+                   back.pulseMaxNs == 10000.5f);
+  TEST_ASSERT_NOT_EQUAL(cfgId(cfg), cfgId(v));
+  TEST_ASSERT_EQUAL_HEX32(calibrationId(cfg), calibrationId(v));
   // A 3c line (before `lim=` and `drop=`): 1500 ns, no drop-one, as 3c had.
   TEST_ASSERT_TRUE(parseCfg("cfg id=C2127541 CH1=- CH2=- CH3=- CH4=- CH5=-105,-105,10.5,0.333333343,0,50 "
                             "CH6=105,-105,10.5,0.333333343,0,50 CH7=105,105,10.5,0.333333343,0,50 "
                             "CH8=-105,105,10.5,0.333333343,0,50", back, &id));
   TEST_ASSERT_TRUE(back.resLimitNs == 1500 && !back.dropOne && back.ch[4].mic && !back.ch[0].mic);
+  TEST_ASSERT_TRUE(back.maxLost == -1 && back.areaMm == 0 && back.togetherNs == 0 && back.pulseMaxNs == 0);
   // With text before it (a monitor's timestamp), and a line end.
   std::string withPrefix = std::string("12:00:01.123 > ") + line + "\r\n";
   TEST_ASSERT_TRUE(parseCfg(withPrefix.c_str(), back, &id));
@@ -414,6 +431,102 @@ static void test_solve_event() {
   TEST_ASSERT_EQUAL_INT(3, f.used);
 }
 
+// A rec of a shot at (x, y) on the sample cfg's six mics: comparator delay 600 ns, so
+// t2 - t1 = 600 / k; `lateCh` (or -1) 24 us late.
+static Rec shotRec(const Cfg& cfg, float x, float y, int lateCh = -1) {
+  const float c = (float)soundSpeedMs(18, 50, 101325);
+  SolveInput truth = layout(10.5f, 50, c);
+  truth.mic[2].h = 21.5f;
+  shoot(truth, x, y, 0);
+  Rec r = {};
+  r.cMs = c;
+  r.channels = 0x3F;
+  for (int i = 0; i < MAX_MICS; i++) r.t1[i] = r.t2[i] = NO_EDGE;
+  float first = 1e30f;
+  for (int i = 0; i < 6; i++) first = fminf(first, truth.t0[i]);
+  for (int i = 0; i < 6; i++) {
+    const float k = cfg.ch[i].k, delay = 600;
+    r.t1[i] = (int32_t)lroundf(truth.t0[i] - first + delay + (i == lateCh ? 24000 : 0));
+    r.t2[i] = r.t1[i] + (int32_t)lroundf(delay / k);
+  }
+  return r;
+}
+
+// The verdict (MODEL.md "Validity"): each check, in its order.
+static void test_validity() {
+  Cfg cfg = sampleCfg();
+  for (int c = 0; c < 6; c++) cfg.ch[c].offsetNs = 0;
+  cfg.resLimitNs = 1500;
+  cfg.maxLost = MAX_LOST_DEFAULT;
+  cfg.areaMm = AREA_DEFAULT_MM;
+  cfg.togetherNs = TOGETHER_DEFAULT_NS;
+  cfg.pulseMaxNs = PULSE_MAX_DEFAULT_NS;
+  // A clean shot.
+  Rec r = shotRec(cfg, 31, -47);
+  EventFit f = solveEvent(cfg, r);
+  TEST_ASSERT_EQUAL_STRING("ok", verdictName(f.verdict));
+  TEST_ASSERT_TRUE(f.good && f.lost == 0 && f.mics == 0x3F && f.spreadNs > 126000);
+  // One channel late: dropped, one lost, still a shot.
+  r = shotRec(cfg, 31, -47, 2);
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_TRUE(f.good && f.s.dropped == 2 && f.lost == 1);
+  // ... and another without its H edge: two lost.
+  r.t2[4] = NO_EDGE;
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_EQUAL_STRING("lost", verdictName(f.verdict));
+  TEST_ASSERT_TRUE(f.s.dropped == 2 && f.lost == 2 && f.s.converged && f.s.rmsNs < 1500);
+  // With validity off (a log from before 4a) that is a shot.
+  Cfg off = cfg;
+  off.maxLost = -1;
+  TEST_ASSERT_TRUE(solveEvent(off, r).good);
+  // A pulse too long, and one with H before L: left out for their shape.
+  r = shotRec(cfg, 31, -47);
+  r.t2[4] = r.t1[4] + 15000;
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_TRUE(f.good && f.shapeBad == 0x10 && f.lost == 1 && f.mask == 0x2F);
+  r.t2[4] = r.t1[4] - 100;
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_TRUE(f.good && f.shapeBad == 0x10 && f.lost == 1);
+  off = cfg;
+  off.pulseMaxNs = 0;   // off: the 15 us pulse is used (and its t0 is far off)
+  r.t2[4] = r.t1[4] + 15000;
+  f = solveEvent(off, r);
+  printf("pmax off, CH5 t0 5 us early: rms %.0f ns, dropped %d, at (%.2f, %.2f) for (31, -47)\n", f.s.rmsNs, f.s.dropped, f.s.x, f.s.y);
+  TEST_ASSERT_TRUE(f.shapeBad == 0 && f.mask == 0x3F);
+  // Every channel at once: an electrical spike.
+  for (int i = 0; i < 6; i++) {
+    r.t1[i] = 0;
+    r.t2[i] = 300;
+  }
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_EQUAL_STRING("together", verdictName(f.verdict));
+  TEST_ASSERT_TRUE(f.solved && f.spreadNs == 0);
+  // Outside the area, inside the frame.
+  r = shotRec(cfg, 112, -20);
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_EQUAL_STRING("outside", verdictName(f.verdict));
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, 112, f.s.x);
+  // Late on two channels: drop-one can take out only one.
+  r = shotRec(cfg, 31, -47, 2);
+  r.t1[5] += 24000;
+  r.t2[5] += 24000;
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_EQUAL_STRING("residual", verdictName(f.verdict));
+  // Too few.
+  r = shotRec(cfg, 31, -47);
+  r.channels = 0x07;
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_EQUAL_STRING("few", verdictName(f.verdict));
+  TEST_ASSERT_TRUE(!f.solved && !f.good);
+  // The names read back.
+  for (int i = 0; i < V_COUNT; i++) {
+    Verdict v;
+    TEST_ASSERT_TRUE(parseVerdict(verdictName((Verdict)i), &v) && v == i);
+  }
+  Verdict v;
+  TEST_ASSERT_FALSE(parseVerdict("good", &v));
+}
+
 static SolveInput micsAt(const float (*xy)[2], int n, float h) {
   SolveInput in = {};
   in.n = n;
@@ -436,12 +549,13 @@ static void test_blast_check() {
   TEST_ASSERT_TRUE(sq.scored > 300);
   TEST_ASSERT_EQUAL_INT(0, d1.scored);
   TEST_ASSERT_TRUE(d1.smallestNs > 3 * 1500);
+  // D2, over the validity area the firmware checks (105 mm, 4a).
   const SolveInput d2 = micsAt(D2, 6, 10.5f);
-  BlastResult all = blastCheck(d2, 0x3F, 1500, 100);
+  BlastResult all = blastCheck(d2, 0x3F, 1500, AREA_DEFAULT_MM);
   printf("D2: every mic %d (smallest %.0f ns);", all.scored, all.smallestNs);
   TEST_ASSERT_EQUAL_INT(0, all.scored);
   for (int i = 0; i < 6; i++) {
-    BlastResult b = blastCheck(d2, 0x3F & ~(1 << i), 1500, 100);
+    BlastResult b = blastCheck(d2, 0x3F & ~(1 << i), 1500, AREA_DEFAULT_MM);
     printf(" without CH%d %d (%.0f ns)", i + 1, b.scored, b.smallestNs);
     TEST_ASSERT_EQUAL_INT(0, b.scored);
   }
@@ -481,6 +595,7 @@ int main(int, char**) {
   RUN_TEST(test_cfg_round_trip);
   RUN_TEST(test_rec_round_trip);
   RUN_TEST(test_solve_event);
+  RUN_TEST(test_validity);
   RUN_TEST(test_blast_check);
   RUN_TEST(test_time_per_solve);
   return UNITY_END();
