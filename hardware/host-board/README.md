@@ -2,11 +2,16 @@
 
 The host board for the acoustic target: a NodeMCU-32S, 8 sensor connectors, the IR curtain emitter and receiver, a DS18B20, and the panel LED and button. Every part is through-hole and hand-soldered. The board is 76 × 118 mm (the long side runs north–south), 2 layers, 1.6 mm thick, with an M3 mounting hole in each corner.
 
-The files are in KiCad 10 format; open them with KiCad 10 or newer. "Update PCB from Schematic" should report no changes.
+The files are in KiCad 10 format; open them with KiCad 10 or newer. "Update PCB from Schematic" should report no changes, except for the supply jumper (JP1, R46, C18; see the to-do below), which is in the schematic but not yet on the board.
 
-**Not ordered yet. One change to make first:** J5 takes a BME280 as well as the DS18B20. See [To do before ordering](#to-do-before-ordering-a-bme280-on-j5).
+**Not ordered yet. Two changes to make first** (also listed in [TODO.md](TODO.md)):
 
-## To do before ordering: a BME280 on J5
+1. J5 takes a BME280 as well as the DS18B20. See [A BME280 on J5](#1-a-bme280-on-j5).
+2. The curtain comparator U4 gets a supply jumper: 3.3 V for a TLC372, 5 V for an LM393, with its own decoupling. See [The curtain comparator's supply](#2-the-curtain-comparators-supply-33-v-or-5-v-by-a-jumper).
+
+## To do before ordering
+
+### 1. A BME280 on J5
 
 **Why:** the speed of sound depends on humidity as well as temperature:
 
@@ -47,6 +52,86 @@ The DS18B20 can't see humidity. A BME280 (temperature, humidity and pressure, ov
 - the speed of sound gets the humidity term.
 
 Until then a BME280 on J5 is harmless but unread: today's firmware talks 1-Wire on GPIO 14 and reports 18 °C "assumed".
+
+### 2. The curtain comparator's supply: 3.3 V or 5 V, by a jumper
+
+**Why:** U4 runs from VA_IR, 3.3 V. Its inputs have to work up to the threshold: RV1 sets
+VTH_IR to 1.71–2.35 V (R41 1.5 k, RV1 1 k, R42 2.7 k), and VMID_IR is 1.65 V. When a shadow
+lifts the + input past a threshold that is out of the input range, both inputs are out of
+range at the crossing, and the comparator's output isn't guaranteed: it can switch late or
+not at all.
+
+- **The LM393** (as designed): inputs up to Vcc − 1.5 V, so 1.8 V at 3.3 V (25 °C; Vcc − 2.0
+  V = 1.3 V over its temperature range). All but the bottom 90 mV of RV1's travel is out of
+  range, and VMID_IR is only 0.15 V below the limit. **At 3.3 V the LM393 doesn't work.**
+- **The TLC372CP** (TI CMOS, LM393 pinout, open drain, 200 ns, €1.95 at Okaphone): inputs up
+  to Vdd − 1 V at 25 °C, so 2.3 V at 3.3 V; about 2.1–2.3 V at 15–25 °C indoors. TI
+  guarantees only Vdd − 1.5 V (1.8 V) over its 0–70 °C range, and characterises it at 5 V
+  (it is rated from 3 V). At 3.3 V it works with TP6 (VTH_IR) up to about 2.1 V: VMID_IR +
+  450 mV, most of RV1's travel.
+- **A TLV3202 on a SOIC-8 to DIP-8 adapter** (the sensor board's comparator: inputs beyond
+  both rails, push-pull, 40 ns, 2.7–5.5 V, the LM393's pinout) works at 3.3 V without limits.
+  It isn't sold by Dutch shops: it comes from LCSC.
+
+So U4's supply gets a jumper: **3.3 V** for the TLC372 (or the TLV3202), **5 V** for the
+LM393. Start with the TLC372 at 3.3 V; if RV1's sweep on the bench (see [TODO.md](TODO.md))
+shows it running out of input range, plug in an LM393 and move the jumper to 5 V. See
+[Buying U3 and U4](#buying-u3-and-u4-in-the-netherlands) for the parts.
+
+**The change:**
+
+1. **JP1, new:** a 1x3 pin header (2.54 mm) with a jumper shunt, next to U4. Its middle pin
+   is U4 pin 8 (V+, a new net `VU4`):
+   - pin 1: **VA_IR** (3.3 V): the TLC372, or the TLV3202;
+   - pin 3: **VCMP** (about 4.7 V, below): the LM393.
+
+   Silkscreen: "U4 SUPPLY", with "3V3 (TLC372)" and "5V (LM393)" at the ends.
+2. **VCMP, a new net** fed from 5V_F (the LP2950's input, after the Schottky):
+   - **R46, new:** 10 Ω from 5V_F to VCMP;
+   - **C18, new:** 10 µF electrolytic from VCMP to AGND.
+
+   With R46 that is a 1.6 kHz low-pass against the USB rail's noise.
+3. **C17 moves with pin 8:** it is U4's 100 nF already (pin 8 to pin 4, AGND), so it now
+   decouples VU4, whichever supply is chosen. No new capacitor.
+4. **Everything else stays on VA_IR:** U3, VMID_IR, the threshold divider and RV1, and C16
+   (U3's 100 nF). The threshold always comes from the quiet 3.3 V.
+5. **The output stays as it is:** open collector (LM393) or open drain (TLC372), pulled up to
+   +3V3 by R40, so GPIO 13 never sees more than 3.3 V. With a push-pull part (the TLV3202) R40
+   only draws 0.33 mA while the output is low, but then the jumper must be at 3.3 V: a
+   push-pull output at 5 V would drive GPIO 13 to 5 V. R39 (1 M, the hysteresis) and R38
+   are unchanged.
+6. **U4 unit B (unused)** stays as it is: + (pin 5) at AGND, − (pin 6) at VA_IR, output (pin
+   7) open. Its inputs are inside the range of each part at either supply, except the LM393
+   at 3.3 V, which isn't used.
+7. **Status (2026-11-23):** done in the schematic and the parts list. JP1 has its own symbol,
+   `JMP1x3` (a 1x3 header with the pins named 3V3, U4, 5V), in `host_board.kicad_sym`. ERC: 0
+   violations. U4's value is now TLC372. **Still to do:** the board layout (place JP1, R46
+   and C18 near U4, and route VU4 and VCMP), the silkscreen above, and the PDFs.
+
+**The ranges, per setting:**
+
+| U4 | Jumper | Inputs work up to | RV1's travel (TP6 1.71–2.35 V) |
+|---|---|---|---|
+| TLC372CP | 3.3 V | about 2.3 V (25 °C), 1.8 V guaranteed (0–70 °C) | up to about 2.1 V: most of it |
+| TLV3202 on an adapter | 3.3 V (never 5 V) | 3.5 V | all |
+| LM393N | 5 V | about 2.9–3.5 V (25 °C), 2.4–3.0 V over temperature (VCMP 4.4–5.0 V: USB 4.75–5.25 V less the Schottky) | all |
+| LM393N | 3.3 V | 1.8 V | **don't use** |
+
+The amplifier's output can reach 3.3 V, above some of these ranges. That's fine: the output
+stays right as long as one input (here the threshold) is inside the range. No input goes above
+U4's supply.
+
+**Speed:** fast enough with each. The chain from a shadow to IR_IN rising is about 3–8 µs:
+the TIA about 1 µs, the ×21 stage about 3.3 µs (τ; the MCP6002's 1 MHz is the slowest part),
+the comparator 0.2 µs (TLC372, 10 mV overdrive) or 0.3–1.3 µs (LM393, faster with more
+overdrive), R40's rise about 0.2 µs. That delay moves every dip later, so the curtain's window
+(`curtain window`, 45–100 µs now) is set from the bench test of the real curtain; a slow air
+pistol pellet (150 m/s) is already at 100 µs.
+
+**Also note:** C13 (3.3 nF) into R35 (10 k) is a 33 µs high-pass. During a 30–40 µs shadow the
+signal sinks back toward VMID_IR, so the comparator falls early: the dip lengths in the
+firmware's `rec` lines (`ir=rise/len`) are shorter than the real shadow. The rise, which the
+gate uses, is not affected.
 
 ## Changes from v0.2
 
@@ -89,8 +174,75 @@ Connector pinout (every sensor connector the same way round): VA at the south en
 - **Scope headers:** J21–J28 are optional; fit one when you want to probe a channel.
 - **470 Ω resistors:** a wire link can replace any of them.
 - **Standing parts:** resistors stand upright on a 2.54 mm pitch to fit 8 channels on the board.
-- **Sockets:** use DIP-8 sockets for U3 (MCP6002) and U4 (LM393).
+- **Sockets:** use DIP-8 sockets for U3 (MCP6002) and U4 (TLC372, or LM393 with JP1 at 5 V), so either can be swapped (see [Buying U3 and U4](#buying-u3-and-u4-in-the-netherlands)).
 - **NodeMCU sockets:** fit the two 1x19 female headers last.
+
+## Buying U3 and U4 in the Netherlands
+
+The curtain receiver's two ICs are both socketed, so a part can be swapped and compared on
+the bench. These are the DIP-8 parts found at consumer shops on 2026-11-23. Prices include
+21 % VAT. Prices and stock change: check the shop's page before ordering. Okaphone's site
+blocks automated visits, so its prices come from search results.
+
+### U3: the op-amp (TIA and ×21 stage)
+
+**Needs:** a dual in DIP-8 with the standard pinout, running from 3.3 V (VA_IR), with a
+rail-to-rail output. The TIA's output sits below VMID_IR in steady light, and the ×21
+stage's output rises toward 3.3 V on a shadow.
+
+| Part | Shop | Price | Stock | GBW, slew | At 3.3 V |
+|---|---|---|---|---|---|
+| MCP6002-I/P (as designed) | Okaphone; Conrad (651489) | €1.20; €1.29 | in stock at both | 1 MHz, 0.6 V/µs | yes, rail-to-rail in and out |
+| **MCP602-I/P** | Okaphone | €1.95 (€1.75 from 10) | in stock | 2.8 MHz, 2.3 V/µs | yes, rail-to-rail out; inputs up to Vdd − 1.2 V (2.1 V) |
+| TLV272IP | Okaphone | €2.25 | to order | 3 MHz, 2.4 V/µs | yes, rail-to-rail out |
+| TS912IN | Okaphone | €4.50 | – | 0.8 MHz, 1 V/µs | yes, but no faster than the MCP6002 |
+| MCP6022-I/P | Conrad (651498) | about €5 | – | 10 MHz, 7 V/µs | yes, rail-to-rail in and out |
+| TLV2462 | Bits & Parts | €5.95 | in stock | 6.4 MHz, 1.6 V/µs | yes, rail-to-rail in and out |
+| TLC2272 | Okaphone | €6.45–7.65 | in stock | – | no: 4.4 V minimum |
+| LM358 | Tinytronics €0.90; Bits & Parts €0.40 | | in stock | – | no: its output stops about 1.5 V below the top rail, and its inputs at 1.8 V |
+| NE5534, TL07x, LM741 | Tinytronics, Bits & Parts | | | – | no: they need about ±5 V or more |
+
+The speeds are datasheet values, not from the shops. What the speed does to the curtain's
+delay (shadow to IR_IN rising):
+
+- **MCP6002:** the ×21 stage has 48 kHz of bandwidth (τ 3.3 µs). The chain is about 3–8 µs,
+  and the delay varies with how deep the shadow is.
+- **MCP602:** about 130 kHz (τ 1.2 µs), and about 4× the slew. The chain is about 2–4 µs.
+- **MCP6022:** about 480 kHz (τ 0.33 µs). The chain is about 1.5–2.5 µs; the TIA and the
+  LM393 are then the slowest parts.
+
+A constant delay is taken up by the curtain's window (`curtain window`); the scatter is what
+the faster parts reduce. Each option keeps the TIA stable with C12 (47 pF): the slowest
+needs at least about 28 pF across R34 (MCP602), the fastest about 15 pF.
+
+**Choice:** the MCP6002 works. The MCP602 is the cheap upgrade, at €0.75 more: buy both and
+compare the dip timing on the bench. One thing to check with the MCP602: its inputs only work
+up to 2.1 V. VMID_IR (1.65 V) is well inside, but in steady light the TIA's output sits
+below VMID_IR by the photocurrent × 22 k. A full shadow then lifts U3B's + input by that much.
+If TP4 sits more than about 0.45 V below VMID_IR with the LEDs on (about 20 µA), a deep
+shadow takes that input past 2.1 V. The stage is already saturated high by then, so the dip
+should still register; the MCP6002 has no such limit.
+
+### U4: the comparator
+
+**Needs:** a dual with the LM393's pinout, in DIP-8 or on an adapter. Its inputs must work
+up to the threshold (TP6, up to 2.35 V) at U4's supply, which JP1 sets to 3.3 V or 5 V (see
+[The curtain comparator's supply](#2-the-curtain-comparators-supply-33-v-or-5-v-by-a-jumper)).
+
+| Part | Shop | Price | Stock | Output, speed | Inputs up to, at 3.3 V | Use |
+|---|---|---|---|---|---|---|
+| **TLC372CP** | Okaphone | €1.95 | in stock | open drain, 200 ns (10 mV overdrive) | 2.3 V at 25 °C (Vdd − 1 V); 1.8 V guaranteed over 0–70 °C | **first choice, at 3.3 V** |
+| LM393N | Conrad (155603); Okaphone; Bits & Parts | €0.88 (€0.73 ex VAT, maybe a minimum of 3); €1.25; €0.60 | in stock at all three | open collector, 0.3–1.3 µs | 1.8 V (Vcc − 1.5 V): too low | **at 5 V only** |
+| TLV3202 + SOIC-8 adapter | chip: LCSC (C129325, the sensor board's part); adapter: Okaphone 8PINSOIC €1.15–1.45, Tinytronics SOP8TODIP, Kiwi (Adafruit 1212) | about €1 + the adapter + shipping | – | push-pull, 40 ns | 3.5 V (beyond both rails) | the best part, at 3.3 V only |
+| TLC3702CP | Okaphone | €2.95 | in stock | push-pull, 1.1 µs | same CMOS family as the TLC372 (not checked) | works at 3.3 V, slower and dearer |
+| TLC393CP | Okaphone | €1.50 | in stock | open drain, 2.5 µs (5 mV overdrive) | same CMOS family (not checked) | too slow |
+| LM2903N, LM293P | Okaphone | €2.95; €1.45 | in stock | the LM393 for wider temperatures | 1.8 V | like the LM393: 5 V only |
+| MCP6542-E/P | Conrad (1084994) | €0.76 | out of stock | push-pull, up to 8 µs | rail to rail | too slow |
+| TLC372CP | Conrad (marketplace) | €10.65 ex VAT | – | as above | as above | too dear there |
+| LT1011CN8 | Conrad (150071) | – | – | a single comparator, 4 mA | – | doesn't fit |
+| MCP6562, LMV393 | – | – | – | – | – | not available in DIP here |
+
+The TLC372's figures are from TI's datasheet (SLCS114F, 2025). Tinytronics has no comparator.
 
 ## GPIO map
 

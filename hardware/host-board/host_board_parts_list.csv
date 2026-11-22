@@ -5,10 +5,10 @@ D1,1N5819,diode,1,1,D_DO-41_SOD81_P10.16mm_Horizontal,reverse polarity / back-fe
 C1,220u,"electrolytic capacitor, radial",1,1,CP_Radial_D6.3mm_P2.50mm,10 V electrolytic
 "C2, C4, C6, C9, C14, C16, C17, C15",100n,"ceramic capacitor, 2.5 mm pitch",8,8,C_Disc_D5.0mm_W2.5mm_P2.50mm,at U3; at U4
 TP1,+5V,Keystone 5000-series test loop,1,1,TestPoint_Keystone_5000-5004_Miniature,
-"R1, R30",10,"resistor 1/4 W 1 %, standing (2.54 mm)",2,2,R_Axial_DIN0207_L6.3mm_D2.5mm_P2.54mm_Vertical,
+"R1, R30, R46",10,"resistor 1/4 W 1 %, standing (2.54 mm)",3,3,R_Axial_DIN0207_L6.3mm_D2.5mm_P2.54mm_Vertical,
 "C3, C7",100u,"electrolytic capacitor, radial",2,2,CP_Radial_D5.0mm_P2.00mm,10 V electrolytic
 U1,LP2950-3.3,"LP2950ACZ-3.3 low-noise LDO, TO-92",1,1,TO-92_Inline,"LP2950ACZ-3.3, TO-92"
-"C5, C8, C11",10u,"electrolytic capacitor, radial",3,3,CP_Radial_D5.0mm_P2.00mm,16 V electrolytic
+"C5, C8, C11, C18",10u,"electrolytic capacitor, radial",4,4,CP_Radial_D5.0mm_P2.00mm,16 V electrolytic
 TP2,VSENS,Keystone 5000-series test loop,1,1,TestPoint_Keystone_5000-5004_Miniature,
 "J11, J12, J13, J14, J15, J16, J17, J18",SENSOR 1-8,JST XH vertical header (+ housing and crimps for the cable),8,6,JST_XH_B5B-XH-A_1x05_P2.50mm_Vertical,fit as needed
 "J21, J22, J23, J24, J25, J26, J27, J28",SCOPE 1-8,"1x3 pin header, 2.54 mm",8,0,PinHeader_1x03_P2.54mm_Vertical,"scope pins H, GND, L; fit only when needed"
@@ -25,12 +25,13 @@ NT1,0R link,wire link or 0 R (AGND-GND join),1,1,R_Axial_DIN0207_L6.3mm_D2.5mm_P
 J4,PHOTODIODES,JST XH vertical header (+ housing and crimps for the cable),1,1,JST_XH_B3B-XH-A_1x03_P2.50mm_Vertical,"4x BPW34F in parallel, twisted pair / shield"
 "R31, R37, R38",1k,"resistor 1/4 W 1 %, standing (2.54 mm)",3,3,R_Axial_DIN0207_L6.3mm_D2.5mm_P2.54mm_Vertical,
 C10,1u,"ceramic capacitor, 2.5 mm pitch",1,1,C_Disc_D5.0mm_W2.5mm_P2.50mm,
-U3,MCP6002,"MCP6002-I/P dual op-amp, DIP-8 (+ DIP-8 socket)",1,1,DIP-8_W7.62mm_Socket,MCP6022 is a pin-compatible upgrade
+U3,MCP6002,"MCP6002-I/P dual op-amp, DIP-8 (+ DIP-8 socket)",1,1,DIP-8_W7.62mm_Socket,MCP602 or MCP6022: pin-compatible and faster (README: Buying U3 and U4)
 R34,22k,"resistor 1/4 W 1 %, standing (2.54 mm)",1,1,R_Axial_DIN0207_L6.3mm_D2.5mm_P2.54mm_Vertical,
 C12,47p,"ceramic capacitor, 2.5 mm pitch (C0G)",1,1,C_Disc_D5.0mm_W2.5mm_P2.50mm,C0G
 C13,3.3n,"ceramic capacitor, 2.5 mm pitch",1,1,C_Disc_D5.0mm_W2.5mm_P2.50mm,
 R36,20k,"resistor 1/4 W 1 %, standing (2.54 mm)",1,1,R_Axial_DIN0207_L6.3mm_D2.5mm_P2.54mm_Vertical,
-U4,LM393,"LM393N dual comparator, DIP-8 (+ DIP-8 socket)",1,1,DIP-8_W7.62mm_Socket,"unit B unused, output pin 7 open"
+U4,TLC372,"TLC372CP dual comparator (CMOS, open drain), DIP-8 (+ DIP-8 socket)",1,1,DIP-8_W7.62mm_Socket,"JP1 at 3.3 V; or LM393N with JP1 at 5 V (README: U4 supply); unit B unused, output pin 7 open"
+JP1,U4 SUPPLY,"1x3 pin header, 2.54 mm, + jumper shunt",1,1,PinHeader_1x03_P2.54mm_Vertical,"U4's supply: 1-2 3.3 V (TLC372, TLV3202), 2-3 5 V (LM393 only)"
 R39,1M,"resistor 1/4 W 1 %, standing (2.54 mm)",1,1,R_Axial_DIN0207_L6.3mm_D2.5mm_P2.54mm_Vertical,hysteresis ~3 mV
 R41,1.5k,"resistor 1/4 W 1 %, standing (2.54 mm)",1,1,R_Axial_DIN0207_L6.3mm_D2.5mm_P2.54mm_Vertical,
 RV1,1k,"Bourns 3296W 1 k, 25-turn",1,1,Potentiometer_Bourns_3296W_Vertical,"25-turn, IR threshold"

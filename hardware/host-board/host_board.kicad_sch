@@ -2290,6 +2290,136 @@
 			)
 			(embedded_fonts no)
 		)
+		(symbol "host_board:JMP1x3"
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "J"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "JMP1x3"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "JMP1x3_0_1"
+				(rectangle
+					(start -8.89 4.445)
+					(end 1.27 -4.445)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+			)
+			(symbol "JMP1x3_1_1"
+				(pin passive line
+					(at 5.08 2.54 180)
+					(length 3.81)
+					(name "3V3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 5.08 0 180)
+					(length 3.81)
+					(name "U4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 5.08 -2.54 180)
+					(length 3.81)
+					(name "5V"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
 		(symbol "host_board:HDR2x10"
 			(pin_names
 				(offset 0)
@@ -11117,81 +11247,15 @@
 			)
 		)
 	)
-	(symbol
-		(lib_id "host_board:VA_IR")
+	(label "VU4"
 		(at 365.76 261.62 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "0af332a5-6f54-4d3d-8f88-c40bd3b4d454")
-		(property "Reference" "#PWR0111"
-			(at 365.76 261.62 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
+		(effects
+			(font
+				(size 1.27 1.27)
 			)
+			(justify left bottom)
 		)
-		(property "Value" "VA_IR"
-			(at 365.76 257.81 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 365.76 261.62 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 365.76 261.62 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" ""
-			(at 365.76 261.62 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "8ad7bf1d-de44-478a-ba00-693905967f27")
-		)
-		(instances
-			(project "host_board"
-				(path "/163bb5cb-4278-4786-acb8-34ce3aeb17c0"
-					(reference "#PWR0111")
-					(unit 1)
-				)
-			)
-		)
+		(uuid "e11639b0-8856-4b58-80cb-e5fc9d2ff9c0")
 	)
 	(symbol
 		(lib_id "host_board:NPN")
@@ -14769,7 +14833,7 @@
 				(justify right)
 			)
 		)
-		(property "Value" "LM393"
+		(property "Value" "TLC372"
 			(at 360.68 275.59 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -17952,7 +18016,7 @@
 				)
 			)
 		)
-		(property "Value" "LM393"
+		(property "Value" "TLC372"
 			(at 185.42 308.61 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -28224,7 +28288,7 @@
 				)
 			)
 		)
-		(property "Value" "LM393"
+		(property "Value" "TLC372"
 			(at 330.2 320.04 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -29951,6 +30015,677 @@
 			(project "host_board"
 				(path "/163bb5cb-4278-4786-acb8-34ce3aeb17c0"
 					(reference "#PWR0092")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "host_board:JMP1x3")
+		(at 400.05 266.7 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "e2972d61-cd21-48e7-a844-b4d69eca4214")
+		(property "Reference" "JP1"
+			(at 394.97 260.35 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "U4 SUPPLY"
+			(at 394.97 273.05 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical"
+			(at 400.05 266.7 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 400.05 266.7 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 400.05 266.7 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Note" "1-2: 3.3 V (TLC372, TLV3202); 2-3: 5 V (LM393 only). Jumper shunt."
+			(at 400.05 266.7 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "e18c4268-2c3b-445a-9073-7de592f49a36")
+		)
+		(pin "2"
+			(uuid "6ed780c1-4e2c-45d4-9d71-baa2889e3c70")
+		)
+		(pin "3"
+			(uuid "3c1887d6-cb08-48a0-b0ed-60997ce7653f")
+		)
+		(instances
+			(project "host_board"
+				(path "/163bb5cb-4278-4786-acb8-34ce3aeb17c0"
+					(reference "JP1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 405.13 264.16) (xy 412.75 264.16)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "cce6fed5-b0af-4c40-b2f6-9bd789c90c6f")
+	)
+	(wire
+		(pts
+			(xy 412.75 264.16) (xy 412.75 259.08)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a669fd96-bc76-4152-b9a7-4ece50a22765")
+	)
+	(symbol
+		(lib_id "host_board:VA_IR")
+		(at 412.75 259.08 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "e393f8ab-2fc8-467e-90cf-91c6394690bc")
+		(property "Reference" "#PWR0115"
+			(at 412.75 259.08 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "VA_IR"
+			(at 412.75 255.27 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 412.75 259.08 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 412.75 259.08 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 412.75 259.08 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "18d8f1da-fab9-4f70-a9f4-f98f763f1faf")
+		)
+		(instances
+			(project "host_board"
+				(path "/163bb5cb-4278-4786-acb8-34ce3aeb17c0"
+					(reference "#PWR0115")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 405.13 266.7) (xy 410.21 266.7)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ba19c9eb-f6b9-46e1-bb29-a74d8cda8784")
+	)
+	(label "VU4"
+		(at 410.21 266.7 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "a58bd75b-74e6-42a6-bfc9-be3e88caba09")
+	)
+	(wire
+		(pts
+			(xy 405.13 269.24) (xy 410.21 269.24)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e44db8f3-34b7-4e92-b455-a57820cc93c9")
+	)
+	(label "VCMP"
+		(at 410.21 269.24 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "9d00f9d4-a874-44b5-ae57-cbd620d78306")
+	)
+	(symbol
+		(lib_id "host_board:R")
+		(at 425.45 260.35 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "0292e0cd-f0c6-4c49-9b2a-f50cc16facb8")
+		(property "Reference" "R46"
+			(at 427.99 259.08 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "10"
+			(at 427.99 261.62 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P2.54mm_Vertical"
+			(at 425.45 260.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 425.45 260.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 425.45 260.35 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "0fe8e81b-3e5e-4d59-bac7-dcbfa9551701")
+		)
+		(pin "2"
+			(uuid "6e761dd5-de8f-4cbe-978f-fe229106bfd1")
+		)
+		(instances
+			(project "host_board"
+				(path "/163bb5cb-4278-4786-acb8-34ce3aeb17c0"
+					(reference "R46")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 425.45 256.54) (xy 425.45 254)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "4623d4e9-7758-48b7-a697-134b00a96d07")
+	)
+	(label "5V_F"
+		(at 425.45 254 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "f9fa92b3-4fae-4bd9-b52f-95e14f1fcf8c")
+	)
+	(symbol
+		(lib_id "host_board:CP")
+		(at 425.45 271.78 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "73d76b8b-fe22-4004-8ae2-4806795f9e62")
+		(property "Reference" "C18"
+			(at 427.99 270.51 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "10u"
+			(at 427.99 273.05 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_THT:CP_Radial_D5.0mm_P2.00mm"
+			(at 425.45 271.78 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 425.45 271.78 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 425.45 271.78 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Note" "16 V electrolytic"
+			(at 425.45 271.78 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "99db9597-67ab-4a27-ac51-e39353bd2827")
+		)
+		(pin "2"
+			(uuid "346c3517-c1bb-49e5-9481-666198a8d046")
+		)
+		(instances
+			(project "host_board"
+				(path "/163bb5cb-4278-4786-acb8-34ce3aeb17c0"
+					(reference "C18")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 425.45 264.16) (xy 425.45 266.7)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "cc8f23b5-7ef3-4fea-bc58-7f49bc45602f")
+	)
+	(wire
+		(pts
+			(xy 425.45 266.7) (xy 425.45 267.97)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "2263fb4e-40ca-4de7-9ccf-90984dad0dcd")
+	)
+	(junction
+		(at 425.45 266.7)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "2614dbcf-dc6d-4fc7-8758-b6feb17eaffd")
+	)
+	(wire
+		(pts
+			(xy 425.45 266.7) (xy 430.53 266.7)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ccc23eab-6ba7-4117-a68d-4eacfd997648")
+	)
+	(label "VCMP"
+		(at 430.53 266.7 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "d7c1b33d-1fca-4196-88e7-f83037af563a")
+	)
+	(wire
+		(pts
+			(xy 425.45 275.59) (xy 425.45 278.13)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "3dcc5b66-c8d2-4936-a914-b19365573b30")
+	)
+	(symbol
+		(lib_id "host_board:AGND")
+		(at 425.45 278.13 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "a7efb8ba-6a0f-4ff4-82d4-737fd07019a9")
+		(property "Reference" "#PWR0116"
+			(at 425.45 278.13 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "AGND"
+			(at 425.45 283.21 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 425.45 278.13 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 425.45 278.13 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 425.45 278.13 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "5e859df7-94c4-4615-aa0f-e39c68a23f55")
+		)
+		(instances
+			(project "host_board"
+				(path "/163bb5cb-4278-4786-acb8-34ce3aeb17c0"
+					(reference "#PWR0116")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(text "U4 supply: JP1 1-2 = 3.3 V (TLC372, or TLV3202 on an adapter); 2-3 = 5 V (LM393)."
+		(exclude_from_sim no)
+		(at 395 248.92 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "d0cc8298-34d5-4cda-a643-1b13604fe7e0")
+	)
+	(text "LM393 inputs only to Vcc - 1.5 V. Never a push-pull part at 5 V (IR_IN would see 5 V)."
+		(exclude_from_sim no)
+		(at 395 251.46 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "0436362e-d6b3-4fdf-827a-b7380b6be498")
+	)
+	(text "C17 (at U4 pins 8/4) decouples VU4."
+		(exclude_from_sim no)
+		(at 395 287.02 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "a81fed41-7c6d-46f6-b5d2-ba65f9639565")
+	)
+	(wire
+		(pts
+			(xy 365.76 261.62) (xy 365.76 259.08)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ed7c6ff3-6dac-4654-9dac-2cc4945f9a3e")
+	)
+	(symbol
+		(lib_id "host_board:PWR_FLAG")
+		(at 365.76 259.08 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board no)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "c1a2f06c-aa32-4001-b761-4f38a9433271")
+		(property "Reference" "#FLG0033"
+			(at 365.76 259.08 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "PWR_FLAG"
+			(at 365.76 254 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 365.76 259.08 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 365.76 259.08 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 365.76 259.08 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "2d49e6fa-67dc-493a-a639-741a5dbeba2c")
+		)
+		(instances
+			(project "host_board"
+				(path "/163bb5cb-4278-4786-acb8-34ce3aeb17c0"
+					(reference "#FLG0033")
 					(unit 1)
 				)
 			)

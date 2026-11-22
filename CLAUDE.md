@@ -28,6 +28,7 @@ The web/wasm viewer is parked.
 | `protocol/PROTOCOL.md` | The BLE protocol, v2: advertising, GATT, shots, security, buttons and LED | Before touching the link (see the protocol rule) |
 | `hardware/acoustic-sensor/README.md` | Sensor board v0.3: one mic channel, files, checks before ordering | Hardware questions |
 | `hardware/host-board/README.md` | Host board v0.3: layout, GPIO map, assembly | Hardware questions, pin changes |
+| `hardware/host-board/TODO.md` | The host board's to-do: changes before ordering, first bench checks | Host board work; add board changes there |
 | Project summary (claude.ai doc, below) | The hardware design: approaches considered, signal chain and BOM, threshold levels, initial calibration per board, error budget, error sources, valid-shot detection, IR curtain design, host board requirements, its open questions | Hardware or measurement design questions |
 | `README.md` | User-facing: what it does, getting started, downloads, notes per platform | Changing user-visible behaviour |
 | `app/TODO.md` | The app's to-do list: wishes and known gaps not yet in a release | App work; add new app wishes there |
@@ -153,9 +154,11 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
     series resistor, a 100 k pull-down and an optional scope header.
   - LP2950 low-noise 3.3 V for the sensors; an air sensor on a cable at J5. Before
     ordering, J5 becomes 4-pin for a BME280 (SDA GPIO 14, SCL GPIO 15); a DS18B20 still
-    fits (GPIO 14). See the host board README's to-do.
+    fits (GPIO 14). See the host board's TODO.md and README.
   - IR curtain receiver (BPW34F strip → MCP6002 TIA and gain → LM393, IR_IN GPIO 13, own
-    AGND) and emitter drive (IR_EN GPIO 27).
+    AGND) and emitter drive (IR_EN GPIO 27). Before ordering, U4 gets a supply jumper (JP1):
+    3.3 V for a TLC372, 5 V for an LM393 (whose inputs only work up to 1.8 V at 3.3 V, below
+    most of RV1's threshold range).
   - Panel LED (GPIO 2) and button (BOOT, GPIO 0).
   - Powered from USB 5 V through a panel switch and a Schottky diode; no battery on this
     version.
