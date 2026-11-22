@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="800" viewBox="0 0 1320 800" font-family="IBM Plex Sans, Helvetica, Arial, sans-serif">
+<title>Top-right mic holder: the principle</title>
+<defs>
+  <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#d33"/></marker>
+  <marker id="tick" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+    <path d="M0,5 L10,5" stroke="#222" stroke-width="2"/></marker>
+</defs>
+<rect x="0" y="0" width="1320" height="800" fill="#ffffff"/>
+<text x="40.0" y="40.0" font-size="22" text-anchor="start" font-weight="bold" fill="#222">Top-right mic holder: the principle</text>
+<text x="40.0" y="64.0" font-size="12" text-anchor="start" font-weight="normal" fill="#555">PLAN D1/D2: the top-right mic moves out along the frame's diagonal instead of in along the top edge. Not a design: the distance d is decided with the holder, and calibration fits the exact x and y.</text>
+<text x="40.0" y="96.0" font-size="13" text-anchor="start" font-weight="bold" fill="#222">FRONT VIEW (as the shooter sees it; the holder is behind the paper)</text>
+<rect x="48.8" y="118.8" width="440.0" height="440.0" fill="none" stroke="#ddd"/>
+<polygon points="324.6,283.0 48.8,283.0 48.8,558.8 324.6,558.8" fill="#e3f1e3" stroke="none"/>
+<polyline points="48.8,382.8 224.8,382.8 224.8,558.8" fill="none" stroke="#8a8a8a" stroke-width="1.5" stroke-dasharray="7 4"/>
+<text x="57.6" y="396.0" font-size="12" text-anchor="start" font-weight="normal" fill="#666">scoring area (to ±100 mm)</text>
+<line x1="48.8" y1="272.8" x2="334.8" y2="272.8" stroke="#333" stroke-width="3"/>
+<line x1="334.8" y1="272.8" x2="334.8" y2="558.8" stroke="#333" stroke-width="3"/>
+<text x="57.6" y="265.8" font-size="11" text-anchor="start" font-weight="normal" fill="#333">frame edge (±125 mm)</text>
+<line x1="48.8" y1="558.8" x2="488.8" y2="118.8" stroke="#9a9a9a" stroke-width="1" stroke-dasharray="3 3"/>
+<text x="92.8" y="532.4" font-size="12" text-anchor="start" font-weight="normal" fill="#666">↙ the card centre (0, 0)</text>
+<circle cx="246.8" cy="360.8" r="4.5" fill="none" stroke="#666" stroke-width="1.5"/>
+<text x="240.2" y="354.2" font-size="10" text-anchor="end" font-weight="normal" fill="#666">square corner (105, 105)</text>
+<text x="70.8" y="366.8" font-size="17" text-anchor="middle" fill="#b44">×</text>
+<text x="62.0" y="377.1" font-size="10" text-anchor="start" font-weight="normal" fill="#b44">now (65, 105): moves</text>
+<text x="57.6" y="470.8" font-size="12" text-anchor="start" font-weight="bold" fill="#2b6b2b">keep clear: nothing between</text>
+<text x="57.6" y="486.2" font-size="12" text-anchor="start" font-weight="bold" fill="#2b6b2b">the port and the card</text>
+<text x="57.6" y="501.6" font-size="11" text-anchor="start" font-weight="normal" fill="#2b6b2b">(the card lies within ±40° of the port's</text>
+<text x="57.6" y="514.8" font-size="11" text-anchor="start" font-weight="normal" fill="#2b6b2b">axis; keep the whole ±45° quadrant open)</text>
+<polygon points="249.0,209.0 224.8,233.2 189.6,250.8 189.6,283.8 308.4,283.8 308.4,264.0 268.8,228.8" fill="#f3d9a6" stroke="#a0722a" stroke-width="1.5"/>
+<polygon points="398.6,358.6 374.4,382.8 356.8,418.0 323.8,418.0 323.8,299.2 343.6,299.2 378.8,338.8" fill="#f3d9a6" stroke="#a0722a" stroke-width="1.5"/>
+<polygon points="229.7,197.5 215.7,211.5 226.3,222.0 240.0,208.3 399.3,367.6 385.6,381.3 396.1,391.9 410.1,377.9 442.8,345.2 262.4,164.8" fill="#f3d9a6" stroke="#a0722a" stroke-width="1.5"/>
+<circle cx="207.2" cy="270.6" r="4.5" fill="#fff" stroke="#a0722a" stroke-width="1.5"/>
+<circle cx="290.8" cy="270.6" r="4.5" fill="#fff" stroke="#a0722a" stroke-width="1.5"/>
+<circle cx="337.0" cy="400.4" r="4.5" fill="#fff" stroke="#a0722a" stroke-width="1.5"/>
+<circle cx="337.0" cy="316.8" r="4.5" fill="#fff" stroke="#a0722a" stroke-width="1.5"/>
+<polygon points="243.1,209.0 250.5,201.5 406.1,357.1 398.6,364.5" fill="#2f7d3a" stroke="#1d4f24" stroke-width="1"/>
+<line x1="324.6" y1="283.0" x2="262.4" y2="345.2" stroke="#d33" stroke-width="2.2" marker-end="url(#arr)"/>
+<circle cx="324.6" cy="283.0" r="5.5" fill="#d33" stroke="#fff" stroke-width="1.5"/>
+<line x1="293.5" y1="314.1" x2="324.6" y2="283.0" stroke="#d33" stroke-width="5" opacity="0.35"/>
+<line x1="320.2" y1="278.6" x2="207.2" y2="180.4" stroke="#b22" stroke-width="1"/>
+<text x="57.6" y="154.0" font-size="13" text-anchor="start" font-weight="bold" fill="#b22">mic port: d out along the diagonal</text>
+<text x="57.6" y="170.3" font-size="11" text-anchor="start" font-weight="normal" fill="#b22">(d ≈ 15-25 mm, to be decided; red band)</text>
+<text x="57.6" y="184.8" font-size="11" text-anchor="start" font-weight="normal" fill="#b22">facing the card centre (red arrow)</text>
+<line x1="374.4" y1="334.4" x2="405.2" y2="396.0" stroke="#1d4f24" stroke-width="1"/>
+<text x="361.2" y="407.0" font-size="12" text-anchor="start" font-weight="bold" fill="#1d4f24">sensor board 50 × 32 mm</text>
+<text x="361.2" y="422.4" font-size="11" text-anchor="start" font-weight="normal" fill="#1d4f24">on its long edge, seen</text>
+<text x="361.2" y="435.6" font-size="11" text-anchor="start" font-weight="normal" fill="#1d4f24">edge-on (stands</text>
+<text x="361.2" y="448.8" font-size="11" text-anchor="start" font-weight="normal" fill="#1d4f24">perpendicular to the paper)</text>
+<line x1="309.3" y1="236.3" x2="363.4" y2="178.2" stroke="#a0722a" stroke-width="1"/>
+<text x="365.6" y="140.8" font-size="13" text-anchor="start" font-weight="bold" fill="#7a5418">holder (PETG)</text>
+<text x="365.6" y="156.2" font-size="11" text-anchor="start" font-weight="normal" fill="#7a5418">overhangs the frame corner:</text>
+<text x="365.6" y="169.4" font-size="11" text-anchor="start" font-weight="normal" fill="#7a5418">the board reaches ±25 mm</text>
+<text x="365.6" y="182.6" font-size="11" text-anchor="start" font-weight="normal" fill="#7a5418">across the diagonal</text>
+<line x1="345.8" y1="387.2" x2="361.2" y2="488.4" stroke="#a0722a" stroke-width="1"/>
+<text x="361.2" y="497.2" font-size="11" text-anchor="start" font-weight="normal" fill="#7a5418">pins / screws on both</text>
+<text x="361.2" y="510.4" font-size="11" text-anchor="start" font-weight="normal" fill="#7a5418">rails: the mic returns to</text>
+<text x="361.2" y="523.6" font-size="11" text-anchor="start" font-weight="normal" fill="#7a5418">the same place</text>
+<text x="548.0" y="96.0" font-size="13" text-anchor="start" font-weight="bold" fill="#222">SECTION ALONG THE DIAGONAL (the card centre is to the left)</text>
+<text x="548.0" y="114.0" font-size="11" text-anchor="start" font-weight="normal" fill="#666" font-style="italic">u: mm along the diagonal from the port; down: mm behind the paper. Not to scale across views.</text>
+<polygon points="1034.0,152.4 620.0,152.4 620.0,306.0 1034.0,306.0" fill="#e3f1e3" stroke="none"/>
+<line x1="548.0" y1="150.0" x2="1232.0" y2="150.0" stroke="#333" stroke-width="3"/>
+<text x="548.0" y="142.0" font-size="11" text-anchor="start" font-weight="normal" fill="#333">paper / card (the shooter is in front, above)</text>
+<circle cx="584.0" cy="150.0" r="3.5" fill="#333"/>
+<line x1="584.0" y1="150.0" x2="1028.0" y2="213.0" stroke="#d33" stroke-width="1.6" stroke-dasharray="6 3" marker-end="url(#arr)"/>
+<text x="632.0" y="273.0" font-size="12" text-anchor="start" font-weight="bold" fill="#2b6b2b">keep clear: no holder, frame lip or cable</text>
+<text x="632.0" y="289.8" font-size="12" text-anchor="start" font-weight="bold" fill="#2b6b2b">in front of the port</text>
+<text x="584.0" y="330.0" font-size="11" text-anchor="start" font-weight="normal" fill="#b22">The crack travels from the hole nearly along the paper:</text>
+<text x="584.0" y="345.0" font-size="11" text-anchor="start" font-weight="normal" fill="#b22">anything standing in front of the port shadows or echoes it.</text>
+<polygon points="1037.0,150.0 1043.0,150.0 1043.0,342.0 1037.0,342.0" fill="#2f7d3a" stroke="#1d4f24" stroke-width="1"/>
+<polygon points="1043.0,205.8 1050.2,205.8 1050.2,220.2 1043.0,220.2" fill="#555"/>
+<polygon points="1043.0,243.0 1053.2,243.0 1053.2,279.0 1043.0,279.0" fill="#777"/>
+<circle cx="1037.0" cy="213.0" r="4" fill="#d33" stroke="#fff" stroke-width="1"/>
+<text x="1028.0" y="238.8" font-size="11" text-anchor="end" font-weight="normal" fill="#b22">port: on the board's bottom side,</text>
+<text x="1028.0" y="253.2" font-size="11" text-anchor="end" font-weight="normal" fill="#b22">facing the card</text>
+<text x="1054.4" y="217.0" font-size="10" text-anchor="start" font-weight="normal" fill="#555">mic</text>
+<line x1="1043.0" y1="213.0" x2="1154.0" y2="213.0" stroke="#222" stroke-width="0.8" stroke-dasharray="2 2"/>
+<line x1="1142.0" y1="150.0" x2="1142.0" y2="213.0" stroke="#222" stroke-width="1.2" marker-start="url(#tick)" marker-end="url(#tick)"/>
+<text x="1151.0" y="177.6" font-size="12" text-anchor="start" font-weight="bold" fill="#222">h = 10.5 mm</text>
+<text x="1151.0" y="192.6" font-size="10" text-anchor="start" font-weight="normal" fill="#555">(21.5 flipped)</text>
+<polygon points="1044.2,294.0 1124.0,294.0 1124.0,408.0 1019.0,408.0 1019.0,348.0 1044.2,348.0" fill="#f3d9a6" stroke="#a0722a" stroke-width="1.5"/>
+<polygon points="1055.6,159.0 1124.0,159.0 1124.0,294.0 1055.6,294.0" fill="#f3d9a6" stroke="#a0722a" stroke-width="1.2" opacity="0.5"/>
+<text x="1136.0" y="258.0" font-size="12" text-anchor="start" font-weight="bold" fill="#7a5418">holder: behind the board</text>
+<text x="1136.0" y="273.0" font-size="11" text-anchor="start" font-weight="normal" fill="#7a5418">and above its top edge;</text>
+<text x="1136.0" y="288.0" font-size="11" text-anchor="start" font-weight="normal" fill="#7a5418">a 1 mm slot grips the</text>
+<text x="1136.0" y="303.0" font-size="11" text-anchor="start" font-weight="normal" fill="#7a5418">board's ends (flip it over</text>
+<text x="1136.0" y="318.0" font-size="11" text-anchor="start" font-weight="normal" fill="#7a5418">for h = 21.5)</text>
+<polygon points="896.0,408.0 1220.0,408.0 1220.0,456.0 896.0,456.0" fill="#c9ccd1" stroke="#777" stroke-width="1"/>
+<text x="896.0" y="473.0" font-size="11" text-anchor="start" font-weight="normal" fill="#555">frame rail / aluminium backbone, behind the paper</text>
+<text x="1016.0" y="390.0" font-size="10" text-anchor="end" font-weight="normal" fill="#555">J1 cable out the back</text>
+<text x="600.0" y="572.0" font-size="15" text-anchor="start" font-weight="bold" fill="#222">Principles</text>
+<text x="600.0" y="600.0" font-size="12" text-anchor="start" font-weight="bold" fill="#222">1.</text>
+<text x="622.0" y="600.0" font-size="12" text-anchor="start" font-weight="normal" fill="#222">The port sits on the frame's diagonal, d out beyond the square corner (105, 105): about 15-25 mm, decided</text>
+<text x="622.0" y="619.0" font-size="12" text-anchor="start" font-weight="normal" fill="#222">with the holder. Give `mic` the nominal position; the calibration fits the exact x and y.</text>
+<text x="600.0" y="638.0" font-size="12" text-anchor="start" font-weight="bold" fill="#222">2.</text>
+<text x="622.0" y="638.0" font-size="12" text-anchor="start" font-weight="normal" fill="#222">The board stands perpendicular to the paper, its port side (bottom layer) facing the card centre, so the whole</text>
+<text x="622.0" y="657.0" font-size="12" text-anchor="start" font-weight="normal" fill="#222">scoring area lies within about ±40° of the port's axis.</text>
+<text x="600.0" y="676.0" font-size="12" text-anchor="start" font-weight="bold" fill="#222">3.</text>
+<text x="622.0" y="676.0" font-size="12" text-anchor="start" font-weight="normal" fill="#222">The port is 10.5 mm behind the paper plane (21.5 flipped), as at the other five mics: the same slot depth.</text>
+<text x="600.0" y="695.0" font-size="12" text-anchor="start" font-weight="bold" fill="#222">4.</text>
+<text x="622.0" y="695.0" font-size="12" text-anchor="start" font-weight="normal" fill="#222">Nothing between the port and the card: holder, frame lip and cable stay out of the green zones.</text>
+<text x="600.0" y="714.0" font-size="12" text-anchor="start" font-weight="bold" fill="#222">5.</text>
+<text x="622.0" y="714.0" font-size="12" text-anchor="start" font-weight="normal" fill="#222">The 50 mm board reaches ±25 mm across the diagonal: beyond d ≈ 7 mm the holder overhangs the frame corner.</text>
+<text x="600.0" y="733.0" font-size="12" text-anchor="start" font-weight="bold" fill="#222">6.</text>
+<text x="622.0" y="733.0" font-size="12" text-anchor="start" font-weight="normal" fill="#222">Located on both rails (pins or screws), so the mic comes back to the same place after a board swap.</text>
+<text x="600.0" y="752.0" font-size="12" text-anchor="start" font-weight="bold" fill="#222">7.</text>
+<text x="622.0" y="752.0" font-size="12" text-anchor="start" font-weight="normal" fill="#222">Why: at d = 25 mm no set of 6, 5 or 4 of the six mics fits a muzzle blast as a hit (at d = 15 mm only with both</text>
+<text x="622.0" y="771.0" font-size="12" text-anchor="start" font-weight="normal" fill="#222">middle mics gone). The inward slide let 42 of 624 through with two corner mics gone, and was less precise.</text>
+</svg>

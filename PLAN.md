@@ -93,6 +93,21 @@ fit a point in the 200 × 200 mm scoring area.
   (MEASUREMENT 3c; this replaced a planned "within 25 mm of one circle" test).
 - **Test:** a blast fault in the simulator (phase 0), then real blasts on the range (phase
   2).
+- **Update (2026-11-22): the corner mic moves outward along the diagonal instead.** At
+  (65, 105) the mic stands in front of the card. With the two middle mics (D2), moving it
+  out works better:
+  - d = 25 mm beyond the square corner, at (122.7, 122.7): no set of 6, 5 or 4 mics
+    scores any of the 624 blasts. At (65, 105), two 4-mic sets let 42 and 1 through.
+  - d = 15 mm: blasts score only with both middle mics gone.
+  - The worst GDOP over the scoring area drops from 2.79 to 1.15.
+  - The distance (about 15–25 mm) is decided with the holder. Calibration fits the mic's
+    x and y anyway.
+  - The holder's principle: `hardware/frame/top-right-holder.svg`. The board is 50 mm
+    wide and stands across the diagonal, so beyond d ≈ 7 mm the holder overhangs the
+    frame corner.
+  - **Not yet changed:** `mic default`, the simulator, `tools/model.py`, the test vectors
+    and `tools/layout_study.py` still use (65, 105). They change once d is fixed, with
+    the layout study run again (`--drop`) to confirm late channels are still found.
 
 ### D2 Six mics: four corners (one slid), the bottom middle and the right middle
 
@@ -110,7 +125,8 @@ channel. It is, and with one condition: the four corners must already be off one
 
 - **Decision (2026-11-21):** six mics. CH1 bottom left (−105, −105), CH2 bottom right
   (105, −105), CH3 top right slid (65, 105), CH4 top left (−105, 105), CH5 bottom middle
-  (0, −105), CH6 right middle (105, 0). This is `mic default` (D12).
+  (0, −105), CH6 right middle (105, 0). This is `mic default` (D12). CH3 moves out along
+  the diagonal (D1's update, 2026-11-22).
 - **What the sixth adds** (1σ position error per unit of timing error per channel, ring
   area and whole area, from a covariance calculation with h = 10.5 mm):
 
@@ -360,7 +376,8 @@ All of this is needed before the range tests (phase 2).
   disciplines are shot on this lane?
 - **Q2 The mic holders:** answered 2026-11-21: yes, the user designs and prints them
   (PETG) for the slid corner and both middle mics (D2). Still open: could the mics move
-  out to ±115 mm (D1's corner remark)?
+  out to ±115 mm (D1's corner remark)? 2026-11-22: the top-right mic moves out along the
+  diagonal, its distance decided with its holder (D1's update).
 - **Q3 The summary doc:** should D1 and D2 go into it as the answer to its open question
   on breaking the corner symmetry, and the mic-height correction into its error budget? I
   have only read it; nothing in it is changed.

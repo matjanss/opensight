@@ -53,7 +53,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration, PLAN phase 0) passes all its simulated tests on a bare NodeMCU (2026-11-22, merged to `main`): the solver on the board, drop-one, the blast check, calibration mode and `tools/calibrate.py`. The DS18B20 and BME280 tests (3a-3, 3a-4) wait for the parts | Step 4 (validity) or the boards' arrival (PLAN phase 1: the same tests on real sensors); 3a-3/3a-4 when the parts are there |
 | Sensor board (`hardware/acoustic-sensor/`) | v0.3 designed (KiCad 10), not yet on the bench | Its "check before ordering" list; then the summary's initial calibration, polarity, PLAN phase 1 |
 | Host board (`hardware/host-board/`) | v0.3 designed and routed, not yet on the bench; firmware already on its pin map | Order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
-| Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner slid 40 mm along the top edge, plus bottom-middle and right-middle mics; the user designs and prints the holders |
+| Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner moved out along the diagonal (d about 15–25 mm, PLAN D1's update; principle in `hardware/frame/top-right-holder.svg`), plus bottom-middle and right-middle mics; the user designs and prints the holders. The firmware defaults still use the old slid position (65, 105) until d is fixed |
 | IR curtain | Designed (receiver on the host board, emitter board), firmware not started | Its bench test first (summary), then step 4 |
 | App (`app/`) | v0.1.2, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay | Raw events and the calibration wizard with a Rust fit (PLAN D5, phase 3) |
 | Range server, MQTT, management, wasm viewer | Not started (wasm parked) | FUTURE_ARCHITECTURE step 2, PLAN phase 4 |
@@ -82,6 +82,7 @@ app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   assets/                     cards/, fonts/ (IBM Plex Sans), icon/
 hardware/acoustic-sensor/     sensor board, KiCad 10
 hardware/host-board/          host board, KiCad 10
+hardware/frame/               frame drawings: top-right-holder.svg (the moved corner mic's holder, principle)
 .github/workflows/build.yml   CI; a v* tag builds a GitHub Release (app for 3 OSes + firmware)
 ```
 
@@ -306,9 +307,10 @@ hardware/host-board/          host board, KiCad 10
 ## Where each part is heading (summary of the plans)
 
 - **Measurement** (PLAN, MEASUREMENT steps 3–5):
-  - **Layout** (D1/D2): never all mics on one circle, or blasts fit as centre hits. One
-    corner mic slides 40 mm along its edge, plus bottom-middle and right-middle mics: 6
-    mics, so a bad channel can be dropped and blasts stay out.
+  - **Layout** (D1/D2): never all mics on one circle, or blasts fit as centre hits. The
+    top-right corner mic moves out along the diagonal (it slid 40 mm along its edge
+    before, in front of the card), plus bottom-middle and right-middle mics: 6 mics, so a
+    bad channel can be dropped and blasts stay out.
   - **Model** (D3, D8): the mic height per mic (a setting, later in the app), k per
     channel, the speed of sound from the BME280's T, RH and p.
   - **Solver** (D12): on the ESP, x, y and the emission time by Levenberg–Marquardt in
