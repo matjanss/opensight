@@ -10,20 +10,15 @@
 #include "shots.h"
 
 static Preferences prefs;
-static float resLimitNs = RES_LIMIT_DEFAULT_NS;
-static bool  testShot = true;
-
-static const float RES_LIMIT_MAX_NS = 100000.0f;
+static bool testShot = true;
 
 // For `stat`.
-static uint32_t nSolved = 0, nConverged = 0, nSent = 0, nTooFew = 0;
+static uint32_t nSolved = 0, nConverged = 0, nSent = 0, nTooFew = 0, nDropped = 0;
 static uint64_t cyclesSum = 0;
 static uint32_t cyclesMax = 0;
 
 void positionBegin() {
   prefs.begin("measure");
-  resLimitNs = prefs.getFloat("reslimit", RES_LIMIT_DEFAULT_NS);
-  if (!(resLimitNs > 0 && resLimitNs <= RES_LIMIT_MAX_NS)) resLimitNs = RES_LIMIT_DEFAULT_NS;
   testShot = prefs.getBool("testshot", true);
 }
 
@@ -61,42 +56,47 @@ static void makeRec(const EventResult& r, measure::Rec& rec) {
 void positionProcess(const EventResult& r, Position& p, uint32_t nowMs) {
   measure::Rec rec;
   makeRec(r, rec);
-  measure::SolveInput in;
+  const measure::Cfg& cfg = calibCfg();
+  const uint32_t c0 = esp_cpu_get_cycle_count();
+  const measure::EventFit f = measure::solveEvent(cfg, rec);
+  const uint32_t cycles = esp_cpu_get_cycle_count() - c0;
   p = {};
-  p.mask = measure::solveInput(calibCfg(), rec, in);
-  const int used = __builtin_popcount(p.mask);
+  p.mask = f.mask;
+  p.solved = f.solved;
+  p.s = f.s;
 
-  char line[320];
+  char line[360];
   int n;
-  if (used >= 4) {
-    const uint32_t c0 = esp_cpu_get_cycle_count();
-    p.s = measure::solve(in, p.mask);
-    const uint32_t cycles = esp_cpu_get_cycle_count() - c0;
-    p.solved = true;
+  if (f.solved) {
     nSolved++;
     cyclesSum += cycles;
     if (cycles > cyclesMax) cyclesMax = cycles;
-    if (p.s.converged) nConverged++;
-    const measure::Solution& s = p.s;
+    if (f.s.converged) nConverged++;
+    if (f.s.dropped >= 0) nDropped++;
+    const measure::Solution& s = f.s;
     n = snprintf(line, sizeof line, "  shot %u: x %+.3f y %+.3f mm, rms %.0f ns, 1 sd %.3f mm "
                  "(long axis), %u iterations%s, res ns", (unsigned)r.number, s.x, s.y, s.rmsNs,
                  s.major, s.iterations, s.starts > 1 ? " (2 starts)" : "");
     for (int c = 0; c < CHANNELS; c++)
-      if (p.mask & (1 << c)) n += snprintf(line + n, sizeof line - n, " CH%d %+.0f", c + 1, s.resNs[c]);
+      if (f.mask & (1 << c))
+        n += snprintf(line + n, sizeof line - n, " CH%d %+.0f%s", c + 1, s.resNs[c],
+                      c == s.dropped ? " (dropped)" : "");
     if (!s.converged) {
       n += snprintf(line + n, sizeof line - n, "; not sent: did not converge");
-    } else if (!(s.rmsNs <= resLimitNs)) {
-      n += snprintf(line + n, sizeof line - n, "; not sent: rms over the %.0f ns limit", resLimitNs);
+    } else if (!f.good) {
+      n += snprintf(line + n, sizeof line - n, "; not sent: rms over the %.0f ns limit%s",
+                    cfg.resLimitNs, s.dropped >= 0 ? " even with one channel dropped" : "");
     } else {
       const uint32_t seq = shotAdd(lroundf(s.x * 100), lroundf(s.y * 100), nowMs);
       p.sent = true;
       nSent++;
-      n += snprintf(line + n, sizeof line - n, "; sent as shot %u", (unsigned)seq);
+      n += snprintf(line + n, sizeof line - n, "; sent as shot %u%s", (unsigned)seq,
+                    s.dropped >= 0 ? " (with a channel dropped)" : "");
     }
   } else {
     nTooFew++;
     n = snprintf(line, sizeof line, "  shot %u -: %d channel%s with a mic and both edges (4 needed)",
-                 (unsigned)r.number, used, used == 1 ? "" : "s");
+                 (unsigned)r.number, f.used, f.used == 1 ? "" : "s");
   }
   Serial.println(line);
   char recLine[400];
@@ -136,8 +136,8 @@ void positionBlastCheck() {
   const int64_t t0 = esp_timer_get_time();
   Serial.printf("mic: blast check (%d point sources 10 and 25 m in front, 0-3 m off the axis; "
                 "scored = a fit inside +-%.0f mm within the %.0f ns limit):\n", measure::BLASTS,
-                CARD_HALF_MM, resLimitNs);
-  measure::BlastResult b = measure::blastCheck(in, mics, resLimitNs, CARD_HALF_MM, letIdleRun);
+                CARD_HALF_MM, cfg.resLimitNs);
+  measure::BlastResult b = measure::blastCheck(in, mics, calibCfg().resLimitNs, CARD_HALF_MM, letIdleRun);
   int bad = b.scored;
   printBlastLine("every mic", b.scored, b.smallestNs);
   if (n >= 5) {
@@ -145,7 +145,7 @@ void positionBlastCheck() {
       if (!(mics & (1 << c))) continue;
       char what[16];
       snprintf(what, sizeof what, "without CH%d", c + 1);
-      b = measure::blastCheck(in, mics & ~(1 << c), resLimitNs, CARD_HALF_MM, letIdleRun);
+      b = measure::blastCheck(in, mics & ~(1 << c), calibCfg().resLimitNs, CARD_HALF_MM, letIdleRun);
       printBlastLine(what, b.scored, b.smallestNs);
       bad += b.scored;
     }
@@ -161,35 +161,22 @@ void positionBlastCheck() {
 // ---- Status and commands ----
 
 void positionPrintStatus() {
-  Serial.printf("solver: %u events solved (%u converged, %u sent to the app), %u with too few "
-                "channels; per solve %.1f us mean, %.1f us longest\n", (unsigned)nSolved,
-                (unsigned)nConverged, (unsigned)nSent, (unsigned)nTooFew,
+  Serial.printf("solver: %u events solved (%u converged, %u sent to the app, %u with a channel "
+                "dropped), %u with too few channels; per event %.1f us mean, %.1f us longest\n",
+                (unsigned)nSolved, (unsigned)nConverged, (unsigned)nSent, (unsigned)nDropped,
+                (unsigned)nTooFew,
                 nSolved ? (double)cyclesSum / nSolved / getCpuFrequencyMhz() : 0.0,
                 (double)cyclesMax / getCpuFrequencyMhz());
-  Serial.printf("solver: reslimit %.0f ns, test shots %s, settings id %08X\n", resLimitNs,
-                testShot ? "on" : "off", (unsigned)calibId());
+  Serial.printf("solver: reslimit %.0f ns, drop-one %s, test shots %s, settings id %08X\n",
+                calibCfg().resLimitNs, calibCfg().dropOne ? "on" : "off", testShot ? "on" : "off",
+                (unsigned)calibId());
 }
 
 void positionHelp() {
-  Serial.println("  reslimit [ns]        a solved shot goes to the app if its rms residual is\n"
-                 "                       within this (stored, default 1500)\n"
-                 "  testshot on|off      BOOT's short press makes a random test shot (stored)");
+  Serial.println("  testshot on|off      BOOT's short press makes a random test shot (stored)");
 }
 
 bool positionCommand(const char* cmd, const char* line) {
-  if (!strcmp(cmd, "reslimit")) {
-    float v;
-    if (sscanf(line, "%*s %f", &v) == 1) {
-      if (!(v > 0 && v <= RES_LIMIT_MAX_NS)) {
-        Serial.printf("reslimit <1..%.0f ns>\n", RES_LIMIT_MAX_NS);
-        return true;
-      }
-      resLimitNs = v;
-      prefs.putFloat("reslimit", v);
-    }
-    Serial.printf("reslimit %.0f ns\n", resLimitNs);
-    return true;
-  }
   if (!strcmp(cmd, "testshot")) {
     char word[8] = "";
     sscanf(line, "%*s %7s", word);

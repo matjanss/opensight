@@ -20,10 +20,14 @@ struct ChannelCfg {
 
 struct Cfg {
   ChannelCfg ch[MAX_MICS];   // ch[0] = CH1
+  float resLimitNs;          // a shot is good if its fit converged with an rms residual up to this
+  bool  dropOne;             // over the limit: try the fit with one channel left out
 };
 
-// "cfg id=1A2B3C4D CH1=x,y,h,k,offset,sigma ... CH7=- CH8=-". Floats with 9 significant
-// digits, so they read back to the same bits. The id is the CRC-32 of the text after
+static const float RES_LIMIT_DEFAULT_NS = 1500;   // also for logs from before `lim=`
+
+// "cfg id=1A2B3C4D CH1=x,y,h,k,offset,sigma ... CH7=- CH8=- lim=1500 drop=1". Floats with
+// 9 significant digits, so they read back to the same bits. The id is the CRC-32 of the text after
 // "id=XXXXXXXX ", so it changes with any setting. Returns the length (snprintf's).
 int formatCfg(char* out, size_t size, const Cfg& cfg);
 uint32_t cfgId(const Cfg& cfg);
@@ -54,6 +58,19 @@ bool parseRec(const char* line, Rec& rec);
 // and offset, its mic and sigma, c from the record. Returns the mask of the channels to fit:
 // fitted in the event, both edges seen, and a mic on the channel.
 uint8_t solveInput(const Cfg& cfg, const Rec& rec, SolveInput& in);
+
+// An event as the target solves it (MODEL.md "Solver" and "Drop-one", with the cfg's
+// policy): the fit over the channels solveInput gives, if there are 4 or more; with dropOne
+// and 5 or more, solveDropOne. `good`: converged, rms residual within resLimitNs (the shot
+// goes to the app).
+struct EventFit {
+  uint8_t  mask;      // the channels given to the fit
+  int      used;      // how many
+  bool     solved;    // 4 or more: the fit was run
+  Solution s;         // s.dropped: the channel drop-one left out, -1 if none
+  bool     good;
+};
+EventFit solveEvent(const Cfg& cfg, const Rec& rec);
 
 uint32_t crc32(const char* s);   // CRC-32 (IEEE 802.3), as zlib's
 

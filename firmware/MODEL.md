@@ -151,10 +151,12 @@ monitor's timestamp) is ignored, and so are unknown keys (later firmware may add
 a `sim` run:
 
 ```
-cfg id=0262A982 CH1=-105,-105,10.5,0.333333343,0,50 ... CH7=- CH8=-
+cfg id=0262A982 CH1=-105,-105,10.5,0.333333343,0,50 ... CH7=- CH8=- lim=1500 drop=1
 ```
 
 - `CHn=x,y,h,k,offset,sigma` (mm, mm, mm, -, ns, ns), or `-` for a channel without a mic.
+- `lim`: the residual limit (ns), `drop`: drop-one on (1) or off (0): the policy
+  `measure::solveEvent` applies. A line without them (3c) means 1500 and 0.
 - Floats with 9 significant digits: they read back to the same bits.
 - `id`: the CRC-32 (IEEE, as zlib's) of the text after `id=XXXXXXXX `. A line whose id
   doesn't match its text is rejected.
@@ -176,7 +178,9 @@ rec n=2161 t=876.1903407 cfg=0262A982 T=18.00 RH=50.0 p=1013.25 meas=--- c=342.7
 | `CHn=t1,t2` | Each channel fitted in the event: OUT_L's and OUT_H's first rise, ns from the event's first edge, `-` for none |
 
 The solver's input: t0 = arrivalT0(t1, t2, k, offset) per channel, in float, for every
-channel that has a mic and both edges; c from `c`.
+channel that has a mic and both edges; c from `c`. `measure::solveEvent` then fits them if
+there are 4 or more (with `drop`, through drop-one when 5 or more), and calls the shot good
+if it converged within `lim`.
 
 ## Test vectors
 

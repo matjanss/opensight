@@ -1,7 +1,8 @@
 // OpenSights - the calibration (measurement step 3c, see ../MEASUREMENT.md): per channel its
 // mic (x, y, h), its arrival-time factor k and own delay (offset), and its timing error
 // (sigma). Stored in NVS (namespace "cal"); k and the offsets were in "measure" until 3c and
-// are carried over once. Serial commands `mic`, `k`, `offset`.
+// are carried over once. Also the solver's policy (`reslimit`, `dropone`), which the cfg line
+// carries too. Serial commands `mic`, `k`, `offset`, `reslimit`, `dropone`.
 //
 // Every change prints the `cfg` line (lib/measure/record.h), whose id every `rec` line
 // carries, so a log can be replayed with the settings it was made with.

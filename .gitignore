@@ -24,3 +24,5 @@ hardware/**/*.kicad_prl
 firmware/tools/replay
 # Serial logs (pio device monitor --filter log2file)
 logs/
+# Python
+__pycache__/

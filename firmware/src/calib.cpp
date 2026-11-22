@@ -14,11 +14,7 @@ static const float H_MAX_MM = 100.0f;
 static const float K_MAX = 2.0f;
 static const float OFFSET_MAX_NS = 100000.0f;
 
-// The D1/D2 layout (PLAN.md): CH1 bottom left, CH2 bottom right, CH3 top right slid 40 mm
-// along the top edge, CH4 top left, CH5 bottom middle, CH6 right middle.
-static const float DEFAULT_XY[6][2] = {
-  {-105, -105}, {105, -105}, {65, 105}, {-105, 105}, {0, -105}, {105, 0},
-};
+static const float RES_LIMIT_MAX_NS = 100000.0f;
 
 // Stored per channel as one blob, so a channel's values change together.
 struct Stored {
@@ -47,8 +43,8 @@ static void setDefaultMics() {
   for (int c = 0; c < CHANNELS; c++) {
     measure::ChannelCfg& ch = cfg.ch[c];
     ch.mic = c < 6;
-    ch.x = c < 6 ? DEFAULT_XY[c][0] : 0;
-    ch.y = c < 6 ? DEFAULT_XY[c][1] : 0;
+    ch.x = c < 6 ? MIC_LAYOUT_D2[c][0] : 0;
+    ch.y = c < 6 ? MIC_LAYOUT_D2[c][1] : 0;
     ch.h = MIC_H_DEFAULT_MM;
   }
 }
@@ -77,6 +73,23 @@ void calibBegin() {
       any = true;
     }
   }
+  // The solver's policy: in "cal" from 3d (`reslimit` was in "measure" in 3c).
+  cfg.resLimitNs = measure::RES_LIMIT_DEFAULT_NS;
+  cfg.dropOne = prefs.getBool("dropone", true);
+  if (prefs.isKey("reslimit")) {
+    cfg.resLimitNs = prefs.getFloat("reslimit", measure::RES_LIMIT_DEFAULT_NS);
+  } else {
+    Preferences old;
+    old.begin("measure");
+    if (old.isKey("reslimit")) {
+      cfg.resLimitNs = old.getFloat("reslimit", measure::RES_LIMIT_DEFAULT_NS);
+      old.remove("reslimit");
+      prefs.putFloat("reslimit", cfg.resLimitNs);
+    }
+    old.end();
+  }
+  if (!(cfg.resLimitNs > 0 && cfg.resLimitNs <= RES_LIMIT_MAX_NS))
+    cfg.resLimitNs = measure::RES_LIMIT_DEFAULT_NS;
   if (!any) {
     // First boot with 3c: carry k and the offsets over from "measure" (step 2), once.
     Preferences old;
@@ -130,12 +143,16 @@ void calibHelp() {
   Serial.println("  mic                  the mics (x, y, h per channel) and the blast check\n"
                  "  mic <ch> <x> <y> [h] a channel's mic, mm from the frame centre (stored)\n"
                  "  mic h [ch] <mm>      the mic height behind the paper, every mic or one\n"
-                 "  mic default | sim    the D1/D2 layout on CH1-CH6 | the simulator's on CH5-CH8\n"
+                 "  mic default | sim    the D1/D2 layout on CH1-CH6 | the simulator's on CH3-CH8\n"
                  "  mic clear <ch>       no mic on that channel\n"
                  "  k [ch] [value]       arrival time t0 = t1 - k (t2 - t1) - offset: k, every\n"
                  "                       channel or one (stored; `k` lists them)\n"
                  "  offset [ch] [ns]     a channel's own delay, taken off its t0 (stored);\n"
-                 "                       `offset` lists them, `offset clear` zeroes all");
+                 "                       `offset` lists them, `offset clear` zeroes all\n"
+                 "  reslimit [ns]        a shot goes to the app if its fit's rms residual is\n"
+                 "                       within this (stored, default 1500)\n"
+                 "  dropone on|off       over the limit, the best fit with one channel left\n"
+                 "                       out (stored, default on)");
 }
 
 // The number of space-separated words in line.
@@ -282,7 +299,41 @@ static bool offsetCommand(const char* line) {
   return true;
 }
 
+static bool policyCommand(const char* cmd, const char* line) {
+  if (!strcmp(cmd, "reslimit")) {
+    float v;
+    if (sscanf(line, "%*s %f", &v) == 1) {
+      if (!(v > 0 && v <= RES_LIMIT_MAX_NS)) {
+        Serial.printf("reslimit <1..%.0f ns>\n", RES_LIMIT_MAX_NS);
+        return true;
+      }
+      cfg.resLimitNs = v;
+      prefs.putFloat("reslimit", v);
+      Serial.printf("reslimit %.0f ns\n", cfg.resLimitNs);
+      changed();
+    } else {
+      Serial.printf("reslimit %.0f ns\n", cfg.resLimitNs);
+    }
+    return true;
+  }
+  // dropone
+  char word[8] = "";
+  sscanf(line, "%*s %7s", word);
+  if (!strcmp(word, "on") || !strcmp(word, "off")) {
+    cfg.dropOne = !strcmp(word, "on");
+    prefs.putBool("dropone", cfg.dropOne);
+    Serial.printf("drop-one %s\n", cfg.dropOne ? "on" : "off");
+    changed();
+  } else if (word[0]) {
+    Serial.println("dropone on|off");
+  } else {
+    Serial.printf("drop-one %s\n", cfg.dropOne ? "on" : "off");
+  }
+  return true;
+}
+
 bool calibCommand(const char* cmd, const char* line) {
+  if (!strcmp(cmd, "reslimit") || !strcmp(cmd, "dropone")) return policyCommand(cmd, line);
   if (!strcmp(cmd, "mic")) return micCommand(line);
   if (!strcmp(cmd, "k")) return kCommand(line);
   if (!strcmp(cmd, "offset")) return offsetCommand(line);

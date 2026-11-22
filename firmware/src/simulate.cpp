@@ -1,8 +1,8 @@
-// OpenSights - sensor simulator (measurement step 2).
+// OpenSights - sensor simulator (measurement steps 2-3).
 //
 // A simulated shot: the shot position, the mic positions and a speed of sound give the true
 // arrival at each mic; a trip model gives when OUT_L and OUT_H go high after it; the pulse
-// generator (pulsegen.cpp) makes those edges in hardware, 25 ns steps, on CH5-CH8's own
+// generator (pulsegen.cpp) makes those edges in hardware, 25 ns steps, on CH3-CH8's own
 // pins, and the capture reads them back like a real event. The simulator knows the edges it
 // sent, so it checks:
 //   - the capture and the arrival times: t0 from the captured edges against t0 from the
@@ -14,12 +14,16 @@
 //     straight-line formula leaves on a curved rise;
 //   - the position (step 3c): the solver's shot against the point it was sent to. With the
 //     firmware's mics, air, offsets and model the same as the simulator's (`mic sim`), only
-//     the sampling is left: about 0.015 mm rms, 0.04 mm worst (a PC simulation).
+//     the sampling is left: about 0.013 mm rms, 0.06 mm worst with 6 mics (a PC
+//     simulation). With a late or early channel, drop-one must leave that one out.
+// Faults: a channel late or early by a half cycle (24 us), its edges missing or H only,
+// a second shot, or a blast: a point source metres in front, which must never score.
 // `sim raw` sends fixed edges instead, to check the generator itself: equal times on all
 // channels show any offset between the two MCPWM units.
 //
 // Trip model: the pulse rises like A sin(pi t / 2T) (or its straight start, A pi t / 2T),
-// T = 12 us; OUT_L trips at 1, OUT_H at 4 (k = 1/3); A = amp * 100 mm / distance.
+// T = 12 us; OUT_L trips at L, OUT_H at H (default 1 and 4: k = L / (H - L) = 1/3; `sim
+// thr`); A = amp * 100 mm / distance (a blast: amp, every channel alike).
 #include "simulate.h"
 #include "airtemp.h"
 #include "calib.h"
@@ -36,8 +40,7 @@ static const double   TICK_NS    = 1e9 / HZ;
 static const uint32_t LEAD_TICKS = 800;        // 20 us from the start to the first rise
 static const uint32_t HOLD_TICKS = 400;        // every line stays high >= 10 us
 static const double   RISE_NS    = 12000;      // quarter period of the simulated pulse
-static const double   VH_OVER_VL = 4.0;        // k = 1 / (4 - 1)
-static const double   LATE_NS    = 24000;      // half-cycle-late trip
+static const double   LATE_NS    = 24000;      // a half-cycle-late (or early) trip
 static const int      MAX_COUNT  = 2000;
 
 // ---- Settings (RAM; `sim` shows them) ----
@@ -45,20 +48,29 @@ static const int      MAX_COUNT  = 2000;
 static float micX[N], micY[N], micH[N];
 static float trueOffsetNs[N] = {};
 static float simTempC = NAN;   // NAN: the firmware's own air (airtemp.h); else `sim temp`
-static float simAmp = 40.0f;      // pulse amplitude at 100 mm, in units of the OUT_L threshold
+static float simAmp = 40.0f;      // pulse amplitude at 100 mm, in units of the default OUT_L level
 static bool  sineModel = false;
-enum Fault : uint8_t { F_NONE, F_LATE, F_MISSING, F_HONLY, F_DOUBLE };
+static float thrL[N], thrH[N];    // trip levels per channel, same units (`sim thr`)
+enum Fault : uint8_t { F_NONE, F_LATE, F_EARLY, F_MISSING, F_HONLY, F_DOUBLE, F_BLAST };
+static const char* const FAULT_TEXT[] = {"none", "late", "early", "missing", "honly", "double", "blast"};
 static Fault    fault = F_NONE;
 static int      faultCh = 0;        // 0..N-1
 static uint32_t doubleUs = 2500;
+static float    blastM = 10, blastOffMm = 0;   // F_BLAST: metres in front, mm off the axis
 
 static bool micsSet = false;
 static void defaultMics() {
-  const float m = SIM_MIC_MM;
-  const float xs[4] = {-m, m, m, -m}, ys[4] = {-m, -m, m, m};
-  for (int i = 0; i < N; i++) { micX[i] = xs[i % 4]; micY[i] = ys[i % 4]; micH[i] = MIC_H_DEFAULT_MM; }
+  for (int i = 0; i < N; i++) {
+    micX[i] = MIC_LAYOUT_D2[i % 6][0];
+    micY[i] = MIC_LAYOUT_D2[i % 6][1];
+    micH[i] = MIC_H_DEFAULT_MM;
+    thrL[i] = 1;
+    thrH[i] = 4;
+  }
   micsSet = true;
 }
+
+static double trueK(int i) { return thrL[i] / (thrH[i] - thrL[i]); }
 
 // ---- A run ----
 
@@ -99,11 +111,14 @@ static struct {
   int      faultCh;
   double   limitNs;                // capture error limit
   Stat     err[N], model[N];       // t0: vs the edges sent, vs the true arrival
-  Stat     raw[N][2];              // M_RAW: each line vs CH5 L
+  Stat     raw[N][2];              // M_RAW: each line vs the first sim channel's L
   uint32_t noT0[N], extraT0[N], rawMissing[N][2];
   // The position check (3c): the solver's shot against the truth.
   bool     posCounts;              // part of PASS: the firmware solves the simulator's world
   const char* posWhyNot;
+  float    posLimitMm;             // the worst error allowed (more with a channel dropped)
+  int      expectDrop;             // the channel drop-one must leave out, -1: none
+  uint32_t sentToApp, dropRight, dropWrong, dropNone;
   Stat     posErr, posRes;         // mm; the fit's rms residual, ns
   double   posDx, posDy;           // sums, for the mean error
   uint32_t posUnsolved, posNotConverged;
@@ -130,7 +145,8 @@ static double simKMax() {
 }
 
 // Why the position check can't be part of PASS: the firmware's world differs from the
-// simulator's on purpose (or by mistake). nullptr: it counts.
+// simulator's on purpose (or by mistake). nullptr: it counts. A blast has no position, but
+// whether one scores counts only with the same mics too.
 static const char* positionMismatch(Fault fl) {
   const measure::Cfg& cfg = calibCfg();
   for (int i = 0; i < N; i++) {
@@ -138,13 +154,16 @@ static const char* positionMismatch(Fault fl) {
     if (!ch.mic || fabsf(ch.x - micX[i]) > 0.005f || fabsf(ch.y - micY[i]) > 0.005f)
       return "the firmware's mics are not the simulator's (`mic sim`)";
     if (fabsf(ch.h - micH[i]) > 0.005f) return "the firmware's mic heights are not the simulator's";
+    if (fl == F_BLAST) continue;
     if (fabsf(ch.offsetNs - trueOffsetNs[i]) > 0.5f) return "the firmware's offsets are not the simulator's";
-    if (!sineModel && fabsf(ch.k - 1.0f / 3) > 0.001f)
-      return "the firmware's k is not the linear model's 1/3 (`k 0.33333`)";
+    if (!sineModel && fabsf(ch.k - trueK(i)) > 0.001f)
+      return "the firmware's k is not the simulator's (L / (H - L) per channel: `sim`, `k`)";
   }
   if (!isnan(simTempC)) return "`sim temp` gives the simulator other air than the firmware's";
+  if (fl == F_BLAST) return nullptr;
   if (sineModel) return "the sine model (t0's formula is exact for the linear one only)";
-  if (fl != F_NONE) return "a fault is set";
+  if (fl == F_DOUBLE) return "the double-shot fault";
+  if ((fl == F_LATE || fl == F_EARLY) && !cfg.dropOne) return "a late or early channel with drop-one off";
   return nullptr;
 }
 
@@ -169,31 +188,48 @@ static double speedMmPerNs(const Air& a) { return a.c * 1e-6; }
 
 static uint32_t maxRiseTicks() { return run.periodTicks - HOLD_TICKS; }
 
-// The edges of a shot at (x, y). False if they don't fit in a run (the window).
+static double uniform(double lo, double hi);
+
+// The edges of a shot at (x, y), or of a blast (F_BLAST: x and y are NAN). False if they
+// don't fit in a run (the window).
 static bool makeShot(float x, float y, Shot& s) {
   const double c = speedMmPerNs(simAir());
   const double scale = 2 * RISE_NS / M_PI;
+  const bool blast = run.fault == F_BLAST;
   double t[N][2];
   double first = 1e18;
+  double bx = 0, by = 0;
+  if (blast) {
+    const double phi = uniform(0, 2 * M_PI);
+    bx = blastOffMm * cos(phi);
+    by = blastOffMm * sin(phi);
+    x = y = NAN;
+  }
   s.x = x;
   s.y = y;
   for (int i = 0; i < N; i++) {
-    double d = sqrt((x - micX[i]) * (x - micX[i]) + (y - micY[i]) * (y - micY[i]) + micH[i] * micH[i]);
-    if (d < 1) d = 1;
+    double d;
+    if (blast) {
+      const double dx = micX[i] - bx, dy = micY[i] - by, dz = blastM * 1000.0 + micH[i];
+      d = sqrt(dx * dx + dy * dy + dz * dz);
+    } else {
+      d = sqrt((x - micX[i]) * (x - micX[i]) + (y - micY[i]) * (y - micY[i]) + micH[i] * micH[i]);
+      if (d < 1) d = 1;
+    }
     s.geo[i] = d / c;
-    double a = simAmp * 100.0 / d;
+    double a = blast ? simAmp : simAmp * 100.0 / d;
     double tl, th;
     bool lOn = true, hOn = true;
     if (sineModel) {
-      lOn = a > 1;
-      hOn = a > VH_OVER_VL;
-      tl = lOn ? scale * asin(1 / a) : 0;
-      th = hOn ? scale * asin(VH_OVER_VL / a) : 0;
+      lOn = a > thrL[i];
+      hOn = a > thrH[i];
+      tl = lOn ? scale * asin(thrL[i] / a) : 0;
+      th = hOn ? scale * asin(thrH[i] / a) : 0;
     } else {
-      tl = scale / a;
-      th = scale * VH_OVER_VL / a;
+      tl = scale * thrL[i] / a;
+      th = scale * thrH[i] / a;
     }
-    double late = run.fault == F_LATE && run.faultCh == i ? LATE_NS : 0;
+    double late = run.faultCh != i ? 0 : run.fault == F_LATE ? LATE_NS : run.fault == F_EARLY ? -LATE_NS : 0;
     bool gone = (run.fault == F_MISSING || run.fault == F_HONLY) && run.faultCh == i;
     s.on[i][0] = lOn && !gone;
     s.on[i][1] = hOn && !(run.fault == F_MISSING && run.faultCh == i);
@@ -257,6 +293,10 @@ static void startCommon(Mode m, uint32_t count) {
   run.limitNs = (1 + 2 * k) * NS_PER_SAMPLE + TICK_NS + 5;
   run.posWhyNot = rawMode ? "raw edges are not a shot" : positionMismatch(run.fault);
   run.posCounts = !run.posWhyNot;
+  // A late or early channel must be dropped; without it (or its t0) 5 mics are left.
+  run.expectDrop = run.fault == F_LATE || run.fault == F_EARLY ? F + run.faultCh : -1;
+  run.posLimitMm = run.fault == F_LATE || run.fault == F_EARLY || run.fault == F_MISSING ||
+                   run.fault == F_HONLY ? SIM_POS_LIMIT_DROP_MM : SIM_POS_LIMIT_MM;
 
   // Check the first shot fits before setting anything up.
   Shot probe;
@@ -299,19 +339,22 @@ static void startCommon(Mode m, uint32_t count) {
                   TICK_NS, (unsigned)run.spacingMs);
     return;
   }
-  const char* faultText[] = {"none", "late", "missing", "honly", "double"};
   const Air sa = simAir();
   Serial.printf("sim: %u shots %s on CH%d-CH%d (GPIO %s); %s model, amp %.0f, air %.1f °C "
                 "(%s, %.2f m/s); firmware k up to %.4f; fault %s", (unsigned)count,
                 m == M_RANDOM ? "at random points on the card" : "at one point", F + 1, F + N,
                 pinText, sineModel ? "sine" : "linear", simAmp, sa.tC,
-                isnan(simTempC) ? "the firmware's" : "sim temp", sa.c, k, faultText[run.fault]);
+                isnan(simTempC) ? "the firmware's" : "sim temp", sa.c, k, FAULT_TEXT[run.fault]);
   if (run.fault == F_DOUBLE) Serial.printf(" (second shot %u us later)", (unsigned)run.doubleWaitUs);
+  else if (run.fault == F_BLAST) Serial.printf(" (%.0f m in front, %.0f mm off the axis)", blastM, blastOffMm);
   else if (run.fault != F_NONE) Serial.printf(" on CH%d", F + 1 + run.faultCh);
   Serial.printf("; every %u ms\n", (unsigned)run.spacingMs);
-  if (run.posCounts)
-    Serial.printf("sim: position check on: the firmware has the simulator's mics and air (limit %.2f mm)\n",
-                  SIM_POS_LIMIT_MM);
+  if (run.fault == F_BLAST)
+    Serial.printf(run.posCounts ? "sim: blast check on: none may be sent to the app\n"
+                                : "sim: blast check for information only: %s\n", run.posWhyNot);
+  else if (run.posCounts)
+    Serial.printf("sim: position check on: the firmware has the simulator's mics and air (limit %.2f "
+                  "mm)%s\n", run.posLimitMm, run.expectDrop >= 0 ? "; drop-one must leave the faulty channel out" : "");
   else
     Serial.printf("sim: position check for information only: %s\n", run.posWhyNot);
 }
@@ -325,7 +368,7 @@ static void recordRaw(const EventResult& r) {
   int n = snprintf(line, sizeof line, "  sim raw, ns vs set (from CH%d L):", F + 1);
   if (r.line[refLine].rise < 0) {
     run.rawMissing[0][0]++;
-    Serial.println("  sim raw: no CH5 L edge");
+    Serial.printf("  sim raw: no CH%d L edge\n", F + 1);
     return;
   }
   for (int i = 0; i < N; i++)
@@ -361,7 +404,9 @@ static void recordShot(const EventResult& r, const Arrival& a, const Position& p
     if (ref < 0 && expOn[i] && got[i]) ref = i;
   }
   char line[260];
-  int n = snprintf(line, sizeof line, "  sim (%.1f, %.1f) mm, t0 error ns vs sent/vs true:", s.x, s.y);
+  const bool blast = run.fault == F_BLAST;
+  int n = blast ? snprintf(line, sizeof line, "  sim blast, t0 error ns vs sent/vs true:")
+                : snprintf(line, sizeof line, "  sim (%.1f, %.1f) mm, t0 error ns vs sent/vs true:", s.x, s.y);
   for (int i = 0; i < N; i++) {
     if (i == ref) continue;
     if (!expOn[i] || !got[i] || ref < 0) {
@@ -376,6 +421,19 @@ static void recordShot(const EventResult& r, const Arrival& a, const Position& p
     n += snprintf(line + n, sizeof line - n, "  CH%d %+.0f/%+.0f%s", F + 1 + i, e, m,
                   fabs(e) > run.limitNs ? " (!)" : "");
   }
+  if (p.sent) run.sentToApp++;
+  if (blast) {
+    n += snprintf(line + n, sizeof line - n, "; %s", p.sent ? "SENT to the app (!)" : "not sent");
+    Serial.println(line);
+    return;
+  }
+  if (p.solved) {
+    const int dropped = p.s.dropped;
+    if (run.expectDrop >= 0 && dropped == run.expectDrop) run.dropRight++;
+    else if (dropped >= 0) run.dropWrong++;
+    else if (run.expectDrop >= 0) run.dropNone++;
+    if (dropped >= 0) n += snprintf(line + n, sizeof line - n, "; CH%d dropped", dropped + 1);
+  }
   if (!p.solved) {
     run.posUnsolved++;
     n += snprintf(line + n, sizeof line - n, "; not solved");
@@ -384,12 +442,12 @@ static void recordShot(const EventResult& r, const Arrival& a, const Position& p
     n += snprintf(line + n, sizeof line - n, "; did not converge");
   } else {
     const double dx = p.s.x - s.x, dy = p.s.y - s.y, e = sqrt(dx * dx + dy * dy);
-    run.posErr.add(e, SIM_POS_LIMIT_MM);
+    run.posErr.add(e, run.posLimitMm);
     run.posRes.add(p.s.rmsNs, 1e18);
     run.posDx += dx;
     run.posDy += dy;
     n += snprintf(line + n, sizeof line - n, "; position error %.3f mm%s", e,
-                  run.posCounts && e > SIM_POS_LIMIT_MM ? " (!)" : "");
+                  run.posCounts && e > run.posLimitMm ? " (!)" : "");
   }
   Serial.println(line);
 }
@@ -525,8 +583,8 @@ static void finish() {
                       (unsigned)st.outside, (unsigned)run.rawMissing[i][h]);
         if (st.outside || run.rawMissing[i][h]) pass = false;
       }
-    Serial.printf("sim: CH%d-CH%d are on MCPWM unit 0, CH%d on unit 1: a mean on CH%d that the "
-                  "others don't have is an offset between the units\n", F + 1, F + 3, F + 4, F + 4);
+    Serial.printf("sim: CH%d-CH%d are on MCPWM unit 0, CH%d-CH%d on unit 1: a mean on the second "
+                  "group alone is an offset between the units\n", F + 1, F + 3, F + 4, F + N);
     Serial.printf("sim: %s\n", pass ? "PASS" : "FAIL");
     return;
   }
@@ -539,7 +597,7 @@ static void finish() {
     const double rmsExp = S * sqrt(2 * ((1 + k) * (1 + k) + k * k) / 12);
     const Stat& st = run.err[i];
     const Stat& md = run.model[i];
-    bool faulty = run.fault != F_NONE && run.fault != F_DOUBLE && run.faultCh == i;
+    bool faulty = run.fault != F_NONE && run.fault != F_DOUBLE && run.fault != F_BLAST && run.faultCh == i;
     if (st.n) {
       double mean = st.sum / st.n, rms = sqrt(st.sumSq / st.n);
       bool meanOff = fabs(mean) > 3 * rmsExp / sqrt((double)st.n) + 2;
@@ -549,7 +607,9 @@ static void finish() {
                     meanOff ? "; mean more than 3x the rounding's: a fixed offset" : "");
       Serial.printf("sim: CH%d t0 vs true arrival: mean %+.1f ns, worst %.1f ns%s\n", F + 1 + i,
                     md.sum / md.n, md.maxAbs,
-                    faulty && run.fault == F_LATE ? " (the late trip: step 4 must catch it)" : "");
+                    faulty && run.fault == F_LATE    ? " (the late trip: drop-one must leave it out)"
+                    : faulty && run.fault == F_EARLY ? " (the early trip: drop-one must leave it out)"
+                                                     : "");
       if (st.outside) pass = false;
     }
     if (run.noT0[i])
@@ -558,8 +618,8 @@ static void finish() {
       Serial.printf("sim: CH%d: a t0 in %u shots without one\n", F + 1 + i, (unsigned)run.extraT0[i]);
     if (run.noT0[i] || run.extraT0[i]) pass = false;
     if (faulty && (run.fault == F_MISSING || run.fault == F_HONLY))
-      Serial.printf("sim: CH%d had no t0, as the fault set it (step 4 must reject such shots)\n",
-                    F + 1 + i);
+      Serial.printf("sim: CH%d had no t0, as the fault set it (the fit has the other %d)\n",
+                    F + 1 + i, N - 1);
   }
   if (run.fault == F_DOUBLE) {
     Serial.printf("sim: second shots %u us after the first: %u measured as their own event, %u "
@@ -570,10 +630,19 @@ static void finish() {
                   (unsigned)run.second[4]);
     if (run.second[3] || run.second[4]) pass = false;
   }
-  // The position check.
+  // The position check (a blast: whether any scored).
   const Stat& pe = run.posErr;
   const uint32_t tried = pe.n + run.posUnsolved + run.posNotConverged;
-  if (tried) {
+  if (run.fault == F_BLAST) {
+    Serial.printf("sim: blasts %.0f m in front, %.0f mm off the axis: %u of %u sent to the app\n",
+                  blastM, blastOffMm, (unsigned)run.sentToApp, (unsigned)run.seen);
+    if (run.posCounts) {
+      Serial.printf("sim: blast check %s (none may score)\n", run.sentToApp ? "FAIL" : "PASS");
+      if (run.sentToApp) pass = false;
+    } else {
+      Serial.printf("sim: blast check not part of PASS: %s\n", run.posWhyNot);
+    }
+  } else if (tried) {
     Serial.printf("sim: position vs the truth: %u of %u shots solved and converged", (unsigned)pe.n,
                   (unsigned)tried);
     if (pe.n)
@@ -581,10 +650,18 @@ static void finish() {
                     "mean %.0f ns, worst %.0f ns", sqrt(pe.sumSq / pe.n), pe.maxAbs, run.posDx / pe.n,
                     run.posDy / pe.n, run.posRes.sum / pe.n, run.posRes.maxAbs);
     Serial.println();
+    Serial.printf("sim: %u of %u sent to the app; drop-one: ", (unsigned)run.sentToApp, (unsigned)tried);
+    if (run.expectDrop >= 0)
+      Serial.printf("CH%d dropped in %u, another channel in %u, none in %u\n", run.expectDrop + 1,
+                    (unsigned)run.dropRight, (unsigned)run.dropWrong, (unsigned)run.dropNone);
+    else
+      Serial.printf("a channel dropped in %u\n", (unsigned)run.dropWrong);
     if (run.posCounts) {
-      const bool ok = pe.n == tried && pe.outside == 0;
-      Serial.printf("sim: position check %s (every shot solved, worst error within %.2f mm)\n",
-                    ok ? "PASS" : "FAIL", SIM_POS_LIMIT_MM);
+      const bool drops = run.expectDrop >= 0 ? run.dropRight == tried : run.dropWrong == 0;
+      const bool ok = pe.n == tried && pe.outside == 0 && run.sentToApp == tried && drops;
+      Serial.printf("sim: position check %s (every shot solved and sent, %s, worst error within "
+                    "%.2f mm)\n", ok ? "PASS" : "FAIL",
+                    run.expectDrop >= 0 ? "the faulty channel dropped" : "none dropped", run.posLimitMm);
       if (!ok) pass = false;
     } else {
       Serial.printf("sim: position check not part of PASS: %s\n", run.posWhyNot);
@@ -596,30 +673,33 @@ static void finish() {
 // ---- Commands ----
 
 void simHelp() {
-  Serial.println("  sim at <x> <y> [n]   n shots at (x, y) mm from the card centre, on CH5-CH8\n"
+  Serial.println("  sim at <x> <y> [n]   n shots at (x, y) mm from the card centre, on CH3-CH8\n"
                  "                       (no sensor boards there!), default 20\n"
                  "  sim random [n]       n shots at random points on the card, default 100\n"
-                 "  sim raw <a> <b> <c> <d> [n] [gap]  L of CH5-CH8 at a..d ns, H gap ns later\n"
+                 "  sim raw <t3>..<t8> [n] [gap]  L of CH3-CH8 at these ns, H gap ns later\n"
                  "                       (default 1000), n runs (default 20)\n"
-                 "  sim fault none | late <ch> | missing <ch> | honly <ch> | double <us>\n"
+                 "  sim fault none | late <ch> | early <ch> | missing <ch> | honly <ch> |\n"
+                 "                       double <us> | blast <m> <mm off the axis>\n"
                  "  sim model linear|sine, sim amp <n>, sim temp <C>|air, sim offset <ch> <ns>,\n"
-                 "  sim mic <ch> <x> <y> [h]  the simulated mics (h default 10.5 mm); `sim` shows\n"
-                 "                       them; `mic sim` gives the firmware the same; sim stop");
+                 "  sim thr <ch> <L> <H>  a channel's trip levels (default 1 4: k = L / (H - L))\n"
+                 "  sim mic <ch> <x> <y> [h]  the simulated mics (default D1/D2, h 10.5 mm); `sim`\n"
+                 "                       shows them; `mic sim` gives the firmware the same; sim stop");
 }
 
 static void printSettings() {
   if (!micsSet) defaultMics();
-  const char* faultText[] = {"none", "late", "missing", "honly", "double"};
   const Air sa = simAir();
   Serial.printf("sim: %s model, amp %.0f, air %.1f °C (%s, %.2f m/s), fault %s",
                 sineModel ? "sine" : "linear", simAmp, sa.tC,
-                isnan(simTempC) ? "the firmware's" : "sim temp", sa.c, faultText[fault]);
+                isnan(simTempC) ? "the firmware's" : "sim temp", sa.c, FAULT_TEXT[fault]);
   if (fault == F_DOUBLE) Serial.printf(" %u us", (unsigned)doubleUs);
+  else if (fault == F_BLAST) Serial.printf(" %.0f m in front, %.0f mm off the axis", blastM, blastOffMm);
   else if (fault != F_NONE) Serial.printf(" CH%d", F + 1 + faultCh);
   Serial.println();
   for (int i = 0; i < N; i++)
-    Serial.printf("sim: CH%d mic at (%.1f, %.1f) mm, h %.1f mm, own delay %.0f ns\n", F + 1 + i,
-                  micX[i], micY[i], micH[i], trueOffsetNs[i]);
+    Serial.printf("sim: CH%d mic at (%.1f, %.1f) mm, h %.1f mm, own delay %.0f ns, trips at %g/%g "
+                  "(k %.4f)\n", F + 1 + i, micX[i], micY[i], micH[i], trueOffsetNs[i], thrL[i],
+                  thrH[i], trueK(i));
 }
 
 static int simChannelArg(int ch) { return ch >= F + 1 && ch <= F + N ? ch - F - 1 : -1; }
@@ -653,9 +733,24 @@ bool simCommand(const char* cmd, const char* line) {
     return true;
   }
   if (!strcmp(sub, "raw")) {
-    unsigned long t[N] = {}, n = 20, gap = 1000;
-    int got = sscanf(line, "%*s %*s %lu %lu %lu %lu %lu %lu", &t[0], &t[1], &t[2], &t[3], &n, &gap);
-    if (got < N) { Serial.println("sim raw <a> <b> <c> <d> [n] [gap ns]"); return true; }
+    unsigned long v[N + 2];
+    int got = 0;
+    int skip = 0;
+    sscanf(line, "%*s %*s%n", &skip);   // past "sim raw"
+    const char* q = line + skip;
+    while (got < N + 2 && *q) {
+      char* end;
+      unsigned long x = strtoul(q, &end, 10);
+      if (end == q) break;
+      v[got++] = x;
+      q = end;
+    }
+    if (got < N) {
+      Serial.printf("sim raw <t%d>..<t%d> [n] [gap ns]: %d times\n", F + 1, F + N, N);
+      return true;
+    }
+    unsigned long t[N], n = got > N ? v[N] : 20, gap = got > N + 1 ? v[N + 1] : 1000;
+    for (int i = 0; i < N; i++) t[i] = v[i];
     if (!run.active) {
       for (int i = 0; i < N; i++) run.rawRiseNs[i] = t[i];
       run.rawGapNs = gap;
@@ -667,20 +762,38 @@ bool simCommand(const char* cmd, const char* line) {
   if (!strcmp(sub, "fault")) {
     int ch = 0;
     unsigned long us = 0;
+    float m, off;
     if (!strcmp(word, "none")) fault = F_NONE;
-    else if (!strcmp(word, "double") && sscanf(line, "%*s %*s %*s %lu", &us) == 1 && us >= 100 &&
+    else if (!strcmp(word, "blast") && sscanf(line, "%*s %*s %*s %f %f", &m, &off) == 2 && m >= 1 &&
+             m <= 100 && off >= 0 && off <= 10000) {
+      fault = F_BLAST;
+      blastM = m;
+      blastOffMm = off;
+    } else if (!strcmp(word, "double") && sscanf(line, "%*s %*s %*s %lu", &us) == 1 && us >= 100 &&
              us <= 100000) {
       fault = F_DOUBLE;
       doubleUs = us;
     } else if (sscanf(line, "%*s %*s %*s %d", &ch) == 1 && simChannelArg(ch) >= 0 &&
-               (!strcmp(word, "late") || !strcmp(word, "missing") || !strcmp(word, "honly"))) {
-      fault = !strcmp(word, "late") ? F_LATE : !strcmp(word, "missing") ? F_MISSING : F_HONLY;
+               (!strcmp(word, "late") || !strcmp(word, "early") || !strcmp(word, "missing") ||
+                !strcmp(word, "honly"))) {
+      fault = !strcmp(word, "late") ? F_LATE : !strcmp(word, "early") ? F_EARLY
+            : !strcmp(word, "missing") ? F_MISSING : F_HONLY;
       faultCh = simChannelArg(ch);
     } else {
-      Serial.printf("sim fault none | late <ch> | missing <ch> | honly <ch> (ch %d..%d) | "
-                    "double <100..100000 us>\n", F + 1, F + N);
+      Serial.printf("sim fault none | late|early|missing|honly <ch> (ch %d..%d) | "
+                    "double <100..100000 us> | blast <1..100 m> <0..10000 mm>\n", F + 1, F + N);
       return true;
     }
+  } else if (!strcmp(sub, "thr")) {
+    int ch;
+    float l, h;
+    if (sscanf(line, "%*s %*s %d %f %f", &ch, &l, &h) != 3 || simChannelArg(ch) < 0 || !(l > 0) ||
+        !(h > l) || h > 1000) {
+      Serial.printf("sim thr <%d..%d> <L> <H> (0 < L < H; default 1 4)\n", F + 1, F + N);
+      return true;
+    }
+    thrL[simChannelArg(ch)] = l;
+    thrH[simChannelArg(ch)] = h;
   } else if (!strcmp(sub, "model")) {
     if (!strcmp(word, "linear")) sineModel = false;
     else if (!strcmp(word, "sine")) sineModel = true;

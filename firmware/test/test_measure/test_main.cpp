@@ -268,6 +268,8 @@ static Cfg sampleCfg() {
   cfg.ch[2].h = 21.5f;
   cfg.ch[4].k = 0.3333f;
   cfg.ch[6].k = 0.25f;   // no mic, but its own k
+  cfg.resLimitNs = 1234.5f;
+  cfg.dropOne = true;
   return cfg;
 }
 
@@ -288,6 +290,12 @@ static void test_cfg_round_trip() {
                      cfg.ch[c].h == back.ch[c].h && cfg.ch[c].k == back.ch[c].k &&
                      cfg.ch[c].offsetNs == back.ch[c].offsetNs && cfg.ch[c].sigmaNs == back.ch[c].sigmaNs);
   }
+  TEST_ASSERT_TRUE(back.resLimitNs == cfg.resLimitNs && back.dropOne);
+  // A 3c line (before `lim=` and `drop=`): 1500 ns, no drop-one, as 3c had.
+  TEST_ASSERT_TRUE(parseCfg("cfg id=C2127541 CH1=- CH2=- CH3=- CH4=- CH5=-105,-105,10.5,0.333333343,0,50 "
+                            "CH6=105,-105,10.5,0.333333343,0,50 CH7=105,105,10.5,0.333333343,0,50 "
+                            "CH8=-105,105,10.5,0.333333343,0,50", back, &id));
+  TEST_ASSERT_TRUE(back.resLimitNs == 1500 && !back.dropOne && back.ch[4].mic && !back.ch[0].mic);
   // With text before it (a monitor's timestamp), and a line end.
   std::string withPrefix = std::string("12:00:01.123 > ") + line + "\r\n";
   TEST_ASSERT_TRUE(parseCfg(withPrefix.c_str(), back, &id));
@@ -342,6 +350,44 @@ static void test_rec_round_trip() {
   // Not a rec line, or one with a field missing.
   TEST_ASSERT_FALSE(parseRec("evt 2161 at 876.1903407 s", b));
   TEST_ASSERT_FALSE(parseRec("rec n=1 t=2 cfg=00000000 T=18 RH=50 p=1013", b));
+}
+
+// solveEvent: the policy the target applies (drop-one, the limit), as the replay does.
+static void test_solve_event() {
+  Cfg cfg = sampleCfg();
+  for (int c = 0; c < 6; c++) cfg.ch[c].offsetNs = 0;
+  cfg.resLimitNs = 1500;
+  const float c = (float)soundSpeedMs(18, 50, 101325);
+  // A shot at (31, -47): its edges (k 1/3, so t2 - t1 = 3 * the comparator delay), CH3 24 us late.
+  SolveInput truth = layout(10.5f, 50, c);
+  truth.mic[2].h = 21.5f;
+  shoot(truth, 31, -47, 0);
+  Rec r = {};
+  r.cMs = c;
+  r.channels = 0x3F;
+  for (int i = 0; i < MAX_MICS; i++) r.t1[i] = r.t2[i] = NO_EDGE;
+  float first = 1e30f;
+  for (int i = 0; i < 6; i++) first = fminf(first, truth.t0[i]);
+  for (int i = 0; i < 6; i++) {
+    const float k = cfg.ch[i].k, delay = 600;   // t1 = t0 + delay, t2 = t1 + delay / k
+    r.t1[i] = (int32_t)lroundf(truth.t0[i] - first + delay + (i == 2 ? 24000 : 0));
+    r.t2[i] = r.t1[i] + (int32_t)lroundf(delay / k);
+  }
+  EventFit f = solveEvent(cfg, r);
+  TEST_ASSERT_TRUE(f.solved && f.good);
+  TEST_ASSERT_EQUAL_INT(2, f.s.dropped);
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, 31, f.s.x);
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, -47, f.s.y);
+  cfg.dropOne = false;
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_TRUE(f.solved && !f.good);
+  TEST_ASSERT_EQUAL_INT(-1, f.s.dropped);
+  TEST_ASSERT_TRUE(f.s.rmsNs > 4000);
+  // Three channels: not solved.
+  r.channels = 0x07;
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_FALSE(f.solved);
+  TEST_ASSERT_EQUAL_INT(3, f.used);
 }
 
 static SolveInput micsAt(const float (*xy)[2], int n, float h) {
@@ -410,6 +456,7 @@ int main(int, char**) {
   RUN_TEST(test_crc32);
   RUN_TEST(test_cfg_round_trip);
   RUN_TEST(test_rec_round_trip);
+  RUN_TEST(test_solve_event);
   RUN_TEST(test_blast_check);
   RUN_TEST(test_time_per_solve);
   return UNITY_END();

@@ -8,7 +8,8 @@
 //   --temp <C>        the air temperature (c again from it and the logged RH and p)
 //   --c <m/s>         the speed of sound
 //   --without <ch>    leave a channel out (repeatable): e.g. 5 mics instead of 6
-//   --reslimit <ns>   the residual limit for "would be sent" (default 1500)
+//   --reslimit <ns>   the residual limit for "would be sent" (default: the log's cfg)
+//   --dropone on|off  drop-one (default: the log's cfg)
 //   --quiet           the summary only
 //
 // Build (from firmware/):
@@ -34,21 +35,24 @@ using namespace measure;
 namespace {
 
 struct Options {
-  float h = NAN, tempC = NAN, cMs = NAN, resLimitNs = 1500;
+  float h = NAN, tempC = NAN, cMs = NAN, resLimitNs = NAN;
+  int dropOne = -1;   // -1: the cfg's
   uint8_t without = 0;
   bool quiet = false;
-  bool changed() const { return !isnan(h) || !isnan(tempC) || !isnan(cMs) || without; }
+  bool changed() const {
+    return !isnan(h) || !isnan(tempC) || !isnan(cMs) || !isnan(resLimitNs) || dropOne >= 0 || without;
+  }
 };
 
 struct Totals {
-  int recs = 0, noCfg = 0, tooFew = 0, solved = 0, converged = 0, withinLimit = 0;
+  int recs = 0, noCfg = 0, tooFew = 0, solved = 0, converged = 0, withinLimit = 0, dropped = 0;
   int compared = 0, boardOnly = 0;
   double worstDiff = 0, sumDiff2 = 0;
 };
 
 void usage() {
   fprintf(stderr, "usage: replay [--h mm] [--temp C] [--c m/s] [--without ch]... "
-                  "[--reslimit ns] [--quiet] log...\n");
+                  "[--reslimit ns] [--dropone on|off] [--quiet] log...\n");
   exit(2);
 }
 
@@ -67,6 +71,11 @@ int main(int argc, char** argv) {
     else if (!strcmp(a, "--temp")) opt.tempC = strtof(value(), nullptr);
     else if (!strcmp(a, "--c")) opt.cMs = strtof(value(), nullptr);
     else if (!strcmp(a, "--reslimit")) opt.resLimitNs = strtof(value(), nullptr);
+    else if (!strcmp(a, "--dropone")) {
+      const char* v = value();
+      if (strcmp(v, "on") && strcmp(v, "off")) usage();
+      opt.dropOne = !strcmp(v, "on");
+    }
     else if (!strcmp(a, "--without")) {
       int ch = atoi(value());
       if (ch < 1 || ch > MAX_MICS) usage();
@@ -80,6 +89,7 @@ int main(int argc, char** argv) {
   std::map<uint32_t, Cfg> cfgs;
   std::map<uint32_t, int> missingIds;
   Totals t;
+  float lastLimit = RES_LIMIT_DEFAULT_NS;
   for (const char* path : files) {
     FILE* f = fopen(path, "r");
     if (!f) {
@@ -126,27 +136,30 @@ int main(int argc, char** argv) {
         if (opt.without & (1 << c)) use.ch[c].mic = false;
         if (!isnan(opt.h)) use.ch[c].h = opt.h;
       }
+      if (!isnan(opt.resLimitNs)) use.resLimitNs = opt.resLimitNs;
+      if (opt.dropOne >= 0) use.dropOne = opt.dropOne;
       if (!isnan(opt.cMs)) rec.cMs = opt.cMs;
       else if (!isnan(opt.tempC)) rec.cMs = (float)soundSpeedMs(opt.tempC, rec.rh, rec.hPa * 100.0);
 
-      SolveInput in;
-      const uint8_t mask = solveInput(use, rec, in);
-      if (__builtin_popcount(mask) < 4) {
+      const EventFit f = solveEvent(use, rec);
+      const uint8_t mask = f.mask;
+      if (!f.solved) {
         t.tooFew++;
-        if (!opt.quiet) printf("replay %u -: %d channels with a mic and both edges\n", (unsigned)rec.n,
-                               __builtin_popcount(mask));
+        if (!opt.quiet) printf("replay %u -: %d channels with a mic and both edges\n", (unsigned)rec.n, f.used);
         continue;
       }
-      const Solution s = solve(in, mask);
+      const Solution& s = f.s;
       t.solved++;
       if (s.converged) t.converged++;
-      const bool good = s.converged && s.rmsNs <= opt.resLimitNs;
+      if (s.dropped >= 0) t.dropped++;
+      const bool good = f.good;
       if (good) t.withinLimit++;
+      lastLimit = use.resLimitNs;
       if (!opt.quiet) {
         printf("replay %u: x %+.3f y %+.3f mm, rms %.0f ns, 1 sd %.3f mm, %u iterations, res ns",
                (unsigned)rec.n, s.x, s.y, s.rmsNs, s.major, s.iterations);
         for (int c = 0; c < MAX_MICS; c++)
-          if (mask & (1 << c)) printf(" CH%d %+.0f", c + 1, s.resNs[c]);
+          if (mask & (1 << c)) printf(" CH%d %+.0f%s", c + 1, s.resNs[c], c == s.dropped ? " (dropped)" : "");
         printf("%s", !s.converged ? "; did not converge" : good ? "" : "; over the limit");
       }
       if (paired && s.converged) {
@@ -165,8 +178,9 @@ int main(int argc, char** argv) {
     fclose(f);
   }
 
-  printf("replay: %d events, %d solved (%d converged, %d within %.0f ns), %d with too few "
-         "channels\n", t.recs, t.solved, t.converged, t.withinLimit, opt.resLimitNs, t.tooFew);
+  printf("replay: %d events, %d solved (%d converged, %d within %.0f ns, %d with a channel "
+         "dropped), %d with too few channels\n", t.recs, t.solved, t.converged, t.withinLimit,
+         lastLimit, t.dropped, t.tooFew);
   if (t.noCfg) {
     printf("replay: %d events without their cfg line in the log:", t.noCfg);
     for (auto& m : missingIds) printf(" %08X (%d)", (unsigned)m.first, m.second);

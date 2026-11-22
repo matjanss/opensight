@@ -1,5 +1,5 @@
 // OpenSights - sensor simulator (measurement step 2, see ../MEASUREMENT.md): shots at known
-// positions, made as hardware-timed pulse pairs on CH5-CH8 and captured like real ones, so
+// positions, made as hardware-timed pulse pairs on CH3-CH8 and captured like real ones, so
 // the capture and the arrival times can be checked against the truth. See simulate.cpp.
 #pragma once
 #include "arrival.h"

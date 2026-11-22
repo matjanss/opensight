@@ -81,20 +81,24 @@ const float    ARRIVAL_K_DEFAULT    = 1.0f / 3;
 // The calibration (NVS "cal", calib.cpp): per channel its mic (x, y, h), k, offset and
 // sigma. Defaults: the D1/D2 layout on CH1-CH6 (`mic default`).
 const float    MIC_H_DEFAULT_MM     = 10.5f;   // mic port behind the paper (21.5 flipped)
+// The D1/D2 layout (PLAN.md), mm: bottom left, bottom right, top right slid 40 mm along the
+// top edge, top left, bottom middle, right middle.
+const float    MIC_LAYOUT_D2[6][2]  = {{-105, -105}, {105, -105}, {65, 105}, {-105, 105}, {0, -105}, {105, 0}};
 const float    SIGMA_DEFAULT_NS     = 50.0f;   // timing error per channel until calibrated (3e)
 // A solved shot goes to the app if the fit converged with an rms residual up to this (ns;
-// `reslimit`, stored). Validity proper is step 4.
-const float    RES_LIMIT_DEFAULT_NS = 1500.0f;
+// `reslimit`, stored: measure::RES_LIMIT_DEFAULT_NS). Validity proper is step 4.
 const float    CARD_HALF_MM         = 100.0f;  // the scoring area: |x|, |y| up to this
 
-// Simulator: 4 mics on CH5-CH8 (their pins can be outputs; CH1/CH2 are input-only), at
-// the corners of a square around the card, mm from its centre. CH5 bottom left, then
-// counter-clockwise. Those connectors must have no sensor board plugged in while it runs.
-const int      SIM_FIRST_CHANNEL    = 4;      // CH5, 0-based
-const int      SIM_CHANNELS         = 4;
-const float    SIM_MIC_MM           = 105.0f;
+// Simulator (3d): 6 mics on CH3-CH8 (their pins can be outputs; CH1/CH2 are input-only),
+// the pulse generator's 6 MCPWM operators: CH3-CH5 on unit 0, CH6-CH8 on unit 1. Its mics
+// default to the D1/D2 layout in order: CH3 bottom left, CH4 bottom right, CH5 top right
+// (slid), CH6 top left, CH7 bottom middle, CH8 right middle. Those connectors must have no
+// sensor board plugged in while it runs.
+const int      SIM_FIRST_CHANNEL    = 2;      // CH3, 0-based
+const int      SIM_CHANNELS         = 6;
 const float    SIM_CARD_MM          = 100.0f; // random shots land within +-this of the centre
 const float    SIM_POS_LIMIT_MM     = 0.1f;   // position check: worst error vs the truth (3c)
+const float    SIM_POS_LIMIT_DROP_MM = 0.15f; // the same with a faulty channel dropped (5 mics, 3d)
 
 // The air (step 3a): J5 takes a BME280/BMP280 on I2C (SDA, SCL) or a DS18B20 on 1-Wire
 // (SDA's pin, read through UART2: the UART times the slots, so no interrupts are held off),

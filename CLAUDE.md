@@ -30,6 +30,7 @@ The web/wasm viewer is parked.
 | `hardware/host-board/README.md` | Host board v0.3: layout, GPIO map, assembly | Hardware questions, pin changes |
 | Project summary (claude.ai doc, below) | The hardware design: approaches considered, signal chain and BOM, threshold levels, initial calibration per board, error budget, error sources, valid-shot detection, IR curtain design, host board requirements, its open questions | Hardware or measurement design questions |
 | `README.md` | User-facing: what it does, getting started, downloads, notes per platform | Changing user-visible behaviour |
+| `app/TODO.md` | The app's to-do list: wishes and known gaps not yet in a release | App work; add new app wishes there |
 | `app/assets/icon/README.md` | The app icon and where it is used | Icon work |
 
 **The project summary** is a Claude Docs document: "Electronic shooting target – project
@@ -49,7 +50,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Part | Where it stands | Next (see) |
 |---|---|---|
 | Firmware: BLE, pairing, shot buffer | Done; protocol v2 | Flash shot store, uplink interface (PLAN D6, phase 3–4) |
-| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration) was re-planned with the user on 2026-11-21 (PLAN D2, D3, D8, D12; a first try is archived, below) and is being built on `step3-solver`: 3a passes on the bench (its sensor tests wait for the parts), 3b passes on the PC, 3c passes on the bench (bare NodeMCU, simulated); next 3d | MEASUREMENT step 3, sub-steps 3a-3e in order: the air sensor and sync pin, the model and core on the PC, the solver on the board, 6 simulated channels and drop-one, calibration |
+| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration) was re-planned with the user on 2026-11-21 (PLAN D2, D3, D8, D12; a first try is archived, below) and is being built on `step3-solver`: 3a passes on the bench (its sensor tests wait for the parts), 3b passes on the PC, 3c and 3d pass on the bench (bare NodeMCU, simulated); 3e (calibration) next | MEASUREMENT step 3, sub-steps 3a-3e in order: the air sensor and sync pin, the model and core on the PC, the solver on the board, 6 simulated channels and drop-one, calibration |
 | Sensor board (`hardware/acoustic-sensor/`) | v0.3 designed (KiCad 10), not yet on the bench | Its "check before ordering" list; then the summary's initial calibration, polarity, PLAN phase 1 |
 | Host board (`hardware/host-board/`) | v0.3 designed and routed, not yet on the bench; firmware already on its pin map | Order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner slid 40 mm along the top edge, plus bottom-middle and right-middle mics; the user designs and prints the holders |
@@ -76,6 +77,7 @@ firmware/                     PlatformIO, Arduino-ESP32 3.x on pioarduino (IDF 5
   tools/layout_study.py       mic layout study behind PLAN D1/D2 (numpy)
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs
+  TODO.md                     the app's to-do list
   assets/                     cards/, fonts/ (IBM Plex Sans), icon/
 hardware/acoustic-sensor/     sensor board, KiCad 10
 hardware/host-board/          host board, KiCad 10
@@ -180,21 +182,24 @@ hardware/host-board/          host board, KiCad 10
     register from IRAM.
   - A CPU-driven generator is not exact under BLE load.
 - `calib.cpp`: the calibration per channel (mic x, y, h; k; offset; sigma), NVS namespace
-  `"cal"` (k and the offsets moved there from `"measure"` in 3c). Commands `mic`, `k`,
-  `offset`. Every change prints the `cfg` line, whose id every `rec` line carries.
+  `"cal"` (k and the offsets moved there from `"measure"` in 3c), and the solver's policy
+  (`reslimit`, `dropone`). Commands `mic`, `k`, `offset`, `reslimit`, `dropone`. Every
+  change prints the `cfg` line, whose id every `rec` line carries.
 - `arrival.cpp`: t0 = t1 − k·(t2 − t1) − offset per channel (`measure::arrivalT0`), for
   the printed t0 lines and the simulator.
-- `position.cpp`: every event (but the self-test's) solved in `loop()` with
-  `lib/measure` if 4+ channels have a mic and both edges; prints the `shot` and `rec`
-  lines; sends the shot to the app (`shots.h`, the buffer in `main.cpp`) if it converged
-  within `reslimit`. Also `testshot`, `stat`'s solver line, and the blast check `mic`
-  runs (`lib/measure/blast.h`). The solve takes `measure::solveInput` from a `rec`, so
-  `tools/replay` solves exactly what the board did.
-- `simulate.cpp` (`sim ...`): simulated shots at known positions on CH5–CH8 (the pins
-  drive their own inputs), checked against the truth: the capture, t0 and the position.
-  It stands in until the sensor boards arrive. It takes the firmware's air by default;
-  `sim temp` sets another temperature. Its position check counts for PASS only when the
-  firmware has its mics (`mic sim`), air, offsets, k = 1/3 and no fault.
+- `position.cpp`: every event (but the self-test's) solved in `loop()` by
+  `measure::solveEvent` (4+ channels with a mic and both edges; drop-one when the full
+  fit is over `reslimit`); prints the `shot` and `rec` lines; sends a good shot to the app
+  (`shots.h`, the buffer in `main.cpp`). Also `testshot`, `stat`'s solver line, and the
+  blast check `mic` runs (`lib/measure/blast.h`). `tools/replay` solves a log through the
+  same `solveEvent`, so it gets what the board got.
+- `simulate.cpp` (`sim ...`): simulated shots at known positions on CH3–CH8 (6 mics, the
+  D1/D2 layout; the pins drive their own inputs), checked against the truth: the capture,
+  t0 and the position. Faults: late, early, missing, H only, double, blast; trip levels
+  per channel (`sim thr`). It stands in until the sensor boards arrive. It takes the
+  firmware's air by default; `sim temp` sets another temperature. Its position check counts
+  for PASS only when the firmware has its mics (`mic sim`), air, offsets and k; with a
+  late or early channel, drop-one must drop it; a blast must not be sent.
 - The tag `archive/step3-first-try` holds a first try that was set aside (it never ran on
   the board, and predates PLAN.md). Still to reuse in 3e, with
   `git show archive/step3-first-try:<path>`: `firmware/tools/calibrate.py` (the fit, with

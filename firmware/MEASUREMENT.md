@@ -84,7 +84,7 @@ so a problem shows up in the step that caused it.
 |---|---|---|
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
-| 3 | Solver and calibration | in progress on `step3-solver`: 3a-1 and 3a-2 pass; 3a-5 (the search stops) to run; 3a-3/3a-4 (DS18B20, BME280) later, with the parts; 3b passes (PC); 3c passes; 3d-3e planned (a first try is archived as the tag `archive/step3-first-try`) |
+| 3 | Solver and calibration | in progress on `step3-solver`: 3a-1, 3a-2 and 3a-5 pass; 3a-3/3a-4 (DS18B20, BME280) later, with the parts; 3b passes (PC); 3c passes; 3d passes; 3e next (a first try is archived as the tag `archive/step3-first-try`) |
 | 4 | Validity checks | planned |
 | 5 | Protocol and app | planned |
 | 6 | Wi-Fi and MQTT | planned |
@@ -479,36 +479,65 @@ Afterwards `mic default` (the D1/D2 layout for the real sensors).
 
 #### 3d. The simulator on six channels, and drop-one
 
-Build:
+Build (done, on `step3-solver`):
 - **Six simulated channels on CH3-CH8** (GPIO 33/32, 26/25, 22/23, 19/21, 17/18, 4/16;
-  CH1/CH2 are input-only). The pulse generator has exactly 6 operators: CH3-CH5 on MCPWM
-  unit 0, CH6-CH8 on unit 1. The D1/D2 layout as the default (`sim mic` lists or sets x,
-  y, h per channel; `mic sim` copies it).
-- **k per channel in the simulator:** `sim thr <ch> <L> <H>` (the trip levels; k is
-  L / (H − L)).
-- **Faults:** `sim fault blast <m> <offset mm>` (a point source that far in front and
-  that far off the axis, on every channel), `sim fault early <ch>` (noise tripping one
-  channel 24 µs early), with the old `late`, `missing`, `honly`, `double`.
-- **Drop-one** in the solver, moved forward from step 4: if the full fit's residual is
-  over `reslimit`, the best fit with one channel left out; the shot keeps it when that
-  residual is under the limit, and says which channel was dropped. `dropone on|off`
-  (stored, default on).
+  CH1/CH2 are input-only). The pulse generator's 6 operators: CH3-CH5 on MCPWM unit 0,
+  CH6-CH8 on unit 1. The simulator's mics default to the D1/D2 layout in order: CH3 bottom
+  left, CH4 bottom right, CH5 top right (slid), CH6 top left, CH7 bottom middle, CH8 right
+  middle (`sim` lists them, `sim mic` sets one, `mic sim` copies them to the firmware).
+  `sim raw` takes 6 times.
+- **Trip levels per channel:** `sim thr <ch> <L> <H>` (default 1 and 4; the true k is
+  L / (H − L)). The position check counts only when the firmware's k matches it.
+- **Faults:** `sim fault blast <m> <mm>` (a point source that many metres in front and
+  that far off the axis, in a random direction each shot; every channel trips alike),
+  `sim fault early <ch>` (a channel 24 µs early), with the old `late`, `missing`,
+  `honly`, `double`.
+- **Drop-one** in the solve (moved forward from step 4): if the full fit converged
+  within `reslimit`, that's the shot; otherwise, with 5 or more channels, the best fit with
+  one left out; the shot is sent if that one is within the limit, and the `shot` line marks
+  the dropped channel. `dropone on|off` (stored, default on). `measure::solveEvent` does
+  it, on the board and in `tools/replay` alike.
+- **The policy is in the `cfg` line** (`lim=`, `drop=`), with `reslimit` and `dropone`
+  stored in NVS `"cal"` (`reslimit` moves there from `"measure"`, once). The replay takes
+  them from the log; `--reslimit` and `--dropone on|off` change them.
+- **The simulator's checks:** with a late or early channel the position check counts
+  (with drop-one on): every shot sent, that channel dropped in every one, the worst error
+  within 0.15 mm (5 mics left). The same limit with a channel missing or H only (5 mics in
+  the fit). With a blast: none may be sent (when the firmware has the simulator's mics).
+  `stat` counts the shots with a channel dropped; its time is per event now (drop-one runs
+  up to 7 fits).
+
+Expected values from a simulation on the PC (the D1/D2 layout, h 10.5 mm, the 25 ns steps
+and the 100 ns sampling; 300-3000 shots).
 
 Bench test, bare NodeMCU, `mask 0`, nothing on CH3-CH8 or GPIO 12:
-- **3d-1, the generator again.** `sim raw 0 0 0 0 0 0 200`: every line within a sample
-  of CH3 L; a mean on CH6-CH8 alone is the offset between the units (fine up to a tick).
-- **3d-2, six mics.** `mic sim`, `sim random 500`: PASS, position error rms about
-  0.015 mm (less than 3c-1's: two more mics), worst under 0.1 mm.
-- **3d-3, a bad channel.** `sim fault late 5`, `sim random 100`: every shot kept with CH5
-  dropped (expect all of them: 666 of 666 in the study), error as in 3d-2 but a little
-  larger. `sim fault early 8`: the same for CH8.
-- **3d-4, blasts.** `sim fault blast 10 0`, `sim fault blast 10 500`,
-  `sim fault blast 25 2000`, 20 each: none sent to the app, with or without drop-one
-  (residuals of tens of µs). Then `mic` set to a square on CH3-CH6 (`sim mic` likewise),
-  `sim fault blast 10 0`: many fit as near-centre shots (the reason for D1). `mic sim`
-  back.
-- **3d-5, k per channel.** `sim thr 4 1 3` (k 0.5 on CH4), `sim random 50`: errors grow
-  (the firmware still uses 1/3); `k 4 0.5`: back to 3d-2.
+- **3d-0, the new settings.** The boot's `cfg` line ends in `lim=1500 drop=1`. `stat`:
+  "drop-one on". `sim`: the six mics on CH3-CH8, each "trips at 1/4 (k 0.3333)".
+- **3d-1, the generator again.** `sim raw 0 0 0 0 0 0 200`: PASS, every line within a
+  sample of CH3 L, t0 differences 0. A mean on CH6-CH8 alone would be an offset between
+  the units (fine up to a tick, 25 ns).
+- **3d-2, six mics.** `mic sim`: the blast check scores 0 with every mic and with any one
+  dropped (the smallest residuals as `mic default`'s: about 34, 35, 13, 37, 37, 22, 35 µs).
+  `sim random 500`: PASS; position error rms about 0.013 mm (3c-1's square: 0.014), worst
+  about 0.06 mm; rms residual mean about 26 ns, worst about 60 ns; no channel dropped.
+- **3d-3, a bad channel.** `sim fault late 5` (the slid top-right mic), `sim random 100`:
+  every shot sent with CH5 dropped; error rms about 0.017 mm, worst up to about 0.1 mm
+  (limit 0.15); PASS. `sim fault early 8` (right middle): the same with CH8, rms about
+  0.015 mm, worst about 0.05 mm. `stat`: the longest time per event now a few ms (the
+  drop-one fits).
+- **3d-4, blasts.** `sim fault blast 10 0`, `sim at 0 0 20`; then `sim fault blast 10 500`
+  and `sim fault blast 25 2000`, 20 each: "blast check PASS", 0 of 20 sent, the shot lines
+  "not sent ... even with one channel dropped", rms residuals about 20 µs. Then the
+  square: `sim mic 5 105 105`, `mic 5 105 105`, `mic clear 7`, `mic clear 8` (the blast
+  check warns: 484 of 624), `sim fault blast 10 0`, `sim at 0 0 20`: "for information
+  only" (the firmware's mics differ: CH7/CH8), and 20 of 20 sent, at about (0, 0): the
+  reason for D1. Back: `sim mic 5 65 105`, `mic sim`.
+- **3d-5, k per channel.** `sim fault none`, `sim thr 4 1 3` (k 0.5 on CH4),
+  `sim random 100`: "for information only" (k differs); error rms about 0.017 mm, rms
+  residual mean about 40 ns (up from 26). `k 4 0.5`, `sim random 100`: the check counts
+  again, PASS, as 3d-2. Back: `sim thr 4 1 4`, `k 4 0.33333`.
+
+Afterwards `sim fault none` and `mic default`.
 
 #### 3e. Calibration mode and the fit
 
@@ -593,6 +622,9 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-22 | 3d | 3d-0 to 3d-5, bare NodeMCU | **PASS (user report; numbers from the log).** 3d-1 `sim raw 0 0 0 0 0 0 200`: PASS, 0 late starts. 3d-2 `mic sim`: blast check 0 scored everywhere (smallest 34.3, 34.7, 13.5, 37.5, 37.3, 22.1, 35.4 µs, as on the PC); `sim random 500`: error rms 0.0125 mm, worst 0.0516 mm, residual mean 27 ns, worst 52 ns, none dropped (PC: 0.013, 0.06, 26, 60). 3d-3 late CH5: 100 of 100 sent with CH5 dropped, rms 0.0154 mm, worst 0.0433 mm; early CH8: 100 of 100 with CH8 dropped, rms 0.0154 mm, worst 0.0436 mm. `stat` after them: 477 µs per event mean, 2.4 ms longest (drop-one's 7 fits). 3d-4: blasts 10 m/0, 10 m/500 mm, 25 m/2 m: 0 of 20 sent each. The square: the four corners plus both middles score 0 with every set (5 or 6 mics, never only the square); with CH7 cleared (the square plus the right middle) the check flags "without CH8": 484, since dropping the right middle leaves the square; with CH7 and CH8 cleared, 484 of 624, and 20 of 20 frontal blasts sent at (0, 0). The blast check takes 1.0 s with 6 mics (7 sets). 3d-5 `sim thr 4 1 3`: rms 0.016-0.017 mm, residual mean 41-42 ns, and a bias: mean (−0.007, +0.007) mm; `k 4 0.5`: PASS, rms 0.0121 mm, mean within 0.001 mm. A wrong k shows more as a bias than as spread. |
+| 2026-11-22 | 3d | Built; PC checks | Six simulated channels on CH3-CH8 with the D1/D2 mics, `sim thr`, the blast and early faults, drop-one in the solve (`measure::solveEvent`, on the board and in the replay), `reslimit` and `dropone` in NVS "cal" and in the `cfg` line, the simulator's drop and blast checks. On the PC: 14 tests pass (new: solveEvent drops a 24 µs late channel and keeps the shot within 0.05 mm; with drop-one off it isn't sent). A PC simulation of the bench tests gives the expected values in 3d. A 3c log still replays to the board's positions (a `cfg` without `lim=`/`drop=` reads as 1500 ns, no drop-one). The firmware builds. Run 3d-0 to 3d-5. |
+| 2026-11-21 | 3a | 3a-5, no sensor: the search stops | **PASS (user report).** `temp` says it stopped looking after 3 tries; `temp scan` looks 3 more times. |
 | 2026-11-21 | 3c | 3c-1 and 3c-5 again, `sim fault none`, logged | **PASS.** `sim random 200`: 200 of 200 solved and converged, position error rms 0.0140 mm, worst 0.0315 mm, mean (−0.0006, −0.0004) mm; rms residual mean 17 ns, worst 54 ns (the PC simulation: 0.015, 0.039, 16 and 57). `tools/replay` on the log: 200 within 1500 ns, the board's positions to the printed digit (worst 0.0000 mm). 3c done. |
 | 2026-11-21 | 3c | 3c-0 to 3c-6, bare NodeMCU, `k 0.33333` | **PASS (user report).** From the logs: `mic sim`'s blast check warns as expected (484 of 624 scored, smallest residual 0, 106 ms). The solve takes 278 µs mean, 453 µs longest (`stat`, 1032 events): slower than the 20-100 µs guessed (float division and square root are slow on the ESP32), still well under 1 ms; drop-one (3d) will take about 7 times that. The replayed logs were made with 3c-4's `sim fault late 7` still on (200 + 200 + 100 shots, rms residual about 5.8 µs, position error 4.4 mm rms, none sent): the replay agreed (none within 1500 ns). It differed from the board by up to 0.0073 mm, from the ESP32's fused multiply-add; built with `-mfma -ffp-contract=fast` it matches to the printed digit in 498 of 500 shots, the other 2 one 0.001 mm step off (a last-bit difference, perhaps in the square root, or a rounding boundary). The replay's build command now has those flags. |
 | 2026-11-21 | 3c | Built; PC checks | The calibration in NVS "cal" (mics with h, k and offset per channel), the solver on every event, `shot`/`cfg`/`rec` lines, shots to the app within `reslimit`, `testshot`, `stat`'s solver line, the blast check on `mic`, the simulator's h and position check, `tools/replay`. On the PC: 13 tests pass (new: CRC-32, `cfg` and `rec` lines read back bit for bit, the blast check giving the study's numbers). A log written in the firmware's format replays to the same positions; `--h 0` gives 0.38 mm rms and `--temp 19` 0.16 mm, as the simulation predicts for 3c-2 and 3c-3. The firmware builds (RAM 13 %, flash 56 %). Run 3c-0 to 3c-6. |

@@ -29,7 +29,7 @@ int formatFields(char* out, size_t size, const Cfg& cfg) {
     else n = add(out, size, n, "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g", ch.x, ch.y, ch.h, ch.k,
                  ch.offsetNs, ch.sigmaNs);
   }
-  return n;
+  return add(out, size, n, " lim=%.9g drop=%d", cfg.resLimitNs, cfg.dropOne ? 1 : 0);
 }
 
 // The next space-separated token of s from *p, as "key=value": false at the end.
@@ -94,13 +94,24 @@ bool parseCfg(const char* line, Cfg& cfg, uint32_t* id) {
   if (crc32(fields) != (uint32_t)given) return false;
 
   Cfg out = {};
+  out.resLimitNs = RES_LIMIT_DEFAULT_NS;   // logs from before 3d have neither
+  out.dropOne = false;
   int seen = 0;
   const char* q = fields;
   char key[8];
   const char* value;
   while (nextField(q, key, sizeof key, value)) {
+    if (!strcmp(key, "lim")) {
+      out.resLimitNs = strtof(value, &end);
+      if (end == value) return false;
+      continue;
+    }
+    if (!strcmp(key, "drop")) {
+      out.dropOne = value[0] == '1';
+      continue;
+    }
     const int c = channelOf(key);
-    if (c < 0) return false;
+    if (c < 0) continue;   // a key from later firmware
     seen |= 1 << c;
     if (value[0] == '-' && (value[1] == 0 || value[1] == ' ')) continue;   // "CH7=-": no mic
     ChannelCfg& ch = out.ch[c];
@@ -198,6 +209,19 @@ uint8_t solveInput(const Cfg& cfg, const Rec& rec, SolveInput& in) {
     mask |= 1 << c;
   }
   return mask;
+}
+
+EventFit solveEvent(const Cfg& cfg, const Rec& rec) {
+  EventFit f = {};
+  SolveInput in;
+  f.mask = solveInput(cfg, rec, in);
+  f.used = __builtin_popcount(f.mask);
+  f.s.dropped = -1;
+  if (f.used < 4) return f;
+  f.solved = true;
+  f.s = cfg.dropOne ? solveDropOne(in, cfg.resLimitNs, f.mask) : solve(in, f.mask);
+  f.good = f.s.converged && f.s.rmsNs <= cfg.resLimitNs;
+  return f;
 }
 
 }  // namespace measure
