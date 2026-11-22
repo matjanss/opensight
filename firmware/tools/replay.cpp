@@ -1,5 +1,5 @@
 // OpenSights - replay a serial log through the measurement core on the PC (MEASUREMENT.md
-// steps 3c-4a). Reads the `cfg` and `rec` lines a target printed (lib/measure/record.h),
+// steps 3c-4b). Reads the `cfg` and `rec` lines a target printed (lib/measure/record.h),
 // solves and judges every event again with lib/measure (measure::solveEvent), exactly as the
 // target did, and prints the shots and verdicts. If the log has the target's own `shot`
 // lines, it compares positions and verdicts; if the events carry their true point (`pt`:
@@ -16,6 +16,9 @@
 //   --area <mm>|off     that may be lost, the area, the together limit, the longest pulse
 //   --together <us>|off
 //   --pulse <us>|off
+//   --curtain <lo>,<hi>|off  the curtain's gate, us after the shot (4b; default: the log's
+//                     cfg). An event logged with the curtain off has no dips: with a gate
+//                     here it is no shot
 //   --fit-c           fit one factor on every event's speed of sound (the least total
 //                     residual) and say what air temperature that means
 //   --quiet           the summary only
@@ -48,11 +51,13 @@ struct Options {
   int dropOne = -1;   // -1: the cfg's
   int maxLost = -2;   // -2: the cfg's, -1: off
   float areaMm = NAN, togetherNs = NAN, pulseMaxNs = NAN;   // NAN: the cfg's, 0: off
+  float curtainLoNs = NAN, curtainHiNs = NAN;               // NAN: the cfg's, 0, 0: off
   uint8_t without = 0;
   bool quiet = false, fitC = false;
   bool changed() const {
     return !isnan(h) || !isnan(tempC) || !isnan(cMs) || !isnan(resLimitNs) || dropOne >= 0 || without ||
-           maxLost != -2 || !isnan(areaMm) || !isnan(togetherNs) || !isnan(pulseMaxNs);
+           maxLost != -2 || !isnan(areaMm) || !isnan(togetherNs) || !isnan(pulseMaxNs) ||
+           !isnan(curtainHiNs);
   }
 };
 
@@ -69,7 +74,7 @@ struct Item {
 void usage() {
   fprintf(stderr, "usage: replay [--h mm] [--temp C] [--c m/s] [--without ch]... "
                   "[--reslimit ns] [--dropone on|off] [--lost n|off] [--area mm|off] "
-                  "[--together us|off] [--pulse us|off] [--fit-c] [--quiet] log...\n");
+                  "[--together us|off] [--pulse us|off] [--curtain lo,hi|off] [--fit-c] [--quiet] log...\n");
   exit(2);
 }
 
@@ -121,6 +126,12 @@ int main(int argc, char** argv) {
       const float f = !strcmp(v, "off") ? 0 : strtof(v, nullptr) * (strcmp(a, "--area") ? 1000 : 1);
       if (!(f >= 0)) usage();
       (!strcmp(a, "--area") ? opt.areaMm : !strcmp(a, "--together") ? opt.togetherNs : opt.pulseMaxNs) = f;
+    } else if (!strcmp(a, "--curtain")) {
+      const char* v = value();
+      float lo = 0, hi = 0;
+      if (strcmp(v, "off") && (sscanf(v, "%f,%f", &lo, &hi) != 2 || !(lo >= 0 && hi > lo))) usage();
+      opt.curtainLoNs = lo * 1000;
+      opt.curtainHiNs = hi * 1000;
     } else if (!strcmp(a, "--dropone")) {
       const char* v = value();
       if (strcmp(v, "on") && strcmp(v, "off")) usage();
@@ -140,7 +151,7 @@ int main(int argc, char** argv) {
   std::map<uint32_t, Cfg> cfgs;
   std::map<uint32_t, int> missingIds;
   std::vector<Item> items;
-  int recs = 0, noCfg = 0;
+  int recs = 0, noCfg = 0, dipLines = 0;
   for (const char* path : files) {
     FILE* f = fopen(path, "r");
     if (!f) {
@@ -158,6 +169,10 @@ int main(int argc, char** argv) {
       uint32_t id;
       if (parseCfg(line, cfg, &id)) {
         cfgs[id] = cfg;
+        continue;
+      }
+      if (strstr(line, "dip n=")) {   // 4b: a curtain dip with no acoustic event
+        dipLines++;
         continue;
       }
       const char* sl = strstr(line, "shot ");
@@ -205,6 +220,10 @@ int main(int argc, char** argv) {
       if (!isnan(opt.areaMm)) it.cfg.areaMm = opt.areaMm;
       if (!isnan(opt.togetherNs)) it.cfg.togetherNs = opt.togetherNs;
       if (!isnan(opt.pulseMaxNs)) it.cfg.pulseMaxNs = opt.pulseMaxNs;
+      if (!isnan(opt.curtainHiNs)) {
+        it.cfg.curtainLoNs = opt.curtainLoNs;
+        it.cfg.curtainHiNs = opt.curtainHiNs;
+      }
       if (!isnan(opt.cMs)) it.rec.cMs = opt.cMs;
       else if (!isnan(opt.tempC))
         it.rec.cMs = (float)soundSpeedMs(opt.tempC, it.rec.rh, it.rec.hPa * 100.0);
@@ -236,12 +255,16 @@ int main(int argc, char** argv) {
 
   int tooFew = 0, solved = 0, converged = 0, good = 0, dropped = 0, compared = 0, withPt = 0;
   int verdicts[V_COUNT] = {}, verdictsCompared = 0, verdictsDiffer = 0;
+  int curtain[2][2] = {}, curtainNot = 0, withDips = 0;   // [acoustic ok][a dip in the window]
   double worstDiff = 0, sumDiff2 = 0, worstPt = 0, sumPt2 = 0;
   for (const Item& it : items) {
     Rec rec = it.rec;
     rec.cMs = (float)(rec.cMs * scale);
     const EventFit f = solveEvent(it.cfg, rec);
     verdicts[f.verdict]++;
+    if (f.curtain >= 0) curtain[f.acoustic == V_OK][f.curtain]++;
+    else curtainNot++;
+    if (rec.hasIr) withDips++;
     bool differs = false;
     if (it.boardHasVerdict) {
       verdictsCompared++;
@@ -268,6 +291,7 @@ int main(int argc, char** argv) {
              (unsigned)rec.n, s.x, s.y, s.rmsNs, s.major, s.iterations);
       for (int c = 0; c < MAX_MICS; c++)
         if (f.mask & (1 << c)) printf(" CH%d %+.0f%s", c + 1, s.resNs[c], c == s.dropped ? " (dropped)" : "");
+      if (f.dip >= 0) printf(" dip %+.1f us%s", f.dipAfterNs / 1000, f.curtain == 0 ? " (outside)" : "");
       printf(" [%s]", verdictName(f.verdict));
       if (differs) printf("; board [%s]", verdictName(it.boardVerdict));
     }
@@ -297,6 +321,11 @@ int main(int argc, char** argv) {
   printf("replay: verdicts:");
   for (int v = 0; v < V_COUNT; v++) printf(" %s %d", verdictName((Verdict)v), verdicts[v]);
   printf("\n");
+  if (withDips || dipLines || curtain[0][0] + curtain[0][1] + curtain[1][0] + curtain[1][1])
+    printf("replay: curtain (4b): acoustic ok with a dip in the window %d, without %d; acoustic reject "
+           "with %d, without %d; %d not judged (gate off, or no fit); %d events logged with the "
+           "curtain on; %d `dip` lines (a dip with no event)\n", curtain[1][1], curtain[1][0],
+           curtain[0][1], curtain[0][0], curtainNot, withDips, dipLines);
   if (verdictsCompared)
     printf("replay: against the board's verdicts: %d compared, %d differ%s\n", verdictsCompared,
            verdictsDiffer, opt.changed() || opt.fitC ? " (settings changed for the replay: differences expected)" : "");

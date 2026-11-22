@@ -2,6 +2,7 @@
 #include "calib.h"
 #include <Preferences.h>
 #include "config.h"
+#include "curtain.h"
 #include "position.h"
 #include "simulate.h"
 
@@ -123,6 +124,11 @@ void calibBegin() {
   cfg.areaMm = prefs.getFloat("area", measure::AREA_DEFAULT_MM);
   cfg.togetherNs = prefs.getFloat("together", measure::TOGETHER_DEFAULT_NS);
   cfg.pulseMaxNs = prefs.getFloat("pulsemax", measure::PULSE_MAX_DEFAULT_NS);
+  // The curtain's gate (step 4b): off until a curtain is fitted.
+  if (prefs.isKey("irhi")) {
+    cfg.curtainLoNs = prefs.getFloat("irlo", 0);
+    cfg.curtainHiNs = prefs.getFloat("irhi", 0);
+  }
   haveRec = prefs.isKey("calrec") && prefs.getBytes("calrec", &rec, sizeof rec) == sizeof rec &&
             rec.version == CALREC_VERSION;
   if (!any) {
@@ -223,6 +229,10 @@ void calibHelp() {
                  "  valid together <us>|off  every first edge within this: a spike, 20\n"
                  "  valid pulse <us>|off t2 - t1 up to this, or the channel is left out, 10\n"
                  "  valid default        all four back to their defaults\n"
+                 "  curtain              the IR curtain: its gate, IR_IN, its counts\n"
+                 "  curtain on|off       the gate: a shot needs a dip 45-100 us after it; on\n"
+                 "                       also lights the IR LEDs (stored, default off)\n"
+                 "  curtain window <lo> <hi>  the gate's window, us after the shot (turns it on)\n"
                  "  sigma [ch] [ns]      a channel's timing error, 1 sigma: the fit's weight\n"
                  "                       (stored, default 50; `sigma` lists them)\n"
                  "  cal                  the calibration record and calibration mode\n"
@@ -426,7 +436,9 @@ static void printValid() {
   Serial.print(", pulse ");
   if (cfg.pulseMaxNs > 0) Serial.printf("%.1f us", cfg.pulseMaxNs / 1000);
   else Serial.print("off");
-  Serial.printf("; reslimit %.0f ns, drop-one %s\n", cfg.resLimitNs, cfg.dropOne ? "on" : "off");
+  Serial.printf("; reslimit %.0f ns, drop-one %s; curtain ", cfg.resLimitNs, cfg.dropOne ? "on" : "off");
+  if (cfg.curtainHiNs > 0) Serial.printf("%.0f-%.0f us\n", cfg.curtainLoNs / 1000, cfg.curtainHiNs / 1000);
+  else Serial.println("off");
 }
 
 // `valid`: the validity limits (MODEL.md "Validity", MEASUREMENT 4a).
@@ -561,7 +573,41 @@ static bool calCommand(const char* line) {
   return true;
 }
 
+// `curtain`: the IR curtain's gate (MODEL.md "Validity", MEASUREMENT 4b).
+static bool curtainCommand(const char* line) {
+  char what[12] = "";
+  float lo = 0, hi = 0;
+  const int n = sscanf(line, "%*s %11s %f %f", what, &lo, &hi);
+  if (n < 1) {
+    curtainPrintStatus();
+    return true;
+  }
+  if (!strcmp(what, "on")) {
+    lo = measure::CURTAIN_LO_DEFAULT_NS / 1000;
+    hi = measure::CURTAIN_HI_DEFAULT_NS / 1000;
+  } else if (!strcmp(what, "off")) {
+    lo = hi = 0;
+  } else if (strcmp(what, "window") || n != 3 || !(lo >= 0 && hi > lo && hi <= 2000)) {
+    Serial.println("curtain [on|off | window <lo> <hi>] (us after the shot, 0 <= lo < hi <= 2000)");
+    return true;
+  }
+  cfg.curtainLoNs = lo * 1000;
+  cfg.curtainHiNs = hi * 1000;
+  if (hi > 0) {
+    prefs.putFloat("irlo", cfg.curtainLoNs);
+    prefs.putFloat("irhi", cfg.curtainHiNs);
+  } else {
+    for (const char* k : {"irlo", "irhi"})
+      if (prefs.isKey(k)) prefs.remove(k);
+  }
+  curtainApply();
+  curtainPrintStatus();
+  changed();
+  return true;
+}
+
 bool calibCommand(const char* cmd, const char* line) {
+  if (!strcmp(cmd, "curtain")) return curtainCommand(line);
   if (!strcmp(cmd, "sigma")) return sigmaCommand(line);
   if (!strcmp(cmd, "cal")) return calCommand(line);
   if (!strcmp(cmd, "reslimit") || !strcmp(cmd, "dropone")) return policyCommand(cmd, line);

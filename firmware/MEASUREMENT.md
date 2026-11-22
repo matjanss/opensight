@@ -12,18 +12,20 @@ commit as the code, and every bench test result goes into [Bench results](#bench
   the right middle), up to 8 channels (the host board has 8 connectors). Each
   channel gives two comparator lines: OUT_L (low threshold, trips first) and OUT_H (high
   threshold, a few µs later). Lines idle low and go high while SIG is above the threshold.
-- **No IR light curtain** for now; it comes later. IR_IN (GPIO 13) is unused and IR_EN
-  (GPIO 27) is held low.
+- **The IR light curtain** comes in step 4b, simulated first: IR_IN (GPIO 13) is timed by
+  the MCPWM capture, and IR_EN (GPIO 27) is high while its gate is on (`curtain on`; off
+  by default).
 - Results go out over **serial** (115200) until step 5. From step 3c, solved shots go to
   the app in the v2 shot message; everything else (raw events, residuals, uncertainty)
   stays on serial. No protocol change before step 5.
 - Accuracy target after calibration: 0.2–0.5 mm (1σ). Every 1 µs of timing error is about
   0.37 mm, so the firmware must add well under 0.1 µs.
 
-Without the curtain, two cases stay uncovered until it is added: a shot through an
-existing hole (almost no crack: missed), and a blast from a neighbouring lane that fits as a
-hit about 10 mm from centre on the centre lines (only absolute level and edge sharpness can
-reject it). Logging every rejected event matters more because of this.
+Until a real curtain is fitted and tested (PLAN phase 1.6), two cases stay uncovered: a
+shot through an existing hole (almost no crack: missed), and a blast from a neighbouring
+lane that fits as a hit about 10 mm from centre on the centre lines (only absolute level
+and edge sharpness can reject it). Logging every rejected event matters more because of
+this.
 
 ## Pins (host board v0.3)
 
@@ -85,7 +87,7 @@ so a problem shows up in the step that caused it.
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
 | 3 | Solver and calibration | **simulated tests pass** (bare NodeMCU, 2026-11-22; merged to `main`): 3a-1, 3a-2, 3a-5, 3b (PC), 3c, 3d, 3e. Waiting for the parts: 3a-3 and 3a-4 (DS18B20, BME280). With the boards: the same solver and calibration on real sensors (PLAN phase 1) |
-| 4 | Validity checks | 4a (the verdict) passes its simulated bench tests on a bare NodeMCU (2026-11-22); 4b (curtain) and 4c (loudness, sharpness) planned |
+| 4 | Validity checks | 4a (the verdict) passes its simulated bench tests on a bare NodeMCU (2026-11-22). 4b (the curtain) passes its simulated bench tests on a bare NodeMCU (2026-11-22, run by Claude). 4c (loudness, sharpness) planned |
 | 5 | Protocol and app | planned |
 | 6 | Wi-Fi and MQTT | planned |
 
@@ -619,15 +621,16 @@ In three parts, because only the first can be tested before the boards and the c
 are there:
 
 - **4a, the verdict** (passes, simulated): the checks that need only the edges and the fit.
-- **4b, the curtain:** IR_IN (GPIO 13) timed against the shot's emission time, the gate
-  (a dip 45–100 µs later, PLAN D9), and a dip with no acoustic event (a shot through an
-  existing hole: reported without a position, protocol v3). Simulated with a dip on GPIO
-  13; the real test waits for the curtain's bench test (PLAN phase 1.6).
+- **4b, the curtain** (simulated tests pass): IR_IN (GPIO 13) timed against the
+  shot's emission time, the gate (a dip 45–100 µs later, PLAN D9), and a dip with no
+  acoustic event (a shot through an existing hole: printed as a `dip` line; sent without
+  a position from protocol v3). Simulated with a dip on GPIO 13; the real test waits for
+  the curtain's bench test (PLAN phase 1.6).
 - **4c, loudness and sharpness:** the nearest mic must be the loudest (shortest t2 − t1)
   and the edges sharp. Tuned from real pulses (PLAN phase 1–2); nothing to simulate yet.
 - **Then, on the range** (PLAN phase 2): no false shots from blasts or electrical
   spikes, and real shots accepted. Every event is logged with its verdict, so the limits
-  are tuned by replaying range logs (`tools/replay --lost/--area/--together/--pulse`).
+  are tuned by replaying range logs (`tools/replay --lost/--area/--together/--pulse/--curtain`).
 
 The dead time stays in the capture (a second event inside it is `MISSED`, step 2).
 
@@ -936,6 +939,295 @@ mic default
 **Report back:** the `sim: PASS`/`FAIL` line of each run, the error numbers of 4a-1, the
 `stat` line of 4a-6, and the replay's three summaries. For any FAIL, send the log too.
 
+#### 4b. The curtain
+
+Build (done, on `step4b-curtain`):
+- **The signal:** IR_IN (GPIO 13) is the curtain comparator, U4 (LM393) on the host board.
+  It is low while the beam is clear and high while something crosses the sheet. The netlist
+  shows why: the TIA's output is AC-coupled into a ×21 stage at VMID, and RV1 puts the
+  threshold above VMID, so only a fall in light trips it. The project summary says the
+  same ("high on a shadow"). A pellet's shadow lasts 30–40 µs.
+- **The gate** (PLAN D9, MODEL.md "Validity"): a shot needs a dip whose rise comes 45–100
+  µs after its emission time (the fit's τ): the sheet 15 mm behind the paper at 150–350
+  m/s. It is checked last, after the acoustic checks, and judged apart from them, so each
+  defence's rejections are counted on their own. New verdict `curtain`.
+- **The timing:** MCPWM group 0's capture unit latches each rise and fall of IR_IN in
+  hardware, on two channels, at the 80 MHz APB clock. That is 8 ticks per 10 MHz sample,
+  from the same crystal. The pulse generator uses the group's timers, not its capture
+  unit. At boot, one edge that both see ties the capture timer to the samples: a 20 µs
+  pulse on GPIO 12, latched by capture channel 2 and, for that moment, read by the I2S in
+  place of CH1 L. A dip's rise is then known in ns from the event's first edge, however
+  late its interrupt runs. (A software catch at the I2S start gives a first tie, but
+  register writes to the MCPWM unit can stall for µs: it was 0.1 or 4.1 µs off, by boot.
+  The edge replaces it; if the edge isn't seen by both, the boot prints a warning and
+  keeps the catch.) The summary suggested a plain GPIO interrupt; on this board one
+  can be up to 22 µs late (the capture interrupt), too much for a 55 µs window.
+- **An event's dips:** those rising within 1.5 ms of its first edge (the emission is up to
+  0.9 ms before it), up to 4, go in the `rec` line (`ir=rise/len,...`; `ir=-`: none). A
+  dip no event claims is printed 50 ms later as a `dip` line (no acoustic event: a shot
+  through an existing hole). It has no position, so protocol v2 can't send it. At most 10
+  are printed a second; `stat` counts the rest.
+- **`curtain`** shows the gate, IR_EN, IR_IN's level and the counts. `curtain on` sets the
+  gate to 45–100 µs and lights the IR LEDs (IR_EN high); `curtain window <lo> <hi>` sets
+  another window; `curtain off`. Stored in NVS `"cal"` (`irlo`, `irhi`); off by default.
+  The window goes in the `cfg` line (`ir=45000,100000`, or `ir=-`); a line without it
+  (before 4b) means off, so old logs keep their verdicts.
+- **The `shot` line** gives the dip before the verdict: `; curtain dip +70.0 us after the
+  shot (35.0 us long)`, with `, outside the window` if it is. `[curtain]` says `no curtain
+  dip 45-100 us after the shot (the nearest +30.0 us)`, or `(none within 1.5 ms)`. `stat`
+  and `curtain` count: acoustic ok with a dip in the window, without; acoustic reject
+  with, without; dips with no event. `valid` ends with the curtain's window.
+- **The simulator:** `sim dip <us> [len]` drives GPIO 13 itself and makes a dip that long
+  after each shot's emission time (default 35 µs long). `sim dip none` drives it low with
+  no dips; `sim dip off` releases it. On the host board, take U4 out first: the simulator
+  and the LM393 would both drive the pin. `sim fault silent` is the dip with no sound.
+  - The CPU makes the dip: its rise, its fall and the pulse generator's start, in time
+    order (the dip often comes before the first edge). Interrupts are off from 25 µs
+    before each until just after it, so they come on time; the capture interrupt then
+    waits at most that long, inside its 200 µs blocks.
+  - The simulator reads the cycle counter at each dip edge and at the sync edge, so it
+    knows when the dip really came. It checks the firmware's time of the dip against that
+    (`the firmware's dip time vs the truth`, limit 1 µs) and expects each shot's verdict
+    from the dip as it came.
+  - Blasts, spikes, `sim cal` sparks and double shots get no dip (a blast doesn't cross
+    the sheet).
+- **The replay** takes `--curtain <lo>,<hi>|off` (µs), gives each event's dip, the
+  curtain's counts and the number of `dip` lines.
+- **PC checks:** 16 native tests pass (`test_curtain`: off, on with no dips, early, late,
+  the window's edges, two dips, an acoustic reject with a dip, too few channels, the `rec`
+  and `cfg` lines). The 4a logs replay with 0 of 480 verdicts different. With
+  `--curtain 45,100` their 320 shots all become `curtain` (they have no dips), as they
+  should. The firmware builds (RAM 13.3 %, flash 58.6 %).
+- **Not yet:** the curtain's own delay (amplifier and comparator, a few µs: the window
+  absorbs it until it is measured), a check on the dip's length, sending dip-only shots
+  (protocol v3), and the real curtain (its bench test, PLAN phase 1.6).
+
+##### 4b bench test
+
+**What it shows:** the firmware times a curtain dip against the shot's emission time on
+its own clock, to well under a microsecond. Only a dip in the window lets a shot through,
+an acoustic reject keeps its verdict, a dip with no sound is reported as a `dip` line, and
+the replay gives the board's verdicts from the log.
+
+**Setup:** the bare NodeMCU on USB, nothing on CH3–CH8, GPIO 12 or GPIO 13 (the simulator
+drives them). On the host board, U4 (LM393) must be out of its socket. Upload, which also
+gives a fresh boot, so the counts start at 0. Start the logging monitor, and keep it open
+for 4b-0 to 4b-6:
+
+```
+pio run -d firmware -t upload
+pio device monitor -d firmware --echo --filter log2file
+```
+
+At boot, look for the lines starting `curtain:`. There should be one: `curtain: capture
+tied to the samples by an edge on GPIO 12 (the start's catch was -4100 ns off)` (the
+number differs by boot: about −4100 or 0). `curtain: WARNING: no tie by the edge on GPIO
+12 (...)` means the tie failed: dip times may be several µs off; send the boot lines, and
+check nothing is on GPIO 12. `curtain: could not set up the MCPWM capture on GPIO 13
+(...)` means the IDF refused it: send the boot lines.
+The IDF may also warn that GPIO 13 is used twice; both capture channels read that pin, so
+that is expected. Note it if it appears.
+
+How to read a run: as in 4a, plus the curtain.
+- The board's `shot` line gives the dip before the verdict: `; curtain dip +70.0 us after
+  the shot (35.0 us long); sent as shot 12 [ok]`. The `rec` line ends with
+  `ir=-167812/35000`: the dip's rise in ns from the first edge (negative: the dip came
+  before the first sound reached a mic), and its length.
+- The simulator's line adds `; dip +70.0 us, error +40 ns`: when the dip really came after
+  the shot, and the firmware's time of it minus that.
+- The summary adds two lines: `sim: curtain: a dip 70 us after each shot, 35 us long (as
+  they came: ...)` and `sim: the firmware's dip time vs the truth: 20 timed, mean ...,
+  rms ..., worst ... (limit 1000); curtain check PASS`.
+
+**The dip time's error** (bench, 2026-11-22, the edge tie): a constant part (the mean) of
+−0.12 to −0.15 µs, the same on every boot (the I2S sees an edge about 1.4 samples after
+the capture unit does); rms within 0.01 µs of the mean's size; the worst under 0.25 µs. A
+mean further off is still a PASS up to 1 µs, but tell me the number: it is a fixed offset
+between the two clocks.
+
+**4b-0, the settings.**
+
+```
+valid default
+offset clear
+sigma 50
+mic sim
+k 0.33333
+sim fault none
+sim dip none
+curtain on
+valid
+stat
+```
+
+- Until `curtain on`, every `cfg` line ends
+  `lim=1500 drop=1 lost=1 area=105 tog=20000 pmax=10000 ir=-`; after it,
+  `... pmax=10000 ir=45000,100000`.
+- `sim dip none`: `sim: GPIO 13 (IR_IN) is now driven by the simulator, low at rest. ...`,
+  then the settings, with `sim: curtain dip off (GPIO 13 driven low)`.
+- `curtain on`: `curtain: on, a dip 45-100 us after the shot; IR_EN high; IR_IN (GPIO 13)
+  low (clear) now, driven by the simulator`, then `curtain: since boot 0 dips; acoustic ok
+  with a dip in the window 0, without 0; acoustic reject with 0, without 0; 0 dips with no
+  event; capture 80 MHz, 8 ticks per sample`.
+- `valid` ends `; reslimit 1500 ns, drop-one on; curtain 45-100 us`.
+- `stat` ends with the same two `curtain:` lines.
+
+**4b-1, no dip: no shot.**
+
+```
+sim at 30 30 20
+```
+
+- At the start: `sim: verdict check on: every shot curtain`, `sim: curtain on (a dip
+  45-100 us after the shot); no dips (GPIO 13 held low)`, `sim: position check on ...
+  (limit 0.10 mm)`.
+- Every `shot` line ends `; not sent [curtain]: no curtain dip 45-100 us after the shot
+  (none within 1.5 ms)`; every `rec` line ends `ir=-`. Nothing in the app.
+- Summary: `verdicts: curtain 20 (expected: every shot curtain); verdict check PASS`, `sim:
+  curtain on, and no dips: every shot is turned away by it`, the error about 0.009 mm rms
+  (the fit is the same as 4a-2's), `0 of 20 sent`, `position check PASS (every shot
+  solved, none sent, none dropped, worst error within 0.10 mm)`, `sim: PASS`.
+
+**4b-2, a dip in the window: a shot.**
+
+```
+sim dip 70
+sim at 30 30 20
+sim random 200
+```
+
+- `sim dip 70`: the settings say `sim: curtain dip 70 us after each shot, 35 us long (GPIO
+  13 driven by the simulator)`.
+- At the start: `every shot ok`, and `sim: curtain on (a dip 45-100 us after the shot); a
+  dip 70 us after each shot, 35 us long`.
+- Every `shot` line: `; curtain dip +70.0 us after the shot (35.0 us long); sent as shot
+  N [ok]`. The time reads +69.7 to +70.3 us, the length 35.0 us. At (30, 30) the `rec`
+  line ends about `ir=-1678xx/350xx`: the nearest mic (CH8) hears the shot 238 µs after it,
+  so the dip at 70 µs comes about 168 µs before the first edge.
+- The simulator's line: `; dip +70.0 us, error ...` (the mean error, see above).
+- Summary of `sim at`: `verdicts: ok 20 ...; verdict check PASS`; `sim: curtain: a dip 70
+  us after each shot, 35 us long (as they came: +0.0x us from that on average, 0.0x us at
+  most)`, that is within about 0.1 µs; `the firmware's dip time vs the truth: 20 timed, ...
+  (limit 1000); curtain check PASS`; the error about 0.009 mm rms; `20 of 20 sent`; `sim:
+  PASS`.
+- `sim random 200`: the same, with 200 shots, the error about 0.013 mm rms, worst about
+  0.06 mm (as 4a-1). Here the dip comes after the first edge for holes near a mic, before
+  it elsewhere: both orders are tested.
+
+**4b-3, a dip outside the window: no shot.**
+
+```
+sim dip 30
+sim at 30 30 20
+sim dip 120
+sim at 30 30 20
+```
+
+- Both runs: `every shot curtain`. Every `shot` line: `; curtain dip +30.0 us after the
+  shot (35.0 us long), outside the window; not sent [curtain]: no curtain dip 45-100 us
+  after the shot (the nearest +30.0 us)`. The second run gives +120.0 instead.
+- Summaries: `verdicts: curtain 20 ...; verdict check PASS`, `curtain check PASS` (the dip
+  is still timed), `0 of 20 sent`, the error about 0.009 mm, `sim: PASS`.
+
+**4b-4, another window.**
+
+```
+curtain window 25 35
+sim dip 30
+sim at 30 30 20
+curtain on
+```
+
+- `curtain window 25 35`: `curtain: on, a dip 25-35 us after the shot`; the `cfg` line
+  ends `ir=25000,35000`.
+- The run (the dip at 30 µs): `every shot ok`, every shot `[ok]` and sent, `sim:
+  PASS`.
+- `curtain on` puts back 45–100 µs (`ir=45000,100000`).
+
+**4b-5, an acoustic reject keeps its verdict.** The dip is in the window, but the
+acoustic checks turn the shot away first.
+
+```
+sim dip 70
+sim fault missing 5 7
+sim at 30 30 20
+sim fault none
+sim at 115 0 20
+```
+
+- `missing 5 7`: `every shot lost`. Every `shot` line: `; curtain dip +70.0 us after the
+  shot (35.0 us long); not sent [lost]: 2 channels lost (CH5 CH7), 1 allowed`. `verdict
+  check PASS`, `curtain check PASS`, `sim: PASS`.
+- `(115, 0)`: `every shot outside`, the same dip, `not sent [outside]: outside the +-105
+  mm area`, `sim: PASS`. The hole is 10 mm from CH8, which hears it 42 µs after the shot,
+  before the dip: the other order.
+
+**4b-6, a dip with no sound: a shot through an existing hole.**
+
+```
+sim fault silent
+sim at 30 30 20
+sim fault none
+stat
+```
+
+- At the start: `sim: curtain on (45-100 us); a dip only, 35 us long, no sound: every one
+  must be printed as a `dip` line, and no event come`.
+- 20 times, about 50 ms after each dip: `dip n=1 t=1234.567890123 len=35000` (`n` counts
+  from 1 since boot; `len` 34975–35025), then `  a curtain dip with no acoustic event
+  within 1.5 ms: a shot through an existing hole? (no position: not sent)`.
+- Summary: `sim: 20 shots sent, 0 events, 0 not seen, 0 unexpected, ...`, `sim: dips with
+  no sound: 20 of 20 printed as `dip` lines, 0 not; 0 events (none may come); ...`, `sim:
+  dip check PASS`, `sim: PASS`.
+- `stat`, if each run was done once since the upload: `verdicts since boot: ok 240 few 0
+  together 0 nofit 0 residual 0 lost 20 outside 20 curtain 60`, and `curtain: since boot
+  340 dips; acoustic ok with a dip in the window 240, without 60; acoustic reject with 40,
+  without 0; 20 dips with no event`.
+
+**4b-7, replay on the PC.** Stop the monitor (Ctrl-C). From `firmware/`, with every log of
+4b-0 to 4b-6 (if the monitor was restarted) in order:
+
+```
+g++ -std=gnu++17 -O2 -mfma -ffp-contract=fast -I lib/measure -o tools/replay tools/replay.cpp lib/measure/solver.cpp lib/measure/record.cpp
+tools/replay --quiet <log>
+tools/replay --quiet --curtain off <log>
+tools/replay --quiet --curtain 45,100 <log>
+```
+
+- **As logged:** `replay: 340 events, ...`, `verdicts: ok 240 few 0 together 0 nofit 0
+  residual 0 lost 20 outside 20 curtain 60`, `curtain (4b): acoustic ok with a dip in the
+  window 240, without 60; acoustic reject with 40, without 0; 0 not judged (gate off, or
+  no fit); 340 events logged with the curtain on; 20 `dip` lines (a dip with no event)`,
+  `against the board's verdicts: 340 compared, 0 differ`, the shot lines `worst 0.0000
+  mm` (or 0.0010), the true points about 0.012 mm rms over 240 good shots.
+- **`--curtain off`:** `ok 300`, `curtain 0`, `340 not judged`, `60 differ`.
+- **`--curtain 45,100`:** 4b-4's run (its dip at 30 µs, in its own 25–35 µs window) is
+  turned away now: `ok 220`, `curtain 80`, `20 differ`.
+
+**4b-8, back to normal.**
+
+```
+curtain off
+sim dip off
+curtain
+mic default
+```
+
+- `curtain off`: `curtain: off (no gate); IR_EN low; ...`; the `cfg` line ends `ir=-`.
+- `sim dip off`: `sim: curtain dip off (GPIO 13 not driven)`.
+- `curtain`: GPIO 13 floats now, so it may read high or low.
+
+**If something fails:**
+- `sim: could not set up the MCPWM pulse generator`: the curtain's capture timer and the
+  pulse generator clash in MCPWM group 0. Send the boot lines and that line.
+- `NOT FOUND` on the simulator's line: the firmware saw no dip within 1.5 ms of the event.
+  Check `curtain` (on? IR_IN driven by the simulator?).
+- A `dip` line during a normal run: a dip no event claimed. Send the log.
+
+**Report back:** each run's `sim: PASS`/`FAIL` line, the `the firmware's dip time vs the
+truth` lines of 4b-2 (both runs), the `stat` lines of 4b-6 and the replay's three
+summaries. For any FAIL, send the log too.
+
 ### 5. Protocol and app
 
 Raw-event message (t1/t2 or t0 per channel, fit residual, accept/reject reason, and
@@ -972,6 +1264,8 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-22 | 4b | 4b-0 to 4b-8 again with the edge tie, bare NodeMCU, run by Claude over serial, logs `logs/device-monitor-261122-230319.log` (diagnostic) and `-230420.log` (the full test), upload `logs/upload-261122-230227.log` | **Passes.** The tie now comes from one 20 µs pulse on GPIO 12 seen by both the I2S and capture channel 2 (the user chose this over a fixed correction). First try (`-203458.log`): 10.58 ms off and every dip unclaimed, because `gpio_reset_pin` briefly pulled GPIO 12 up and that rise opened the tie's event 10 ms before the real pulse. Fixed: the pin is set up as a quiet low output before it is routed, the tie waits out the dead time, and it checks the two agree within 50 µs (else a warning, and the catch stays). Both boots: `the start's catch was -4100 ns off` and `-4175 ns off`, so the edge corrected the bad case. The firmware's dip time against the hardware truth: mean −122 to −146 ns per run, rms 126–150 ns, worst 224 ns (200 shots of `sim random 200`), the same over both boots. All runs PASS; 4b-1 to 4b-6 as in the row below. Replay: 340 events, 0 verdicts differ, 20 `dip` lines; positions 0.013 mm rms against the truth. Native tests: 16 pass. Still in the code: the simulator's diagnostics (`steps late`, `tick 0 vs the sync edge`). |
+| 2026-11-22 | 4b | 4b-0 to 4b-8, bare NodeMCU, run by Claude over serial (scripted; the user's OK for this step), logs `logs/device-monitor-261122-195051.log` (first run) to `-201814.log`, uploads `logs/upload-261122-*.log` | **Not passed yet: an open problem in the clock tie.** Boot: no `curtain:` error, so the capture unit and the pulse generator share MCPWM group 0. **Bugs found and fixed on the way:** (1) firmware: when the capture interrupt runs late, the driver hands over a dip's fall before its rise, and the fall was dropped (`len=-`); the ring now keeps a fall until its rise. (2) replay: a `rec` line ending in `ir=-` with its line end did not parse (0 events); fixed, native test added. (3) this bench test: 4b-4 never set the dip back to 30 µs (it ran 4b-3's 120 µs); `sim dip 30` added. (4) simulator: its truth came from CPU cycle counts, and one shot of 200 was off by 1 µs from that; it now comes from the capture unit itself (channel 2 latches the sync edge during a run). Edges closer than 60 µs stay in one masked stretch. **What passed** (`-200234.log`, all runs PASS): the firmware's dip time against the hardware truth was +83 to +124 ns mean per run, rms about 95 ns, worst 196 ns. 4b-1: 20 `[curtain]`. 4b-2: 20 + 200 `[ok]`, position 0.012 mm rms. 4b-3: 40 `[curtain]` with the dip at +30 and +120 µs. 4b-5: `[lost]` and `[outside]` kept with a dip in the window (acoustic reject with a dip: 40). 4b-6: 20 `dip` lines, 0 events. Replay: 340 events, 0 verdicts differ; `--curtain off` 80 differ. **The open problem:** register writes to the MCPWM unit can stall for several µs. At boot the tie's catch took 3866 cycles (16 µs), the I2S start right after it 42 cycles. Where in that stall the catch lands decides the tie: in 3 boots the dip time was +0.1 µs from the truth, in 3 others +4.1 µs, steady within a boot. On a real curtain that is a dip-time offset of up to about 4 µs, different each boot. The simulator's own dips also come 3–12 µs late when a dip edge is the run's first step (the GPIO write stalls too); that doesn't affect its check, since the truth is latched in hardware. Still in the code: the diagnostics (`steps late`, `tick 0 vs the sync edge`, `curtain: tie:` at boot). |
 | 2026-11-22 | 4a | 4a-8, bare NodeMCU, serial console (user report, pasted) | **PASS; step 4a passes.** `valid area 110`: `area +-110 mm`, the hint "`mic` runs the blast check for the new area", `area=110` in the `cfg` line. After the EN reset the boot `cfg` line and `valid` still read 110 (stored in NVS). `valid default`: back to `lost 1, area +-105 mm, together 20.0 us, pulse 10.0 us`, `cfg` id 5C14D0AC again (the same settings give the same id). `valid foo`: the usage line. `mic default`: the blast check 0 of 624 everywhere, `area=105`. At boot, with nothing on J5, the Arduino I2C driver logs four lines `i2cWriteReadNonStop ... ESP_ERR_INVALID_STATE` (error 259): the BME280 probe got no acknowledge. They were already in the logs of 3b-3e; harmless, the `air:` line reports no sensor. All of 4a-0 to 4a-8 pass. |
 | 2026-11-22 | 4a | 4a-6's missing run, bare NodeMCU, the same log (`-185126.log`); 4a-7 again on both logs | **PASS.** Blast 10 m/500 mm: 20 of 20 `[residual]` (rms 20500-22100 ns, fits at x −19 to −33, y +3 to +16 mm), 0 sent, blast check PASS. 4a-7 on all 480 events: ok 320, together 60, residual 60, lost 20, outside 20 (the doc's counts plus the repeated 10 m/0 run, 20 more together). 0 of 480 verdicts differ from the board's. `--together off`: residual 120, 60 differ. `--lost 2`: ok 340, 20 differ. True points 0.0120 mm rms, worst 0.0315 mm. Left: 4a-8. |
 | 2026-11-22 | 4a | 4a-4 to 4a-6, bare NodeMCU, logged (`logs/device-monitor-261122-185126.log`, after 4a-3); 4a-7 on the PC on that log and `-184742.log` | **PASS, but one blast run is still to do.** 4a-4 spike: 20 of 20 `[together]`, "every first edge within 0.0 us", fit (−26.291, +9.846) mm, rms 21572 ns, CH4 dropped, 0 sent. With `valid together off`: 20 of 20 `[residual]`, 0 sent. 4a-5: (115, 0) 20 of 20 `[outside]`, 0 sent, error 0.0347 mm rms, worst 0.0622 mm (PC 0.035). (100, 0) 20 of 20 `[ok]`, 0.0120 mm rms, worst 0.0128 mm (PC 0.012). 4a-6 blast 10 m/0 mm: 20 of 20 `[together]`, "within 1.6 us", rms about 21300 ns, 0 sent. A typo (`saim`) left the next command unrun, so that blast ran twice and 10 m/500 mm is missing. Blast 25 m/2000 mm: 20 of 20 `[residual]`, rms 20000-22700 ns, 0 sent. `stat` since boot: ok 920, together 80, residual 60, lost 60, outside 20; the solve took 422 µs mean, 1.27 ms longest. 4a-7: 460 events, ok 320, together 60, residual 40, lost 20, outside 20 (the doc's 40/60 with the missing run; the second 10 m/0 run in its place). Against the board, 0 of 460 verdicts differ, shot lines 0.0000 mm worst. True points: 320 good, 0.0120 mm rms, worst 0.0315 mm. `--together off`: together 0, residual 100, 60 differ. `--lost 2`: ok 340, lost 0, 20 differ. To do: 4a-6's 10 m/500 mm, then 4a-8. |

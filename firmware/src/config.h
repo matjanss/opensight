@@ -35,8 +35,8 @@ constexpr int CAPTURE_LINE_PINS[16] = {
   17, 18,   // CH7
    4, 16,   // CH8
 };
-const int IR_EN_PIN = 27;   // IR curtain LEDs, high = on; unused for now, held low
-// Also on the board, unused so far: IR_IN 13 (IR receiver).
+const int IR_EN_PIN = 27;   // IR curtain LEDs, high = on (with `curtain on`, step 4b)
+const int IR_IN_PIN = 13;   // IR curtain comparator: high while the beam is blocked (step 4b)
 
 // The I2S sample clock is made by LEDC and looped back through this pin (spare on the
 // host board; leave it unconnected).

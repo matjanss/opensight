@@ -293,6 +293,7 @@ static void test_cfg_round_trip() {
   }
   TEST_ASSERT_TRUE(back.resLimitNs == cfg.resLimitNs && back.dropOne);
   TEST_ASSERT_TRUE(back.maxLost == -1 && back.areaMm == 0 && back.togetherNs == 0 && back.pulseMaxNs == 0);
+  TEST_ASSERT_TRUE(back.curtainLoNs == 0 && back.curtainHiNs == 0 && strstr(line, " ir=-"));
   // The validity limits (4a) round-trip too, and change the cfg's id but not the calibration's.
   Cfg v = cfg;
   v.maxLost = 1;
@@ -527,6 +528,114 @@ static void test_validity() {
   TEST_ASSERT_FALSE(parseVerdict("good", &v));
 }
 
+// The curtain's gate (4b, MODEL.md "Validity"): a dip rising 45-100 us after the emission
+// time, judged apart from the acoustic checks and checked last.
+static void test_curtain() {
+  Cfg cfg = sampleCfg();
+  for (int c = 0; c < 6; c++) cfg.ch[c].offsetNs = 0;
+  cfg.resLimitNs = 1500;
+  cfg.maxLost = MAX_LOST_DEFAULT;
+  cfg.areaMm = AREA_DEFAULT_MM;
+  cfg.togetherNs = TOGETHER_DEFAULT_NS;
+  cfg.pulseMaxNs = PULSE_MAX_DEFAULT_NS;
+  // The gate off, no dips (every log before 4b): ok, the curtain not judged.
+  Rec r = shotRec(cfg, 31, -47);
+  EventFit f = solveEvent(cfg, r);
+  TEST_ASSERT_TRUE(f.good && f.curtain == -1 && f.dip == -1 && isnan(f.dipAfterNs));
+  const float tau = f.s.tauNs;   // the emission time, ns from the first edge (before it)
+  TEST_ASSERT_TRUE(tau < -100000);
+  // The gate on, and no curtain in the record: no dip, so not a shot.
+  cfg.curtainLoNs = CURTAIN_LO_DEFAULT_NS;
+  cfg.curtainHiNs = CURTAIN_HI_DEFAULT_NS;
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_EQUAL_STRING("curtain", verdictName(f.verdict));
+  TEST_ASSERT_TRUE(!f.good && f.acoustic == V_OK && f.curtain == 0 && f.dip == -1);
+  // A dip 70 us after the emission: a shot.
+  r.hasIr = true;
+  r.nDips = 1;
+  r.dipNs[0] = (int32_t)lroundf(tau + 70000);
+  r.dipLenNs[0] = 34500;
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_TRUE(f.good && f.curtain == 1 && f.dip == 0);
+  TEST_ASSERT_FLOAT_WITHIN(1, 70000, f.dipAfterNs);
+  // Too early, too late: not a shot, the dip still given.
+  r.dipNs[0] = (int32_t)lroundf(tau + 30000);
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_TRUE(f.verdict == V_CURTAIN && f.curtain == 0 && f.dip == 0);
+  TEST_ASSERT_FLOAT_WITHIN(1, 30000, f.dipAfterNs);
+  r.dipNs[0] = (int32_t)lroundf(tau + 120000);
+  TEST_ASSERT_TRUE(solveEvent(cfg, r).verdict == V_CURTAIN);
+  // The window's edges count as in it.
+  r.dipNs[0] = (int32_t)lroundf(tau + 45000 + 2);
+  TEST_ASSERT_TRUE(solveEvent(cfg, r).good);
+  r.dipNs[0] = (int32_t)lroundf(tau + 100000 - 2);
+  TEST_ASSERT_TRUE(solveEvent(cfg, r).good);
+  // Two dips, one late, one in the window: the one in the window.
+  r.nDips = 2;
+  r.dipNs[0] = (int32_t)lroundf(tau + 150000);
+  r.dipNs[1] = (int32_t)lroundf(tau + 50000);
+  r.dipLenNs[1] = NO_EDGE;
+  f = solveEvent(cfg, r);
+  TEST_ASSERT_TRUE(f.good && f.dip == 1);
+  TEST_ASSERT_FLOAT_WITHIN(1, 50000, f.dipAfterNs);
+  // The gate off: a shot whatever the dips, the nearest still given.
+  Cfg off = cfg;
+  off.curtainLoNs = off.curtainHiNs = 0;
+  f = solveEvent(off, r);
+  TEST_ASSERT_TRUE(f.good && f.curtain == -1 && f.dip == 1);
+  // An acoustic reject keeps its verdict; the curtain is judged apart (PLAN D9).
+  Rec out = shotRec(cfg, 112, -20);
+  f = solveEvent(cfg, out);
+  out.hasIr = true;
+  out.nDips = 1;
+  out.dipNs[0] = (int32_t)lroundf(f.s.tauNs + 70000);
+  out.dipLenNs[0] = 30000;
+  f = solveEvent(cfg, out);
+  TEST_ASSERT_TRUE(f.verdict == V_OUTSIDE && f.acoustic == V_OUTSIDE && f.curtain == 1);
+  // Too few channels: no emission time, so the curtain is not judged.
+  out.channels = 0x07;
+  f = solveEvent(cfg, out);
+  TEST_ASSERT_TRUE(f.verdict == V_FEW && f.curtain == -1);
+
+  // The rec line: a rise before the first edge, a fall not seen.
+  r.dipNs[0] = -150300;
+  r.dipLenNs[0] = 34500;
+  r.dipNs[1] = 73400;
+  r.dipLenNs[1] = NO_EDGE;
+  r.cfgId = 0x1A2B3C4D;
+  r.cMs = 342.7f;
+  char line[400];
+  formatRec(line, sizeof line, r);
+  printf("%s\n", line);
+  TEST_ASSERT_NOT_NULL(strstr(line, " ir=-150300/34500,73400/-"));
+  Rec b;
+  TEST_ASSERT_TRUE(parseRec(line, b));
+  TEST_ASSERT_TRUE(b.hasIr && b.nDips == 2 && b.dipNs[0] == -150300 && b.dipLenNs[0] == 34500 &&
+                   b.dipNs[1] == 73400 && b.dipLenNs[1] == NO_EDGE);
+  TEST_ASSERT_TRUE(parseRec((std::string(line) + "\r\n").c_str(), b) && b.nDips == 2);   // as read from a log
+  r.nDips = 0;   // on, but no dip
+  formatRec(line, sizeof line, r);
+  TEST_ASSERT_NOT_NULL(strstr(line, " ir=-"));
+  TEST_ASSERT_TRUE(parseRec(line, b) && b.hasIr && b.nDips == 0);
+  TEST_ASSERT_TRUE(parseRec((std::string(line) + "\n").c_str(), b) && b.hasIr && b.nDips == 0);
+  r.hasIr = false;   // off: no ir field
+  formatRec(line, sizeof line, r);
+  TEST_ASSERT_NULL(strstr(line, " ir="));
+  TEST_ASSERT_TRUE(parseRec(line, b) && !b.hasIr);
+
+  // The cfg line: the window round-trips, changes the cfg's id but not the calibration's.
+  char cline[640];
+  formatCfg(cline, sizeof cline, cfg);
+  printf("%s\n", cline);
+  TEST_ASSERT_NOT_NULL(strstr(cline, " ir=45000,100000"));
+  Cfg back;
+  uint32_t id;
+  TEST_ASSERT_TRUE(parseCfg(cline, back, &id));
+  TEST_ASSERT_TRUE(back.curtainLoNs == 45000 && back.curtainHiNs == 100000);
+  TEST_ASSERT_NOT_EQUAL(cfgId(cfg), cfgId(off));
+  TEST_ASSERT_EQUAL_HEX32(calibrationId(cfg), calibrationId(off));
+}
+
 static SolveInput micsAt(const float (*xy)[2], int n, float h) {
   SolveInput in = {};
   in.n = n;
@@ -596,6 +705,7 @@ int main(int, char**) {
   RUN_TEST(test_rec_round_trip);
   RUN_TEST(test_solve_event);
   RUN_TEST(test_validity);
+  RUN_TEST(test_curtain);
   RUN_TEST(test_blast_check);
   RUN_TEST(test_time_per_solve);
   return UNITY_END();

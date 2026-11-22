@@ -313,6 +313,11 @@ Count each defence's rejections separately on the range (phase 2).
   shot with no position, for manual scoring, rather than missed.
 - **The curtain's bench test comes first,** as the summary says (one LED, one photodiode,
   10 and 60 cm, under range lighting).
+- **Timing** (MEASUREMENT 4b): the dip is latched by the MCPWM capture unit, not a GPIO
+  interrupt as the summary had it. On this board an interrupt can be 22 µs late (the
+  capture's own), a large part of the 55 µs window; the capture latches in hardware at
+  12.5 ns on the samples' clock. A dip with no event is printed on serial (a `dip` line)
+  until protocol v3 can send a shot without a position.
 
 ### D10 Frame sizes and the capture's limits
 

@@ -19,6 +19,7 @@ void captureCommand(const char* line);
 
 // For the self-test and the simulator (simulate.cpp).
 bool     captureIdle();               // no event being collected or read
+uint64_t captureSamplesNow();         // samples since the start, to the last finished block
 bool     captureSelftestActive();
 uint32_t captureMissedCount();        // activity in the frozen ring after the dead time
 uint32_t captureWindowUs();           // the event window covers this long after the first edge

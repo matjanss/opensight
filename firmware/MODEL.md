@@ -141,8 +141,9 @@ the result, is the caller's (MEASUREMENT steps 3d and 4).
 
 ## Validity
 
-`measure::solveEvent` judges every event after its fit (MEASUREMENT step 4a). The verdict
-is `ok` (a shot: it goes to the app) or the first of these checks it fails, in this order:
+`measure::solveEvent` judges every event after its fit (MEASUREMENT steps 4a and 4b). The
+verdict is `ok` (a shot: it goes to the app) or the first of these checks it fails, in
+this order:
 
 | Verdict | When | Limit (`cfg` key, firmware default) |
 |---|---|---|
@@ -152,6 +153,7 @@ is `ok` (a shot: it goes to the app) or the first of these checks it fails, in t
 | `residual` | rms residual over the limit, after drop-one if it is on | `lim`, 1500 ns |
 | `lost` | More of the event's mic channels left out of the final fit than allowed: no edge, a pulse shape out of range, or dropped | `lost`, 1 |
 | `outside` | The hole beyond ±area in x or y | `area`, 105 mm (the mics' edge: a hole further out would hit the frame) |
+| `curtain` | The curtain's gate is on and no dip rises within its window after the emission time (the fit's τ) | `ir`, 45 000–100 000 ns (the sheet 15 mm behind the paper at 150–350 m/s, PLAN D9); off until a curtain is fitted |
 
 - **The pulse shape** is checked per channel before the fit, in `measure::solveInput`: with
   `pmax` (firmware default 10 000 ns), a channel is left out unless 0 ≤ t2 − t1 ≤ `pmax`.
@@ -163,8 +165,19 @@ is `ok` (a shot: it goes to the app) or the first of these checks it fails, in t
   it converged within `lim`.
 - **Why `lost` 1:** with 6 mics every set of 5 rejects blasts (D2), while two lost channels
   leave 4, which may not.
-- **Still to come:** the curtain's gate (4b), and loudness and edge sharpness (4c, from
-  real pulses).
+- **The curtain** (4b) is checked last, and judged apart from the acoustic checks, so each
+  defence's rejections can be counted on their own (PLAN D9). `measure::EventFit` gives
+  the verdict without it (`acoustic`), the curtain's result (`curtain`: 1 a dip in the
+  window, 0 none, −1 not judged: the gate off, or no converged fit to time it against), and
+  the dip in the window, else the one nearest to it (`dip`, and `dipAfterNs`: its rise
+  after τ). The window's edges count as in it. Both are in the emission's clock: a dip's
+  rise is logged in ns from the event's first edge, as the edges are, and τ is the fit's,
+  with the channels' offsets taken off.
+- **A dip with no event** (no acoustic event within 1.5 ms of it) is a shot through an
+  existing hole: the firmware prints it as a `dip` line (see Log lines). It has no
+  position, so protocol v2 can't send it.
+- **Still to come:** loudness and edge sharpness (4c, from real pulses); the curtain's own
+  delay (its amplifier and comparator), once measured on the bench.
 
 ## Log lines
 
@@ -178,7 +191,7 @@ monitor's timestamp) is ignored, and so are unknown keys (later firmware may add
 a `sim` run:
 
 ```
-cfg id=0262A982 CH1=-105,-105,10.5,0.333333343,0,50 ... CH7=- CH8=- lim=1500 drop=1 lost=1 area=105 tog=20000 pmax=10000
+cfg id=0262A982 CH1=-105,-105,10.5,0.333333343,0,50 ... CH7=- CH8=- lim=1500 drop=1 lost=1 area=105 tog=20000 pmax=10000 ir=-
 ```
 
 - `CHn=x,y,h,k,offset,sigma` (mm, mm, mm, -, ns, ns), or `-` for a channel without a mic.
@@ -186,6 +199,8 @@ cfg id=0262A982 CH1=-105,-105,10.5,0.333333343,0,50 ... CH7=- CH8=- lim=1500 dro
   `measure::solveEvent` applies. A line without them (3c) means 1500 and 0.
 - `lost`, `area` (mm), `tog` (ns), `pmax` (ns): the validity limits (see Validity). A line
   without them (before 4a) means off.
+- `ir=lo,hi` (ns): the curtain's window (4b), or `ir=-` for its gate off. A line without
+  it (before 4b) means off.
 - Floats with 9 significant digits: they read back to the same bits.
 - `id`: the CRC-32 (IEEE, as zlib's) of the text after `id=XXXXXXXX `. A line whose id
   doesn't match its text is rejected.
@@ -211,6 +226,7 @@ rec n=2161 t=876.1903407 cfg=0262A982 T=18.00 RH=50.0 p=1013.25 meas=--- c=342.7
 | `pt=x,y` | The true point, mm, if known: calibration mode's template point (`cal pt`), or the simulator's shot. Optional |
 | `mode=cal` | Made in calibration mode (not sent to the app). Optional |
 | `cal`, `stale` | The calibration record's id and whether it is stale (`cal=1A2B3C4D stale=0`), or `cal=-` for none |
+| `ir=rise/len,...` | The curtain's dips within 1.5 ms of the event (4b, up to 4): each rise in ns from the event's first edge (negative: before it), and its length in ns (`-`: its fall not seen). `ir=-`: the curtain on, no dip. Missing: the curtain off |
 
 The solver's input: t0 = arrivalT0(t1, t2, k, offset) per channel, in float, for every
 channel that has a mic, both edges and (with `pmax`) a pulse shape in range; c from `c`.
@@ -219,7 +235,17 @@ when 5 or more), and gives the verdict (see Validity).
 
 The firmware's `shot` line, just before the `rec` line, ends with the verdict in brackets
 (`; sent as shot 12 [ok]`, `; not sent [residual]: ...`), which the replay compares with
-its own.
+its own. With the curtain on, the dip comes before it: `; curtain dip +70.0 us after the
+shot (35.0 us long)`.
+
+**`dip`**, a curtain dip that no event claimed (4b), printed 50 ms after it:
+
+```
+dip n=3 t=1234.567890123 len=35000
+```
+
+`n` counts them from 1 per boot, `t` is its rise (s since the capture started, as `rec`'s
+`t`), `len` its length in ns (`-`: not seen). The replay counts them.
 
 ## Test vectors
 

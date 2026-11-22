@@ -16,6 +16,7 @@
 #include <Preferences.h>
 #include "airtemp.h"
 #include "calib.h"
+#include "curtain.h"
 #include "position.h"
 #include "arrival.h"
 #include "config.h"
@@ -317,6 +318,7 @@ static void measureTask(void*) {
 // ---- For the self-test and the simulator ----
 
 bool captureIdle() { return evState == EV_IDLE; }
+uint64_t captureSamplesNow() { return (uint64_t)blocksDone * SAMPLES_PER_BLOCK; }
 uint32_t captureMissedCount() { return missedCount; }
 uint32_t captureWindowUs() { return coveredUs(postBlocks); }
 uint32_t captureDeadtimeMs() { return deadtimeMs; }
@@ -656,6 +658,63 @@ static void printStatus() {
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
 }
 
+// ---- The curtain's tie (step 4b) ----
+
+// One edge both clocks see: GPIO 12 (the pulse generator's sync pin, unused at boot) into
+// capture channel 2 and, for this moment, into I2S data bit 0 in place of CH1 L. The edge
+// makes an ordinary event, which is taken here instead of being printed; its line 0 rise is
+// the sample, channel 2's latch the tick. A first tie came from a software catch at the I2S
+// start, but MCPWM register writes can stall for µs (bench 4b: 16 us), so that one can be
+// off by several.
+static void tieCurtain() {
+  const uint16_t saved = channelMask;
+  // The pin first, quietly: a low output with no pulls. (gpio_reset_pin would pull it up for
+  // a moment: bench 4b, that rise opened an event 10 ms before the real edge, and the tie
+  // paired the two.) Only then into the I2S and the capture.
+  gpio_pullup_dis((gpio_num_t)SYNC_PIN);   // a strapping pin (flash voltage): never pulled up
+  gpio_pulldown_dis((gpio_num_t)SYNC_PIN);
+  gpio_set_level((gpio_num_t)SYNC_PIN, 0);
+  gpio_set_direction((gpio_num_t)SYNC_PIN, GPIO_MODE_INPUT_OUTPUT);
+  applyMask(channelMask | 1);   // CH1, so line 0 is scanned
+  esp_rom_gpio_connect_in_signal(SYNC_PIN, I2S0I_DATA_IN0_IDX, false);
+  curtainSimSync(true);
+  // Past any event and its dead time, then nothing left in the queue: the next event is ours.
+  delay(captureDeadUs() / 1000 + 20);
+  EventResult r;
+  while (evState != EV_IDLE) delay(5);
+  while (xQueueReceive(results, &r, 0) == pdTRUE) {}
+  const uint32_t before = curtainSimSyncTick();
+  gpio_set_level((gpio_num_t)SYNC_PIN, 1);
+  delayMicroseconds(20);
+  gpio_set_level((gpio_num_t)SYNC_PIN, 0);
+  const bool got = xQueueReceive(results, &r, pdMS_TO_TICKS(200)) == pdTRUE && r.line[0].rise >= 0;
+  const uint32_t tick = curtainSimSyncTick();
+  // Everything back: CH1 L into bit 0, the sync pin a plain input with its pull-down, the mask.
+  esp_rom_gpio_connect_in_signal(CAPTURE_LINE_PINS[0], I2S0I_DATA_IN0_IDX, false);
+  curtainSimSync(false);
+  gpio_set_direction((gpio_num_t)SYNC_PIN, GPIO_MODE_INPUT);
+  gpio_pulldown_en((gpio_num_t)SYNC_PIN);
+  delay(captureDeadUs() / 1000 + 20);   // the tie's event and its dead time over
+  while (xQueueReceive(results, &r, 0) == pdTRUE) {}
+  applyMask(saved);
+  eventCount = 0;   // the tie's event is not an event
+  const char* why = !got ? "the I2S saw no edge"
+                  : tick == before ? "the capture latched no edge" : nullptr;
+  const uint64_t sample = got ? (uint64_t)r.firstTime * SAMPLES_PER_BLOCK + r.line[0].rise : 0;
+  // The start's catch is off by a few us at most (bench 4b: 0.1 or 4.1): more means the two
+  // saw different edges.
+  const double diffNs = got ? (int32_t)(tick - curtainSampleTick(sample)) * curtainTickNs() : 0;
+  if (!why && fabs(diffNs) > 50000) why = "the two disagree by more than 50 us";
+  if (why) {
+    Serial.printf("curtain: WARNING: no tie by the edge on GPIO 12 (%s; %+.0f ns): the curtain's "
+                  "times may be off by several us (the start's catch only)\n", why, diffNs);
+    return;
+  }
+  const double off = curtainTie(tick, sample);
+  Serial.printf("curtain: capture tied to the samples by an edge on GPIO 12 (the start's catch "
+                "was %+.0f ns off)\n", off);
+}
+
 // ---- Public ----
 
 bool captureBegin() {
@@ -670,8 +729,7 @@ bool captureBegin() {
   calibBegin();
   positionBegin();
 
-  pinMode(IR_EN_PIN, OUTPUT);
-  digitalWrite(IR_EN_PIN, LOW);
+  curtainBegin();   // IR_EN low until the gate is on; the capture timer, tied below
 
   // Comparator lines into I2S0 data bits 0-15. GPIO 34-39 have no internal pulls; the host
   // board has 100 k pull-downs on every line.
@@ -777,8 +835,15 @@ bool captureBegin() {
   I2S0.int_ena.val = 0;
   I2S0.int_ena.in_suc_eof = 1;
   startUs = esp_timer_get_time();
+  // The curtain's capture timer is caught at the same moment, so a dip's time is known in
+  // samples (curtain.cpp).
+  portDISABLE_INTERRUPTS();
+  curtainMarkStart();
   I2S0.conf.rx_start = 1;
+  portENABLE_INTERRUPTS();
+  curtainMarkRead();
   running = true;
+  tieCurtain();
 
   Serial.printf("capture: %.1f MHz, 16 lines, ring %d KB (%u ms), mic span %u mm: window "
                 "covers %u us after the first edge, channel mask %02X, dead time %u ms. Type "
@@ -812,6 +877,7 @@ void captureService(uint32_t nowMs) {
                   "being read (%u in all): a shot may not have been measured\n", (unsigned)missed);
     missedReported = missed;
   }
+  curtainService(evState == EV_IDLE && uxQueueMessagesWaiting(results) == 0);
   selftestService(nowMs);
   simService(nowMs);
 }

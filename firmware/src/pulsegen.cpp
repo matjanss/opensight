@@ -57,7 +57,7 @@ static void IRAM_ATTR spinNs(uint32_t ns) {
   while (esp_cpu_get_cycle_count() - c0 < cycles) {}
 }
 
-uint32_t IRAM_ATTR pulsegenFire() {
+uint32_t IRAM_ATTR pulsegenFire(uint32_t* syncCycle) {
   const uint32_t bit = 1u << SYNC_PIN;
   const int groups = fireGroups;
   uint32_t state = portSET_INTERRUPT_MASK_FROM_ISR();
@@ -76,6 +76,7 @@ uint32_t IRAM_ATTR pulsegenFire() {
   REG_WRITE(GPIO_OUT_W1TC_REG, bit);
   __asm__ __volatile__("memw");
   portCLEAR_INTERRUPT_MASK_FROM_ISR(state);
+  if (syncCycle) *syncCycle = c1;
   return (c1 - c0) * 1000 / esp_rom_get_cpu_ticks_per_us();
 }
 

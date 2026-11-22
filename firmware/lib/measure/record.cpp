@@ -31,8 +31,10 @@ int formatFields(char* out, size_t size, const Cfg& cfg) {
     else n = add(out, size, n, "%.9g,%.9g,%.9g,%.9g,%.9g,%.9g", ch.x, ch.y, ch.h, ch.k,
                  ch.offsetNs, ch.sigmaNs);
   }
-  return add(out, size, n, " lim=%.9g drop=%d lost=%d area=%.9g tog=%.9g pmax=%.9g", cfg.resLimitNs,
-             cfg.dropOne ? 1 : 0, cfg.maxLost, cfg.areaMm, cfg.togetherNs, cfg.pulseMaxNs);
+  n = add(out, size, n, " lim=%.9g drop=%d lost=%d area=%.9g tog=%.9g pmax=%.9g", cfg.resLimitNs,
+          cfg.dropOne ? 1 : 0, cfg.maxLost, cfg.areaMm, cfg.togetherNs, cfg.pulseMaxNs);
+  if (cfg.curtainHiNs > 0) return add(out, size, n, " ir=%.9g,%.9g", cfg.curtainLoNs, cfg.curtainHiNs);
+  return add(out, size, n, " ir=-");
 }
 
 // The next space-separated token of s from *p, as "key=value": false at the end.
@@ -127,6 +129,15 @@ bool parseCfg(const char* line, Cfg& cfg, uint32_t* id) {
       if (end == value) return false;
       continue;
     }
+    if (!strcmp(key, "ir")) {   // 4b: the curtain's window, or "-"
+      if (value[0] == '-') continue;
+      out.curtainLoNs = strtof(value, &end);
+      if (end == value || *end != ',') return false;
+      const char* hi = end + 1;
+      out.curtainHiNs = strtof(hi, &end);
+      if (end == hi) return false;
+      continue;
+    }
     float* f = !strcmp(key, "area") ? &out.areaMm : !strcmp(key, "tog") ? &out.togetherNs
              : !strcmp(key, "pmax") ? &out.pulseMaxNs : nullptr;
     if (f) {
@@ -171,6 +182,14 @@ int formatRec(char* out, size_t size, const Rec& r) {
   if (r.calMode) n = add(out, size, n, " mode=cal");
   if (r.hasCal) n = add(out, size, n, " cal=%08X stale=%d", (unsigned)r.calId, r.calStale ? 1 : 0);
   else n = add(out, size, n, " cal=-");
+  if (r.hasIr) {
+    n = add(out, size, n, " ir=");
+    if (!r.nDips) n = add(out, size, n, "-");
+    for (int i = 0; i < r.nDips && i < MAX_DIPS; i++) {
+      n = add(out, size, n, "%s%ld/", i ? "," : "", (long)r.dipNs[i]);
+      n = r.dipLenNs[i] == NO_EDGE ? add(out, size, n, "-") : add(out, size, n, "%ld", (long)r.dipLenNs[i]);
+    }
+  }
   return n;
 }
 
@@ -227,6 +246,26 @@ bool parseRec(const char* line, Rec& rec) {
       }
     }
     else if (!strcmp(key, "stale")) r.calStale = value[0] == '1';
+    else if (!strcmp(key, "ir")) {   // 4b: "-", or rise/length pairs
+      r.hasIr = true;
+      const char* s = value;
+      auto ends = [](char ch) { return ch == 0 || ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'; };
+      if (s[0] == '-' && ends(s[1])) continue;   // on, but no dip
+      while (!ends(*s) && r.nDips < MAX_DIPS) {   // a rise may be negative: before the first edge
+        r.dipNs[r.nDips] = (int32_t)strtol(s, &end, 10);
+        if (end == s || *end != '/') return false;
+        s = end + 1;
+        if (*s == '-') {
+          r.dipLenNs[r.nDips] = NO_EDGE;
+          end = (char*)s + 1;
+        } else {
+          r.dipLenNs[r.nDips] = (int32_t)strtol(s, &end, 10);
+          if (end == s) return false;
+        }
+        r.nDips++;
+        s = *end == ',' ? end + 1 : end;
+      }
+    }
     else if (!strcmp(key, "meas")) {
       for (int i = 0; i < 3; i++) r.measured[i] = value[i] && value[i] != ' ' ? value[i] : '-';
       r.measured[3] = 0;
@@ -264,7 +303,7 @@ uint8_t solveInput(const Cfg& cfg, const Rec& rec, SolveInput& in, uint8_t* shap
 }
 
 static const char* const VERDICT_NAMES[V_COUNT] = {"ok", "few", "together", "nofit", "residual",
-                                                     "lost", "outside"};
+                                                     "lost", "outside", "curtain"};
 
 const char* verdictName(Verdict v) { return v < V_COUNT ? VERDICT_NAMES[v] : "?"; }
 
@@ -279,6 +318,9 @@ bool parseVerdict(const char* name, Verdict* v) {
 
 EventFit solveEvent(const Cfg& cfg, const Rec& rec) {
   EventFit f = {};
+  f.curtain = -1;
+  f.dip = -1;
+  f.dipAfterNs = NAN;
   SolveInput in;
   for (int c = 0; c < MAX_MICS; c++)
     if (cfg.ch[c].mic && ((rec.channels >> c) & 1)) f.mics |= 1 << c;
@@ -286,7 +328,7 @@ EventFit solveEvent(const Cfg& cfg, const Rec& rec) {
   f.used = __builtin_popcount(f.mask);
   f.lost = __builtin_popcount(f.mics) - f.used;
   f.s.dropped = -1;
-  f.verdict = V_FEW;
+  f.verdict = f.acoustic = V_FEW;
   if (f.used < 4) return f;
   int32_t lo = INT32_MAX, hi = INT32_MIN;
   for (int c = 0; c < MAX_MICS; c++)
@@ -304,6 +346,28 @@ EventFit solveEvent(const Cfg& cfg, const Rec& rec) {
   else if (cfg.maxLost >= 0 && f.lost > cfg.maxLost) f.verdict = V_LOST;
   else if (cfg.areaMm > 0 && (fabsf(f.s.x) > cfg.areaMm || fabsf(f.s.y) > cfg.areaMm)) f.verdict = V_OUTSIDE;
   else f.verdict = V_OK;
+  f.acoustic = f.verdict;
+  // The curtain: a dip rising within the window after the emission time. Timed only against
+  // a fit that converged; without the gate the nearest dip is still given (for the log).
+  if (f.s.converged) {
+    const bool gate = cfg.curtainHiNs > 0;
+    const float lo = gate ? cfg.curtainLoNs : CURTAIN_LO_DEFAULT_NS;
+    const float hi = gate ? cfg.curtainHiNs : CURTAIN_HI_DEFAULT_NS;
+    float best = INFINITY;
+    for (int i = 0; i < rec.nDips && i < MAX_DIPS; i++) {
+      const float after = (float)rec.dipNs[i] - f.s.tauNs;
+      const float off = after < lo ? lo - after : after > hi ? after - hi : 0;
+      if (off < best) {   // the first one in the window, else the nearest
+        best = off;
+        f.dip = i;
+        f.dipAfterNs = after;
+      }
+    }
+    if (gate) {
+      f.curtain = best == 0 ? 1 : 0;
+      if (f.verdict == V_OK && !f.curtain) f.verdict = V_CURTAIN;
+    }
+  }
   f.good = f.verdict == V_OK;
   return f;
 }

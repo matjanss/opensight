@@ -20,7 +20,9 @@ bool pulsegenSetPeriod(uint32_t periodTicks);
 
 // One run. Returns how long the start took in ns (start of the first timer to the sync
 // edge that lines both units up); a rise earlier than that would have come too soon.
-uint32_t pulsegenFire();
+// `syncCycle`, if given: the CPU cycle count just after that edge, the run's tick 0 (the
+// simulator times the curtain's dip against it).
+uint32_t pulsegenFire(uint32_t* syncCycle = nullptr);
 
 // Frees the MCPWM units and the sync pin. The line pins are left to the caller.
 void pulsegenDelete();

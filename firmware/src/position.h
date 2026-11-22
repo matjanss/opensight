@@ -11,6 +11,10 @@ struct Position {
   measure::Solution s;
   measure::Verdict  verdict;  // MODEL.md "Validity"
   bool              sent;     // to the app (verdict ok, not calibration mode)
+  // The curtain (4b), judged apart from the acoustic checks.
+  measure::Verdict  acoustic;    // the verdict without the curtain
+  int8_t            curtain;     // 1: a dip in the window, 0: none, -1: not judged
+  float             dipAfterNs;  // the dip in (or nearest to) the window, after the shot; NAN: none
 };
 
 // Loads reslimit and testshot (NVS "measure"). Call once at boot.

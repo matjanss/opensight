@@ -5,6 +5,7 @@
 #include "blast.h"
 #include "calib.h"
 #include "config.h"
+#include "curtain.h"
 #include "esp_cpu.h"
 #include "esp_timer.h"
 #include "shots.h"
@@ -57,6 +58,7 @@ static void makeRec(const EventResult& r, measure::Rec& rec) {
   rec.calMode = calibMode();
   rec.hasPt = simTruth(&rec.ptX, &rec.ptY) || (rec.calMode && calibPoint(&rec.ptX, &rec.ptY));
   rec.hasCal = calibRecord(&rec.calId, &rec.calStale);
+  curtainCollect(samples, rec);   // with the gate on: the dips near the event
 }
 
 // The channels in `mask`, as " CH5 CH7".
@@ -92,6 +94,14 @@ static void verdictText(char* out, size_t size, const measure::EventFit& f, cons
     case measure::V_OUTSIDE:
       snprintf(out, size, "outside the +-%.0f mm area", cfg.areaMm);
       break;
+    case measure::V_CURTAIN:
+      if (f.dip >= 0)
+        snprintf(out, size, "no curtain dip %.0f-%.0f us after the shot (the nearest %+.1f us)",
+                 cfg.curtainLoNs / 1000, cfg.curtainHiNs / 1000, f.dipAfterNs / 1000);
+      else
+        snprintf(out, size, "no curtain dip %.0f-%.0f us after the shot (none within 1.5 ms)",
+                 cfg.curtainLoNs / 1000, cfg.curtainHiNs / 1000);
+      break;
     default: out[0] = 0;
   }
 }
@@ -108,9 +118,13 @@ void positionProcess(const EventResult& r, Position& p, uint32_t nowMs) {
   p.solved = f.solved;
   p.s = f.s;
   p.verdict = f.verdict;
+  p.acoustic = f.acoustic;
+  p.curtain = f.curtain;
+  p.dipAfterNs = f.dipAfterNs;
   if (f.verdict < measure::V_COUNT) nVerdict[f.verdict]++;
+  curtainCount(f);
 
-  char line[420];
+  char line[512];
   char why[160];
   int n;
   if (f.solved) {
@@ -136,6 +150,13 @@ void positionProcess(const EventResult& r, Position& p, uint32_t nowMs) {
     channelList(chs, sizeof chs, f.shapeBad);
     n += snprintf(line + n, sizeof line - n, "; pulse shape out of range on%s (t2 - t1 not within "
                   "0-%.0f ns: left out)", chs, cfg.pulseMaxNs);
+  }
+  // The curtain's dip (4b): in the window, or the nearest; for an acoustic reject too.
+  if (f.dip >= 0) {
+    const int32_t len = rec.dipLenNs[f.dip];
+    n += snprintf(line + n, sizeof line - n, "; curtain dip %+.1f us after the shot", f.dipAfterNs / 1000);
+    if (len != measure::NO_EDGE) n += snprintf(line + n, sizeof line - n, " (%.1f us long)", len / 1000.0f);
+    if (f.curtain == 0) n += snprintf(line + n, sizeof line - n, ", outside the window");
   }
   const char* tag = measure::verdictName(f.verdict);
   if (!f.good) {
@@ -229,6 +250,7 @@ void positionPrintStatus() {
   for (int v = 0; v < measure::V_COUNT; v++)
     Serial.printf(" %s %u", measure::verdictName((measure::Verdict)v), (unsigned)nVerdict[v]);
   Serial.println();
+  curtainPrintStatus();
 }
 
 void positionHelp() {
