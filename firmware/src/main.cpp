@@ -212,7 +212,7 @@ static void handleBleWrites() {
 
 // Serial commands, one per line (see captureCommand).
 static void pollSerial() {
-  static char line[64];
+  static char line[128];
   static size_t len = 0;
   while (Serial.available()) {
     int c = Serial.read();
@@ -228,6 +228,7 @@ static void pollSerial() {
 
 void setup() {
   Serial.setTxBufferSize(4096);   // event lines go out without blocking loop()
+  Serial.setRxBufferSize(1024);   // a pasted block of commands (tools/calibrate.py's)
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);

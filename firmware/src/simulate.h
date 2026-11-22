@@ -11,6 +11,10 @@ bool simActive();
 // solved): checks the capture, t0 and the position against the shot it sent.
 void simRecord(const EventResult& r, const Arrival& a, const Position& p);
 
+// The point of the shot being measured (for the rec line's pt); false if none (not
+// running, raw edges, a blast).
+bool simTruth(float* x, float* y);
+
 // The simulator's mic on channel ch (0-based, CH1 = 0), for `mic sim`; false if ch isn't
 // one of its channels.
 bool simMic(int ch, float* x, float* y, float* h);

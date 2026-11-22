@@ -65,6 +65,14 @@ uint32_t crc32(const char* s) {
   return ~crc;
 }
 
+uint32_t calibrationId(const Cfg& cfg) {
+  char fields[512];
+  formatFields(fields, sizeof fields, cfg);
+  char* policy = strstr(fields, " lim=");
+  if (policy) *policy = 0;
+  return crc32(fields);
+}
+
 uint32_t cfgId(const Cfg& cfg) {
   char fields[512];
   formatFields(fields, sizeof fields, cfg);
@@ -143,6 +151,10 @@ int formatRec(char* out, size_t size, const Rec& r) {
       if (!e) n = add(out, size, n, ",");
     }
   }
+  if (r.hasPt) n = add(out, size, n, " pt=%.4f,%.4f", r.ptX, r.ptY);
+  if (r.calMode) n = add(out, size, n, " mode=cal");
+  if (r.hasCal) n = add(out, size, n, " cal=%08X stale=%d", (unsigned)r.calId, r.calStale ? 1 : 0);
+  else n = add(out, size, n, " cal=-");
   return n;
 }
 
@@ -183,6 +195,22 @@ bool parseRec(const char* line, Rec& rec) {
     else if (!strcmp(key, "RH")) { r.rh = strtof(value, &end); got |= 16; }
     else if (!strcmp(key, "p")) { r.hPa = strtof(value, &end); got |= 32; }
     else if (!strcmp(key, "c")) { r.cMs = strtof(value, &end); got |= 64; }
+    else if (!strcmp(key, "pt")) {
+      r.ptX = strtof(value, &end);
+      if (end == value || *end != ',') return false;
+      const char* y = end + 1;
+      r.ptY = strtof(y, &end);
+      if (end == y) return false;
+      r.hasPt = true;
+    }
+    else if (!strcmp(key, "mode")) r.calMode = !strncmp(value, "cal", 3);
+    else if (!strcmp(key, "cal")) {
+      if (*value != '-') {
+        r.calId = (uint32_t)strtoul(value, &end, 16);
+        r.hasCal = end != value;
+      }
+    }
+    else if (!strcmp(key, "stale")) r.calStale = value[0] == '1';
     else if (!strcmp(key, "meas")) {
       for (int i = 0; i < 3; i++) r.measured[i] = value[i] && value[i] != ' ' ? value[i] : '-';
       r.measured[3] = 0;

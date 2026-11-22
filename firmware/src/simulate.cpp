@@ -74,7 +74,13 @@ static double trueK(int i) { return thrL[i] / (thrH[i] - thrL[i]); }
 
 // ---- A run ----
 
-enum Mode : uint8_t { M_RAW, M_POINT, M_RANDOM };
+enum Mode : uint8_t { M_RAW, M_POINT, M_RANDOM, M_CAL };
+
+// `sim cal <n>`: n sparks at each point of a 4 x 4 template grid, at random loudness.
+static const float CAL_GRID_MM[4] = {-75, -25, 25, 75};
+static const int   CAL_POINTS = 16;
+static uint32_t    calPerPoint = 10;
+static double      shotAmp = 1;   // this shot's loudness, times simAmp
 
 struct Shot {
   float    x, y;
@@ -127,6 +133,14 @@ static struct {
 
 bool simActive() { return run.active; }
 
+bool simTruth(float* x, float* y) {
+  if (!run.active || run.mode == M_RAW || !(run.pending1 || run.pending2) || isnan(run.shot.x))
+    return false;
+  *x = run.shot.x;
+  *y = run.shot.y;
+  return true;
+}
+
 bool simMic(int ch, float* x, float* y, float* h) {
   if (ch < F || ch >= F + N) return false;
   if (!micsSet) defaultMics();
@@ -160,6 +174,7 @@ static const char* positionMismatch(Fault fl) {
       return "the firmware's k is not the simulator's (L / (H - L) per channel: `sim`, `k`)";
   }
   if (!isnan(simTempC)) return "`sim temp` gives the simulator other air than the firmware's";
+  if (calibMode()) return "calibration mode (nothing is sent to the app)";
   if (fl == F_BLAST) return nullptr;
   if (sineModel) return "the sine model (t0's formula is exact for the linear one only)";
   if (fl == F_DOUBLE) return "the double-shot fault";
@@ -217,7 +232,7 @@ static bool makeShot(float x, float y, Shot& s) {
       if (d < 1) d = 1;
     }
     s.geo[i] = d / c;
-    double a = blast ? simAmp : simAmp * 100.0 / d;
+    double a = (blast ? simAmp : simAmp * 100.0 / d) * shotAmp;
     double tl, th;
     bool lOn = true, hOn = true;
     if (sineModel) {
@@ -300,7 +315,10 @@ static void startCommon(Mode m, uint32_t count) {
 
   // Check the first shot fits before setting anything up.
   Shot probe;
-  bool fits = rawMode ? makeRawShot(probe) : makeShot(m == M_POINT ? px : 0, m == M_POINT ? py : 0, probe);
+  shotAmp = 1;
+  bool fits = rawMode ? makeRawShot(probe)
+            : m == M_CAL ? makeShot(CAL_GRID_MM[0], CAL_GRID_MM[0], probe)
+                         : makeShot(m == M_POINT ? px : 0, m == M_POINT ? py : 0, probe);
   if (!fits) {
     Serial.printf("sim: the shot doesn't fit in the event window (%u us after the first edge: "
                   "the mic span setting)\n", (unsigned)captureWindowUs());
@@ -342,7 +360,9 @@ static void startCommon(Mode m, uint32_t count) {
   const Air sa = simAir();
   Serial.printf("sim: %u shots %s on CH%d-CH%d (GPIO %s); %s model, amp %.0f, air %.1f °C "
                 "(%s, %.2f m/s); firmware k up to %.4f; fault %s", (unsigned)count,
-                m == M_RANDOM ? "at random points on the card" : "at one point", F + 1, F + N,
+                m == M_RANDOM ? "at random points on the card"
+                : m == M_CAL  ? "for calibration (4 x 4 grid at +-25 and +-75 mm, loudness x0.5-2)"
+                              : "at one point", F + 1, F + N,
                 pinText, sineModel ? "sine" : "linear", simAmp, sa.tC,
                 isnan(simTempC) ? "the firmware's" : "sim temp", sa.c, k, FAULT_TEXT[run.fault]);
   if (run.fault == F_DOUBLE) Serial.printf(" (second shot %u us later)", (unsigned)run.doubleWaitUs);
@@ -516,8 +536,11 @@ void simService(uint32_t now) {
   if (!captureIdle()) return;   // wait for the previous event to finish
 
   Shot& s = run.shot;
+  shotAmp = run.mode == M_CAL ? exp(uniform(log(0.5), log(2.0))) : 1;
+  const uint32_t pt = run.sent / calPerPoint % CAL_POINTS;
   bool ok = run.mode == M_RAW ? makeRawShot(s)
           : run.mode == M_POINT ? makeShot(run.px, run.py, s)
+          : run.mode == M_CAL ? makeShot(CAL_GRID_MM[pt % 4], CAL_GRID_MM[pt / 4], s)
           : makeShot(uniform(-SIM_CARD_MM, SIM_CARD_MM), uniform(-SIM_CARD_MM, SIM_CARD_MM), s);
   if (!ok) {
     run.skipped++;
@@ -682,6 +705,9 @@ void simHelp() {
                  "                       double <us> | blast <m> <mm off the axis>\n"
                  "  sim model linear|sine, sim amp <n>, sim temp <C>|air, sim offset <ch> <ns>,\n"
                  "  sim thr <ch> <L> <H>  a channel's trip levels (default 1 4: k = L / (H - L))\n"
+                 "  sim cal truth|reset  the simulator's mics, delays and k set off from the\n"
+                 "                       nominal (as before a calibration) | back to nominal\n"
+                 "  sim cal <n>          n sparks at each of 16 grid points (`cal on` first)\n"
                  "  sim mic <ch> <x> <y> [h]  the simulated mics (default D1/D2, h 10.5 mm); `sim`\n"
                  "                       shows them; `mic sim` gives the firmware the same; sim stop");
 }
@@ -697,7 +723,7 @@ static void printSettings() {
   else if (fault != F_NONE) Serial.printf(" CH%d", F + 1 + faultCh);
   Serial.println();
   for (int i = 0; i < N; i++)
-    Serial.printf("sim: CH%d mic at (%.1f, %.1f) mm, h %.1f mm, own delay %.0f ns, trips at %g/%g "
+    Serial.printf("sim: CH%d mic at (%.3f, %.3f) mm, h %.1f mm, own delay %.1f ns, trips at %g/%g "
                   "(k %.4f)\n", F + 1 + i, micX[i], micY[i], micH[i], trueOffsetNs[i], thrL[i],
                   thrH[i], trueK(i));
 }
@@ -730,6 +756,20 @@ bool simCommand(const char* cmd, const char* line) {
     unsigned long n = 100;
     sscanf(line, "%*s %*s %lu", &n);
     startCommon(M_RANDOM, n);
+    return true;
+  }
+  if (!strcmp(sub, "cal") && word[0] >= '0' && word[0] <= '9') {
+    unsigned long n = strtoul(word, nullptr, 10);
+    if (!calibMode()) {
+      Serial.println("sim cal: `cal on` first (the sparks then carry their point and aren't sent to the app)");
+      return true;
+    }
+    if (n < 1 || n * CAL_POINTS > (unsigned long)MAX_COUNT) {
+      Serial.printf("sim cal <1..%d> sparks per point\n", MAX_COUNT / CAL_POINTS);
+      return true;
+    }
+    if (!run.active) calPerPoint = n;
+    startCommon(M_CAL, n * CAL_POINTS);
     return true;
   }
   if (!strcmp(sub, "raw")) {
@@ -782,6 +822,24 @@ bool simCommand(const char* cmd, const char* line) {
     } else {
       Serial.printf("sim fault none | late|early|missing|honly <ch> (ch %d..%d) | "
                     "double <100..100000 us> | blast <1..100 m> <0..10000 mm>\n", F + 1, F + N);
+      return true;
+    }
+  } else if (!strcmp(sub, "cal")) {
+    if (!strcmp(word, "truth")) {
+      // The simulator's truth set off from the nominal values, as a frame is before its
+      // calibration: mics up to 1.5 mm off, own delays up to +-500 ns, k 0.25-0.6.
+      for (int i = 0; i < N; i++) {
+        micX[i] = MIC_LAYOUT_D2[i % 6][0] + uniform(-1.5, 1.5);
+        micY[i] = MIC_LAYOUT_D2[i % 6][1] + uniform(-1.5, 1.5);
+        trueOffsetNs[i] = uniform(-500, 500);
+        thrL[i] = 1;
+        thrH[i] = 1 + 1 / uniform(0.25, 0.6);
+      }
+    } else if (!strcmp(word, "reset")) {
+      defaultMics();
+      for (int i = 0; i < N; i++) trueOffsetNs[i] = 0;
+    } else {
+      Serial.println("sim cal truth | reset | <n sparks per point> (after `cal on`)");
       return true;
     }
   } else if (!strcmp(sub, "thr")) {

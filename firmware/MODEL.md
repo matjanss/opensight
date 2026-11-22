@@ -160,6 +160,9 @@ cfg id=0262A982 CH1=-105,-105,10.5,0.333333343,0,50 ... CH7=- CH8=- lim=1500 dro
 - Floats with 9 significant digits: they read back to the same bits.
 - `id`: the CRC-32 (IEEE, as zlib's) of the text after `id=XXXXXXXX `. A line whose id
   doesn't match its text is rejected.
+- The **calibration id** (`measure::calibrationId`, the `cal` record's) is the CRC-32 of
+  the channel fields alone, up to ` lim=`: changing the policy doesn't make a calibration
+  stale. `tools/calibrate.py` computes it the same way.
 
 **`rec`**, one event:
 
@@ -176,6 +179,9 @@ rec n=2161 t=876.1903407 cfg=0262A982 T=18.00 RH=50.0 p=1013.25 meas=--- c=342.7
 | `meas` | `T`, `R`, `P` where measured, `-` where assumed |
 | `c` | The speed of sound used, m/s, 9 digits (the solver's c, not computed again) |
 | `CHn=t1,t2` | Each channel fitted in the event: OUT_L's and OUT_H's first rise, ns from the event's first edge, `-` for none |
+| `pt=x,y` | The true point, mm, if known: calibration mode's template point (`cal pt`), or the simulator's shot. Optional |
+| `mode=cal` | Made in calibration mode (not sent to the app). Optional |
+| `cal`, `stale` | The calibration record's id and whether it is stale (`cal=1A2B3C4D stale=0`), or `cal=-` for none |
 
 The solver's input: t0 = arrivalT0(t1, t2, k, offset) per channel, in float, for every
 channel that has a mic and both edges; c from `c`. `measure::solveEvent` then fits them if

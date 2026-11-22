@@ -26,7 +26,35 @@ static const uint8_t STORED_VERSION = 1;
 
 static void key(char* k, int ch) { snprintf(k, 8, "ch%d", ch + 1); }
 
+// The calibration record (PLAN D5): which values tools/calibrate.py fitted, when, from
+// what. Any change to a calibrated value after it marks it stale, until the next `cal id`.
+struct CalRecord {
+  uint8_t  version;   // CALREC_VERSION
+  uint8_t  stale;
+  uint16_t points, sparks;
+  uint32_t id;        // measure::calibrationId of the values it fitted
+  uint32_t date;      // yyyymmdd, from the PC (the target has no clock)
+  float    resNs;     // the fit's rms residual
+};
+static const uint8_t CALREC_VERSION = 1;
+static CalRecord rec = {};
+static bool haveRec = false;
+static bool started = false;   // past calibBegin: a save is a change
+static bool calMode = false;
+static bool havePt = false;
+static float ptX = 0, ptY = 0;
+
+static void saveRec() { prefs.putBytes("calrec", &rec, sizeof rec); }
+
+static void markStale() {
+  if (!started || !haveRec || rec.stale) return;
+  rec.stale = 1;
+  saveRec();
+  Serial.println("cal: the calibration record is stale now (a calibrated value changed)");
+}
+
 static void save(int ch) {
+  markStale();
   const measure::ChannelCfg& c = cfg.ch[ch];
   Stored s = {STORED_VERSION, c.mic, c.x, c.y, c.h, c.k, c.offsetNs, c.sigmaNs};
   char k[8];
@@ -90,6 +118,8 @@ void calibBegin() {
   }
   if (!(cfg.resLimitNs > 0 && cfg.resLimitNs <= RES_LIMIT_MAX_NS))
     cfg.resLimitNs = measure::RES_LIMIT_DEFAULT_NS;
+  haveRec = prefs.isKey("calrec") && prefs.getBytes("calrec", &rec, sizeof rec) == sizeof rec &&
+            rec.version == CALREC_VERSION;
   if (!any) {
     // First boot with 3c: carry k and the offsets over from "measure" (step 2), once.
     Preferences old;
@@ -117,9 +147,38 @@ void calibBegin() {
                   moved ? ", k and the offsets carried over from step 2" : "");
   }
   changed();
+  started = true;
 }
 
 const measure::Cfg& calibCfg() { return cfg; }
+
+bool calibMode() { return calMode; }
+bool calibPoint(float* x, float* y) {
+  *x = ptX;
+  *y = ptY;
+  return havePt;
+}
+bool calibRecord(uint32_t* id, bool* stale) {
+  *id = rec.id;
+  *stale = rec.stale || rec.id != measure::calibrationId(cfg);
+  return haveRec;
+}
+
+void calibPrintStatus() {
+  uint32_t id;
+  bool stale;
+  if (!calibRecord(&id, &stale)) {
+    Serial.printf("cal: no calibration record (nominal values); values id %08X", (unsigned)measure::calibrationId(cfg));
+  } else {
+    Serial.printf("cal: record %08X of %04u-%02u-%02u, %u points, %u sparks, residual %.0f ns: %s",
+                  (unsigned)id, (unsigned)(rec.date / 10000), (unsigned)(rec.date / 100 % 100),
+                  (unsigned)(rec.date % 100), rec.points, rec.sparks, rec.resNs,
+                  stale ? "STALE (a mic, h, k, offset or sigma changed since)" : "in use");
+  }
+  Serial.printf("; calibration mode %s", calMode ? "ON (nothing goes to the app)" : "off");
+  if (havePt) Serial.printf(", template point (%.3f, %.3f) mm", ptX, ptY);
+  Serial.println();
+}
 uint32_t calibId() { return cfgIdNow; }
 
 void calibPrintCfg() {
@@ -152,7 +211,16 @@ void calibHelp() {
                  "  reslimit [ns]        a shot goes to the app if its fit's rms residual is\n"
                  "                       within this (stored, default 1500)\n"
                  "  dropone on|off       over the limit, the best fit with one channel left\n"
-                 "                       out (stored, default on)");
+                 "                       out (stored, default on)\n"
+                 "  sigma [ch] [ns]      a channel's timing error, 1 sigma: the fit's weight\n"
+                 "                       (stored, default 50; `sigma` lists them)\n"
+                 "  cal                  the calibration record and calibration mode\n"
+                 "  cal on|off           calibration mode: events are marked with the template\n"
+                 "                       point and not sent to the app\n"
+                 "  cal pt <x> <y> | -   the template point the next sparks are at (mm)\n"
+                 "  cal ch <ch> <x> <y> <h> <k> <offset> <sigma>  a channel's values at once\n"
+                 "  cal id <id> <yyyymmdd> <points> <sparks> <res ns>  store the record\n"
+                 "                       (tools/calibrate.py prints it); cal clear");
 }
 
 // The number of space-separated words in line.
@@ -234,7 +302,9 @@ static bool micCommand(const char* line) {
     save(ch - 1);
   }
   printMics();
-  positionBlastCheck();
+  // The blast check takes about a second with 6 mics: only for a whole layout, or asked for.
+  if (!sub[0] || !strcmp(sub, "default") || !strcmp(sub, "sim")) positionBlastCheck();
+  else Serial.println("mic: `mic` runs the blast check");
   changed();
   return true;
 }
@@ -332,7 +402,95 @@ static bool policyCommand(const char* cmd, const char* line) {
   return true;
 }
 
+static bool sigmaCommand(const char* line) {
+  int ch = 0;
+  float v = NAN;
+  const int w = words(line);   // sigma | sigma <ns> | sigma <ch> <ns>
+  if (w == 2 && sscanf(line, "%*s %f", &v) != 1) v = NAN;
+  if (w == 3 && (sscanf(line, "%*s %d %f", &ch, &v) != 2 || !channelArg(ch))) return true;
+  if (w > 1) {
+    if (w > 3 || !(v >= 1 && v <= 100000)) { Serial.println("sigma [ch] <1..100000 ns>"); return true; }
+    for (int c = 0; c < CHANNELS; c++)
+      if (!ch || c == ch - 1) {
+        cfg.ch[c].sigmaNs = v;
+        save(c);
+      }
+  }
+  char out[200];
+  int n = snprintf(out, sizeof out, "sigma ns:");
+  for (int c = 0; c < CHANNELS; c++)
+    n += snprintf(out + n, sizeof out - n, "  CH%d %.1f", c + 1, cfg.ch[c].sigmaNs);
+  Serial.println(out);
+  if (w > 1) changed();
+  return true;
+}
+
+static bool calCommand(const char* line) {
+  char sub[8] = "";
+  sscanf(line, "%*s %7s", sub);
+  if (!strcmp(sub, "on") || !strcmp(sub, "off")) {
+    calMode = !strcmp(sub, "on");
+  } else if (!strcmp(sub, "pt")) {
+    float x, y;
+    char dash[4] = "";
+    if (sscanf(line, "%*s %*s %f %f", &x, &y) == 2 && fabsf(x) <= MIC_MAX_MM && fabsf(y) <= MIC_MAX_MM) {
+      ptX = x;
+      ptY = y;
+      havePt = true;
+    } else if (sscanf(line, "%*s %*s %3s", dash) == 1 && !strcmp(dash, "-")) {
+      havePt = false;
+    } else {
+      Serial.println("cal pt <x> <y> (mm), or `cal pt -`");
+      return true;
+    }
+  } else if (!strcmp(sub, "id")) {
+    unsigned long id, date, points, sparks;
+    float res;
+    if (sscanf(line, "%*s %*s %lx %lu %lu %lu %f", &id, &date, &points, &sparks, &res) != 5) {
+      Serial.println("cal id <id> <yyyymmdd> <points> <sparks> <res ns> (as tools/calibrate.py prints)");
+      return true;
+    }
+    const uint32_t now = measure::calibrationId(cfg);
+    if ((uint32_t)id != now) {
+      Serial.printf("cal: the board's values (id %08X) are not the fit's (%08X): send the fit's "
+                    "`cal ch` lines again, then this one\n", (unsigned)now, (unsigned)id);
+      return true;
+    }
+    rec = {CALREC_VERSION, 0, (uint16_t)points, (uint16_t)sparks, now, (uint32_t)date, res};
+    haveRec = true;
+    saveRec();
+  } else if (!strcmp(sub, "ch")) {
+    // One channel's calibrated values in one line, as tools/calibrate.py prints them.
+    int ch;
+    float x, y, h, k, off, sig;
+    if (sscanf(line, "%*s %*s %d %f %f %f %f %f %f", &ch, &x, &y, &h, &k, &off, &sig) != 7 ||
+        ch < 1 || ch > CHANNELS || !(fabsf(x) <= MIC_MAX_MM && fabsf(y) <= MIC_MAX_MM) ||
+        !(h >= 0 && h <= H_MAX_MM) || !(k >= 0 && k <= K_MAX) || !(fabsf(off) <= OFFSET_MAX_NS) ||
+        !(sig >= 1 && sig <= 100000)) {
+      Serial.println("cal ch <ch> <x> <y> <h> <k> <offset ns> <sigma ns>");
+      return true;
+    }
+    cfg.ch[ch - 1] = {true, x, y, h, k, off, sig};
+    save(ch - 1);
+    Serial.printf("cal: CH%d (%.4f, %.4f) mm, h %.2f mm, k %.5f, offset %.2f ns, sigma %.1f ns\n", ch,
+                  x, y, h, k, off, sig);
+    changed();
+    return true;
+  } else if (!strcmp(sub, "clear")) {
+    if (prefs.isKey("calrec")) prefs.remove("calrec");
+    haveRec = false;
+    rec = {};
+  } else if (sub[0]) {
+    Serial.println("cal [on|off | pt <x> <y> | ch ... | id ... | clear]");
+    return true;
+  }
+  calibPrintStatus();
+  return true;
+}
+
 bool calibCommand(const char* cmd, const char* line) {
+  if (!strcmp(cmd, "sigma")) return sigmaCommand(line);
+  if (!strcmp(cmd, "cal")) return calCommand(line);
   if (!strcmp(cmd, "reslimit") || !strcmp(cmd, "dropone")) return policyCommand(cmd, line);
   if (!strcmp(cmd, "mic")) return micCommand(line);
   if (!strcmp(cmd, "k")) return kCommand(line);

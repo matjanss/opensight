@@ -84,7 +84,7 @@ so a problem shows up in the step that caused it.
 |---|---|---|
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
-| 3 | Solver and calibration | in progress on `step3-solver`: 3a-1, 3a-2 and 3a-5 pass; 3a-3/3a-4 (DS18B20, BME280) later, with the parts; 3b passes (PC); 3c passes; 3d passes; 3e next (a first try is archived as the tag `archive/step3-first-try`) |
+| 3 | Solver and calibration | **simulated tests pass** (bare NodeMCU, 2026-11-22; merged to `main`): 3a-1, 3a-2, 3a-5, 3b (PC), 3c, 3d, 3e. Waiting for the parts: 3a-3 and 3a-4 (DS18B20, BME280). With the boards: the same solver and calibration on real sensors (PLAN phase 1) |
 | 4 | Validity checks | planned |
 | 5 | Protocol and app | planned |
 | 6 | Wi-Fi and MQTT | planned |
@@ -541,37 +541,72 @@ Afterwards `sim fault none` and `mic default`.
 
 #### 3e. Calibration mode and the fit
 
-Build:
-- **Calibration mode** (`cal on|off`, `cal pt <x> <y>`: the template point the next sparks
-  are at): every event prints a `cal` line with the point, t1 and t2 per channel and the
-  air, and is not sent to the app.
-- **`tools/calibrate.py`** (the reference fit, from the archive, extended): mic x and y,
-  offset and k per channel over all points, h fixed; robust first fit, outliers against a
-  MAD scale, then a plain fit. Offsets have mean 0 (a shared delay is the emission time).
-  It prints the fit's residual, the error per point, each parameter's uncertainty, and the
-  serial commands that set the result, ending with `cal id ...`.
-- **The calibration record** (PLAN D5) in NVS `"cal"`: the values above, the ID (a hash of
-  them), the date, the points and sparks used and the residual. `cal` shows it. Any later
-  change to a mic, h, k or an offset marks it **stale** (shown by `cal`, `stat` and every
-  `evt` line).
-- **`sim cal <n>`:** n sparks at each point of a 4 × 4 template grid, at random loudness,
-  with the simulator's truth set off from the firmware's mic table (mics up to 1.5 mm off,
-  offsets up to ±500 ns, k 0.25-0.6 per channel), printed as for a real calibration.
+Build (done, on `step3-solver`):
+- **Calibration mode:** `cal on|off` (not stored), `cal pt <x> <y>` (the template point the
+  next sparks are at; `cal pt -` clears it). In calibration mode every event's `rec` line
+  carries `mode=cal` and its point (`pt=x,y`), and nothing is sent to the app. During a
+  `sim` run the `rec` line carries the simulator's true point anyway.
+- **`tools/calibrate.py <log>`** (Python, numpy and scipy): reads the `cfg` and the `rec`
+  lines with a `pt`, and fits per channel the mic x and y, k and the offset over all
+  sparks, h fixed (PLAN D3), each spark's emission time free. A robust first fit (soft
+  L1), sparks beyond 5 MADs left out, then the final fit. The offsets have mean 0 (a delay
+  shared by every channel is the emission time). sigma per channel = its rms residual. It
+  prints the fit's residual, each value with its uncertainty and its change, the position
+  error per point before and after (through the solver), and the lines to send: one
+  `cal ch <ch> <x> <y> <h> <k> <offset> <sigma>` per channel, then `cal id <id> <date>
+  <points> <sparks> <residual>`. `--selftest` simulates a calibration as the simulator
+  makes one and checks the fit against the truth.
+- **The fit models the edge noise:** both t1 and t2 carry the sampling's noise, so
+  t0 = (1 + k) t1 − k t2 carries √((1 + k)² + k²) times one edge's. Each channel's residual
+  is divided by that (Deming regression, the maximum-likelihood fit). Without it the noise
+  in t2 − t1 pulled every k low, by 0.02-0.05 in the self-test, and the offsets with it,
+  though the positions still came out right (k and the offset trade off).
+- **The calibration record** (PLAN D5) in NVS `"cal"`: the id of the values it fitted
+  (`measure::calibrationId`: the CRC-32 of the `cfg` line's channel fields, without the
+  policy), the date (from the PC; the target has no clock), points, sparks and residual.
+  `cal id` stores it only if the board's values have that id. `cal` and `stat` show it.
+  Any later change to a mic, h, k, offset or sigma marks it **stale**, until the next
+  `cal id`, even if the value is changed back (a record is only trusted as written).
+  Every `rec` line carries `cal=<id> stale=0|1`, or `cal=-`. `cal clear` removes it.
+- **`sigma [ch] [ns]`:** a channel's timing error (the solver's weight), stored.
+- **The simulator:** `sim cal truth` sets its world off from the nominal values, as a frame
+  is before its calibration: mics up to 1.5 mm off, own delays up to ±500 ns, k 0.25-0.6
+  per channel (trip levels 1 and 1 + 1/k); `sim cal reset` goes back. `sim cal <n>` (in
+  calibration mode): n sparks at each point of a 4 × 4 grid (±25 and ±75 mm), each at a
+  random loudness (×0.5-2: that tells k from the distance).
+- **`tools/replay --fit-c`:** one factor on every event's speed of sound, fitted for the
+  least total residual, and what air temperature that means.
+- The blast check runs on `mic`, `mic default` and `mic sim` only (it takes about a
+  second with 6 mics), so a pasted block of commands isn't lost; the serial input buffer is
+  1024 bytes and a line 127 characters.
 
-Bench test, bare NodeMCU, as 3d:
-- **3e-1, uncalibrated.** `mic sim` (the nominal layout), then `sim cal truth` (sets the
-  simulator's truth off from it, as above), `sim random 100`: errors around 0.5 mm, up to
-  1-2 mm.
-- **3e-2, calibrate.** `cal on`, `sim cal 10`, `cal off`, logged to a file;
-  `python3 firmware/tools/calibrate.py <log>`: residual about 60 ns, mics within
-  0.05 mm, offsets within 10 ns, k within 0.02 of the simulator's truth (`sim mic` shows
-  it). Paste the printed commands.
-- **3e-3, verify.** `sim random 200`: error back to 3d-2's (rms about 0.015 mm); `cal`
-  shows the record, not stale. `mic h 4 21.5`: `cal` says stale; `mic h 4 10.5` restores
-  the value but it stays stale until a new `cal id` (a record is only trusted as
-  written).
-- **3e-4, temperature on the PC.** `sim temp` 2 °C above the firmware's, `sim random 200`, logged; replay
-  with the speed of sound fitted over all events: it recovers the 2 °C (to about 0.1 °C).
+Expected values from `calibrate.py --selftest` (6 seeds, 10 sparks per point): residual
+about 38 ns; mics within 0.03 mm of the truth; k within 0.03 and offsets within 90 ns, each
+within about 2.5 of its reported uncertainty; the position error over the 16 points
+0.51 mm rms before, 0.013 mm after (as with the exact values, 3d-2). With 40 sparks per
+point the mics come within 0.01 mm and k within 0.01. On a fake log 2 °C off, `--fit-c`
+found +1.96 °C.
+
+Bench test, bare NodeMCU, as 3d (`mic sim`, `sim fault none`, `k 0.33333`):
+- **3e-1, uncalibrated.** `sim cal truth` (`sim` lists the truth), `sim random 100`: "for
+  information only" (the mics differ); error about 0.5-1.5 mm rms (it depends on the
+  truth drawn; 1.3 mm on the bench).
+- **3e-2, calibrate.** Logged to a file: `cal on`, `sim cal 10` (160 sparks, about 25 s),
+  `cal off`. `python3 firmware/tools/calibrate.py <log>` (it takes the newest calibration
+  run in the log, calibration mode's sparks only): residual about 40 ns, the
+  position error per point from about 0.5 mm down to about 0.013 mm rms. Compare its
+  values with `sim` (the truth): mics within about 0.03 mm, k within about 0.03, offsets
+  within about 90 ns of the truth minus its mean. Paste the 7 printed lines into the
+  console: `cal` says the record is in use.
+- **3e-3, verify.** `sim random 200`: still "for information only" (the fitted values
+  are close to the truth, not equal), error about 0.013-0.015 mm rms, worst under 0.1 mm,
+  as 3d-2. `mic h 4 21.5`: "the calibration record is stale now", `cal` says STALE and the
+  `rec` lines `stale=1`; `mic h 4 10.5`: still stale, until the 7 lines are sent again.
+- **3e-4, temperature on the PC.** `sim temp` 2 °C above the firmware's air (`sim temp 20`
+  without a sensor), `sim random 200`, logged. `tools/replay --fit-c <log>`: "+2.0 °C",
+  to about 0.1 °C. `sim temp air`.
+
+Afterwards `sim cal reset`, `mic default`, `cal clear`.
 
 The exact commands of 3d and 3e may still change as they are built; this file is updated
 with them.
@@ -622,6 +657,8 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-22 | 3e | 3e-1 to 3e-4, bare NodeMCU, logged | **PASS (user report; numbers from the logs).** 3e-1 after `sim cal truth`: error 1.30 mm rms, worst 1.74 mm, residual mean 882 ns (more than the 0.5 mm expected: this truth's k were 0.35-0.49 against the firmware's 1/3). 3e-2: 160 sparks; `calibrate.py`: residual 39-40 ns, the error over the 16 points 1.0 → 0.014 mm rms; against the truth k within 0.024 and the offsets within 61 ns (mean removed). The record was stored ("in use"). 3e-3: `sim random 200` 0.0140 mm rms, worst 0.0612 mm, residual mean 29 ns (3d-2: 0.0125); `mic h` made the record stale, and it stayed stale after the value was set back. 3e-4 (`sim temp 20`): error 0.365 mm rms; `replay --fit-c`: +1.99 °C, and with it the error against the true points 0.0152 mm rms. **Found:** the stored record said 116 points and 260 sparks: `calibrate.py` took every event with a `pt`, including 3e-1's 100 random simulated shots (right here, as the truth hadn't changed, but a log with an earlier truth would have spoiled the fit; run on the whole log afterwards, it picked the post-calibration runs, the wrong-temperature one included: 575 ns). It now uses calibration mode's sparks only (`--any-pt` for the simulator's other shots), from the newest session; on the same log: 160 sparks, 16 points, the same values within the noise. `sim` lists the simulator's mics to 0.001 mm now (0.1 before, too coarse to compare). Step 3's simulated tests are done. |
+| 2026-11-22 | 3e | Built; PC checks | Calibration mode (`cal on`, `cal pt`), `pt`/`mode`/`cal`/`stale` in the `rec` line, the calibration record (`cal ch`, `cal id`, stale on any change), `sigma`, `sim cal truth|reset|<n>`, `tools/calibrate.py`, `replay --fit-c`. **Found on the way:** the fit with plain residuals pulled every k low by 0.02-0.05 and the offsets with it (noise in t2 − t1, errors in variables); dividing each residual by √((1 + k)² + k²) fixes it (Deming), with the plain robust fit first and k bounded (the scaled cost has a false minimum at k → ∞; one seed ran away to k = 656). `calibrate.py --selftest`, 6 seeds: residual 37-40 ns, mics within 0.03 mm, k within 0.03 (≤ 1.8 sd), offsets within 85 ns (≤ 2.4 sd), position 0.51 → 0.013 mm rms. The `cal id` the PC prints matches the board's (the same lines read with `sscanf`). `--fit-c` on a log 2 °C off: +1.96 °C. 14 native tests pass; the firmware builds. Run 3e-1 to 3e-4. |
 | 2026-11-22 | 3d | 3d-0 to 3d-5, bare NodeMCU | **PASS (user report; numbers from the log).** 3d-1 `sim raw 0 0 0 0 0 0 200`: PASS, 0 late starts. 3d-2 `mic sim`: blast check 0 scored everywhere (smallest 34.3, 34.7, 13.5, 37.5, 37.3, 22.1, 35.4 µs, as on the PC); `sim random 500`: error rms 0.0125 mm, worst 0.0516 mm, residual mean 27 ns, worst 52 ns, none dropped (PC: 0.013, 0.06, 26, 60). 3d-3 late CH5: 100 of 100 sent with CH5 dropped, rms 0.0154 mm, worst 0.0433 mm; early CH8: 100 of 100 with CH8 dropped, rms 0.0154 mm, worst 0.0436 mm. `stat` after them: 477 µs per event mean, 2.4 ms longest (drop-one's 7 fits). 3d-4: blasts 10 m/0, 10 m/500 mm, 25 m/2 m: 0 of 20 sent each. The square: the four corners plus both middles score 0 with every set (5 or 6 mics, never only the square); with CH7 cleared (the square plus the right middle) the check flags "without CH8": 484, since dropping the right middle leaves the square; with CH7 and CH8 cleared, 484 of 624, and 20 of 20 frontal blasts sent at (0, 0). The blast check takes 1.0 s with 6 mics (7 sets). 3d-5 `sim thr 4 1 3`: rms 0.016-0.017 mm, residual mean 41-42 ns, and a bias: mean (−0.007, +0.007) mm; `k 4 0.5`: PASS, rms 0.0121 mm, mean within 0.001 mm. A wrong k shows more as a bias than as spread. |
 | 2026-11-22 | 3d | Built; PC checks | Six simulated channels on CH3-CH8 with the D1/D2 mics, `sim thr`, the blast and early faults, drop-one in the solve (`measure::solveEvent`, on the board and in the replay), `reslimit` and `dropone` in NVS "cal" and in the `cfg` line, the simulator's drop and blast checks. On the PC: 14 tests pass (new: solveEvent drops a 24 µs late channel and keeps the shot within 0.05 mm; with drop-one off it isn't sent). A PC simulation of the bench tests gives the expected values in 3d. A 3c log still replays to the board's positions (a `cfg` without `lim=`/`drop=` reads as 1500 ns, no drop-one). The firmware builds. Run 3d-0 to 3d-5. |
 | 2026-11-21 | 3a | 3a-5, no sensor: the search stops | **PASS (user report).** `temp` says it stopped looking after 3 tries; `temp scan` looks 3 more times. |

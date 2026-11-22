@@ -220,6 +220,10 @@ plan adds:
   because t2 − t1 then grows with distance like the travel time itself. Real sparks vary.
   The fit reports k's uncertainty per channel, and may pull uncertain ones towards the
   common value.
+- **The fit models the edge noise** (MEASUREMENT 3e): t1 and t2 are both noisy, so a plain
+  least-squares fit of t0 = t1 − k (t2 − t1) biases k low (0.02-0.05 in the simulation).
+  Each channel's residual is scaled by √((1 + k)² + k²) (Deming regression). The Rust fit
+  must do the same.
 
 ### D6 Firmware structure for production
 
@@ -368,7 +372,11 @@ starts, as they did so far.
 
 ### Phase 0: before the boards (PC and a bare NodeMCU)
 
-This is MEASUREMENT step 3, sub-steps 3a–3e, on the branch `step3-solver`.
+This is MEASUREMENT step 3, sub-steps 3a–3e. **Done 2026-11-22** on a bare NodeMCU, all
+simulated (the bench results are in MEASUREMENT.md): 6 mics 0.0125 mm rms; a late or early
+channel dropped in 100 of 100 shots; 0 blasts scored with D1/D2, 484 of 624 with the square;
+calibration from 160 simulated sparks takes the error from 1.0 to 0.014 mm rms; a 2 °C error
+recovered as +1.99 °C. Left for the parts: the DS18B20 and BME280 tests (3a-3, 3a-4).
 
 1. The BME280 or DS18B20 on J5, humidity in the speed of sound, the sync loopback on
    GPIO 12 (3a).
@@ -376,7 +384,7 @@ This is MEASUREMENT step 3, sub-steps 3a–3e, on the branch `step3-solver`.
    split out (D6, D12), the Python reference and shared test vectors, the `native` tests
    (3b).
 3. The solver on the board: `mic` with the D1/D2 layout and h per mic, k per channel,
-   `evt` lines, solved shots to the app, replay on the PC (3c).
+   `cfg` and `rec` lines, solved shots to the app, replay on the PC (3c).
 4. Simulator (3d):
    - six channels (CH3–CH8: those pins can drive, and the pulse generator has exactly 6
      operators);

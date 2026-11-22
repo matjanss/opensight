@@ -8,6 +8,7 @@
 #include "esp_cpu.h"
 #include "esp_timer.h"
 #include "shots.h"
+#include "simulate.h"
 
 static Preferences prefs;
 static bool testShot = true;
@@ -51,6 +52,10 @@ static void makeRec(const EventResult& r, measure::Rec& rec) {
     if (L.rise >= 0) rec.t1[c] = (L.rise - ref) * (int32_t)NS_PER_SAMPLE;
     if (H.rise >= 0) rec.t2[c] = (H.rise - ref) * (int32_t)NS_PER_SAMPLE;
   }
+  // The true point, if known: the simulator's shot, else calibration mode's template point.
+  rec.calMode = calibMode();
+  rec.hasPt = simTruth(&rec.ptX, &rec.ptY) || (rec.calMode && calibPoint(&rec.ptX, &rec.ptY));
+  rec.hasCal = calibRecord(&rec.calId, &rec.calStale);
 }
 
 void positionProcess(const EventResult& r, Position& p, uint32_t nowMs) {
@@ -83,6 +88,8 @@ void positionProcess(const EventResult& r, Position& p, uint32_t nowMs) {
                       c == s.dropped ? " (dropped)" : "");
     if (!s.converged) {
       n += snprintf(line + n, sizeof line - n, "; not sent: did not converge");
+    } else if (rec.calMode) {
+      n += snprintf(line + n, sizeof line - n, "; not sent: calibration mode");
     } else if (!f.good) {
       n += snprintf(line + n, sizeof line - n, "; not sent: rms over the %.0f ns limit%s",
                     cfg.resLimitNs, s.dropped >= 0 ? " even with one channel dropped" : "");
@@ -161,6 +168,7 @@ void positionBlastCheck() {
 // ---- Status and commands ----
 
 void positionPrintStatus() {
+  calibPrintStatus();
   Serial.printf("solver: %u events solved (%u converged, %u sent to the app, %u with a channel "
                 "dropped), %u with too few channels; per event %.1f us mean, %.1f us longest\n",
                 (unsigned)nSolved, (unsigned)nConverged, (unsigned)nSent, (unsigned)nDropped,

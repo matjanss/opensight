@@ -45,12 +45,12 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
   - its error budget counts the mic height as 1 mm, but it is 10.5 mm (PLAN D3);
   - its open question on breaking the corner symmetry is answered by PLAN D1/D2.
 
-## Status (2026-11-21) and what's next, per part
+## Status (2026-11-22) and what's next, per part
 
 | Part | Where it stands | Next (see) |
 |---|---|---|
 | Firmware: BLE, pairing, shot buffer | Done; protocol v2 | Flash shot store, uplink interface (PLAN D6, phase 3–4) |
-| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration) was re-planned with the user on 2026-11-21 (PLAN D2, D3, D8, D12; a first try is archived, below) and is being built on `step3-solver`: 3a passes on the bench (its sensor tests wait for the parts), 3b passes on the PC, 3c and 3d pass on the bench (bare NodeMCU, simulated); 3e (calibration) next | MEASUREMENT step 3, sub-steps 3a-3e in order: the air sensor and sync pin, the model and core on the PC, the solver on the board, 6 simulated channels and drop-one, calibration |
+| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration, PLAN phase 0) passes all its simulated tests on a bare NodeMCU (2026-11-22, merged to `main`): the solver on the board, drop-one, the blast check, calibration mode and `tools/calibrate.py`. The DS18B20 and BME280 tests (3a-3, 3a-4) wait for the parts | Step 4 (validity) or the boards' arrival (PLAN phase 1: the same tests on real sensors); 3a-3/3a-4 when the parts are there |
 | Sensor board (`hardware/acoustic-sensor/`) | v0.3 designed (KiCad 10), not yet on the bench | Its "check before ordering" list; then the summary's initial calibration, polarity, PLAN phase 1 |
 | Host board (`hardware/host-board/`) | v0.3 designed and routed, not yet on the bench; firmware already on its pin map | Order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner slid 40 mm along the top edge, plus bottom-middle and right-middle mics; the user designs and prints the holders |
@@ -74,6 +74,7 @@ firmware/                     PlatformIO, Arduino-ESP32 3.x on pioarduino (IDF 5
   test/vectors/               shared test vectors, written by tools/model.py
   tools/model.py              the model's reference implementation (numpy)
   tools/replay.cpp            replays a serial log's events through lib/measure (g++)
+  tools/calibrate.py          the calibration fit (numpy, scipy)
   tools/layout_study.py       mic layout study behind PLAN D1/D2 (numpy)
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs
@@ -183,8 +184,10 @@ hardware/host-board/          host board, KiCad 10
   - A CPU-driven generator is not exact under BLE load.
 - `calib.cpp`: the calibration per channel (mic x, y, h; k; offset; sigma), NVS namespace
   `"cal"` (k and the offsets moved there from `"measure"` in 3c), and the solver's policy
-  (`reslimit`, `dropone`). Commands `mic`, `k`, `offset`, `reslimit`, `dropone`. Every
-  change prints the `cfg` line, whose id every `rec` line carries.
+  (`reslimit`, `dropone`). Commands `mic`, `k`, `offset`, `sigma`, `reslimit`, `dropone`.
+  Every change prints the `cfg` line, whose id every `rec` line carries. Also calibration
+  mode (`cal on`, `cal pt`) and the calibration record (`cal ch`, `cal id`, as
+  `tools/calibrate.py` prints them; stale after any later change).
 - `arrival.cpp`: t0 = t1 − k·(t2 − t1) − offset per channel (`measure::arrivalT0`), for
   the printed t0 lines and the simulator.
 - `position.cpp`: every event (but the self-test's) solved in `loop()` by
@@ -200,10 +203,9 @@ hardware/host-board/          host board, KiCad 10
   firmware's air by default; `sim temp` sets another temperature. Its position check counts
   for PASS only when the firmware has its mics (`mic sim`), air, offsets and k; with a
   late or early channel, drop-one must drop it; a blast must not be sent.
-- The tag `archive/step3-first-try` holds a first try that was set aside (it never ran on
-  the board, and predates PLAN.md). Still to reuse in 3e, with
-  `git show archive/step3-first-try:<path>`: `firmware/tools/calibrate.py` (the fit, with
-  a global k) and the calibration mode in `firmware/src/solver.cpp`.
+- `tools/calibrate.py`: the calibration fit (mics, k, offset per channel from sparks at
+  known points; Deming-scaled residuals, see PLAN D5), `--selftest`. The tag
+  `archive/step3-first-try` holds a first try that was set aside (it never ran on the board).
 - `airtemp.cpp`: the air sensor on J5, read by a task on core 0 once a minute: a BME280
   or BMP280 on I2C (SDA 14, SCL 15; compensation in `lib/bme280/`), or a DS18B20 on
   GPIO 14 through UART2 as a 1-Wire bus. It looks for one 3 times, a minute apart, then

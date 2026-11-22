@@ -16,5 +16,16 @@ const measure::Cfg& calibCfg();
 uint32_t calibId();
 void calibPrintCfg();   // the `cfg` line
 
-bool calibCommand(const char* cmd, const char* line);   // `mic`, `k`, `offset`
+// Calibration mode (`cal on`): events are marked with the template point (`cal pt`) and not
+// sent to the app.
+bool calibMode();
+bool calibPoint(float* x, float* y);   // false: no template point set
+
+// The calibration record (`cal id`): its id, and whether it is stale (a calibrated value
+// changed since). False: none.
+bool calibRecord(uint32_t* id, bool* stale);
+void calibPrintStatus();   // `cal`, `stat`
+
+// `mic`, `k`, `offset`, `sigma`, `reslimit`, `dropone`, `cal`.
+bool calibCommand(const char* cmd, const char* line);
 void calibHelp();

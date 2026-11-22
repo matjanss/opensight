@@ -31,6 +31,9 @@ static const float RES_LIMIT_DEFAULT_NS = 1500;   // also for logs from before `
 // "id=XXXXXXXX ", so it changes with any setting. Returns the length (snprintf's).
 int formatCfg(char* out, size_t size, const Cfg& cfg);
 uint32_t cfgId(const Cfg& cfg);
+// The calibration's id: the CRC-32 of the channel fields alone ("CH1=... CH8=-"), so the
+// policy (lim, drop) doesn't change it. tools/calibrate.py computes the same.
+uint32_t calibrationId(const Cfg& cfg);
 // Reads a cfg line (it may have text before "cfg id="). False if it isn't one, or if its
 // id doesn't match its fields (a corrupted line).
 bool parseCfg(const char* line, Cfg& cfg, uint32_t* id);
@@ -47,6 +50,12 @@ struct Rec {
   uint8_t  channels;           // bit c: CH(c+1) was fitted in this event
   int32_t  t1[MAX_MICS];       // OUT_L's first rise, ns from the event's first edge, or NO_EDGE
   int32_t  t2[MAX_MICS];       // OUT_H's
+  bool     hasPt;              // the true point: calibration mode's template point, or the simulator's
+  float    ptX, ptY;           //   shot (`pt=x,y`, mm)
+  bool     calMode;            // made in calibration mode (`mode=cal`): not sent to the app
+  bool     hasCal;             // a calibration record (`cal=XXXXXXXX`, its id) ...
+  uint32_t calId;
+  bool     calStale;           // ... changed since (`stale=1`)
 };
 
 // "rec n=2161 t=876.1903407 cfg=1A2B3C4D T=18.00 RH=50.0 p=1013.25 meas=--- c=342.739777

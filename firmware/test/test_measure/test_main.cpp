@@ -307,6 +307,16 @@ static void test_cfg_round_trip() {
   Cfg other = cfg;
   other.ch[3].h = 10.6f;
   TEST_ASSERT_NOT_EQUAL(cfgId(cfg), cfgId(other));
+  TEST_ASSERT_NOT_EQUAL(calibrationId(cfg), calibrationId(other));
+  // The calibration's id leaves the policy out; the cfg's doesn't.
+  other = cfg;
+  other.resLimitNs = 2000;
+  other.dropOne = false;
+  TEST_ASSERT_NOT_EQUAL(cfgId(cfg), cfgId(other));
+  TEST_ASSERT_EQUAL_HEX32(calibrationId(cfg), calibrationId(other));
+  std::string fields = std::string(line).substr(strlen("cfg id=12345678 "));
+  fields = fields.substr(0, fields.find(" lim="));
+  TEST_ASSERT_EQUAL_HEX32(crc32(fields.c_str()), calibrationId(cfg));
 }
 
 static void test_rec_round_trip() {
@@ -347,6 +357,20 @@ static void test_rec_round_trip() {
   TEST_ASSERT_EQUAL_HEX8(0x13, solveInput(cfg, b, in));
   TEST_ASSERT_TRUE(in.t0[4] == arrivalT0(200000.0f, 201000.0f, 0.3333f, cfg.ch[4].offsetNs));
   TEST_ASSERT_TRUE(in.c == mmPerNs(r.cMs));
+  TEST_ASSERT_FALSE(b.hasPt || b.calMode || b.hasCal);   // "cal=-"
+  // The true point, calibration mode and the record.
+  r.hasPt = true;
+  r.ptX = -75.0f;
+  r.ptY = 25.5f;
+  r.calMode = true;
+  r.hasCal = true;
+  r.calId = 0xDEADBEEF;
+  r.calStale = true;
+  formatRec(line, sizeof line, r);
+  printf("%s\n", line);
+  TEST_ASSERT_TRUE(parseRec(line, b));
+  TEST_ASSERT_TRUE(b.hasPt && b.ptX == -75.0f && b.ptY == 25.5f && b.calMode && b.hasCal &&
+                   b.calId == 0xDEADBEEF && b.calStale);
   // Not a rec line, or one with a field missing.
   TEST_ASSERT_FALSE(parseRec("evt 2161 at 876.1903407 s", b));
   TEST_ASSERT_FALSE(parseRec("rec n=1 t=2 cfg=00000000 T=18 RH=50 p=1013", b));
