@@ -44,7 +44,10 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 - **Editing it:** it's the user's doc. Change it only when asked, as suggestions.
 - **Where it is out of date** (PLAN.md has the corrections):
   - its error budget counts the mic height as 1 mm, but it is 10.5 mm (PLAN D3);
-  - its open question on breaking the corner symmetry is answered by PLAN D1/D2.
+  - its open question on breaking the corner symmetry is answered by PLAN D1/D2;
+  - its host board is 76 × 118 mm with a 3-pin DS18B20 connector; the board is 76 × 132 mm
+    now, with J5 4-pin (BME280 or DS18B20) beside J6/J7 and U4's supply jumper (host board
+    README).
 
 ## Status (2026-11-22) and what's next, per part
 
@@ -53,7 +56,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Firmware: BLE, pairing, uplink | Protocol v3 (step 5b): `uplink.cpp` with the hit and event rings, Status, Control, Calibration and Settings; bench test passes over BLE (2026-11-23, merged to `main`) | Flash shot store (PLAN D6), MQTT (phase 4) |
 | Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration, PLAN phase 0) passes all its simulated tests on a bare NodeMCU (2026-11-22, merged to `main`): the solver on the board, drop-one, the blast check, calibration mode and `tools/calibrate.py`. The DS18B20 and BME280 tests (3a-3, 3a-4) wait for the parts. Step 4a (the verdict) passes its simulated bench tests (2026-11-22, merged to `main`). Step 4b (the curtain) passes its simulated bench tests (2026-11-22, run by Claude, merged to `main`) | The boards' arrival (PLAN phase 1); 3a-3/3a-4 when the parts are there |
 | Sensor board (`hardware/acoustic-sensor/`) | v0.3 designed (KiCad 10), not yet on the bench | Its "check before ordering" list; then the summary's initial calibration, polarity, PLAN phase 1 |
-| Host board (`hardware/host-board/`) | v0.3 designed and routed, not yet on the bench; firmware already on its pin map | Order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
+| Host board (`hardware/host-board/`) | v0.3 ready to order: the J5 (BME280) and U4-supply changes on the board, the south half laid out again and the board routed again (2026-11-24, 76 × 132 mm, 0.4/0.6/0.8 mm tracks, DRC and ERC clean); firmware already on its pin map | The user's look in KiCad, then order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner moved out along the diagonal (d about 15–25 mm, PLAN D1's update; principle in `hardware/frame/top-right-holder.svg`), plus bottom-middle and right-middle mics; the user designs and prints the holders. The firmware defaults still use the old slid position (65, 105) until d is fixed |
 | IR curtain | Designed (receiver on the host board, emitter board); firmware built and passing simulated (step 4b, on GPIO 13) | Its bench test (summary, PLAN phase 1.6), then the real gate |
 | App (`app/`) | v0.1.2, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay; protocol v3 (step 5c, merged to `main`): unscored holes and missed shots, the event log, a read-only Measurement section; the calibration wizard and the field check with the Rust fit (step 5d, merged to `main`) | A settings editor; the shot store in flash (PLAN D6) |
@@ -174,17 +177,16 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
     (21.5 mm flipped).
   - J1 is JST XH 5-pin: VA, GND, OUT_L, GND, OUT_H. JLC assembles the SMD parts, 5 boards
     per order.
-- **Host board v0.3:** 76 × 118 mm, through-hole, hand-soldered.
+- **Host board v0.3:** 76 × 132 mm, through-hole, hand-soldered.
   - The NodeMCU-32S on sockets.
   - 8 sensor connectors (CH1–4 west, CH5–8 east, 6 fitted at first), each with a 470 Ω
     series resistor, a 100 k pull-down and an optional scope header.
-  - LP2950 low-noise 3.3 V for the sensors; an air sensor on a cable at J5. Before
-    ordering, J5 becomes 4-pin for a BME280 (SDA GPIO 14, SCL GPIO 15); a DS18B20 still
-    fits (GPIO 14). See the host board's TODO.md and README.
+  - LP2950 low-noise 3.3 V for the sensors; an air sensor on a cable at J5, 4-pin, for a
+    BME280 (SDA GPIO 14, SCL GPIO 15) or a DS18B20 (pins 1–3, GPIO 14).
   - IR curtain receiver (BPW34F strip → MCP6002 TIA and gain → LM393, IR_IN GPIO 13, own
-    AGND) and emitter drive (IR_EN GPIO 27). Before ordering, U4 gets a supply jumper (JP1):
-    3.3 V for a TLC372, 5 V for an LM393 (whose inputs only work up to 1.8 V at 3.3 V, below
-    most of RV1's threshold range).
+    AGND) and emitter drive (IR_EN GPIO 27). U4 has a supply jumper (JP1): 3.3 V for a
+    TLC372, 5 V for an LM393 (whose inputs only work up to 1.8 V at 3.3 V, below most of
+    RV1's threshold range).
   - Panel LED (GPIO 2) and button (BOOT, GPIO 0).
   - Powered from USB 5 V through a panel switch and a Schottky diode; no battery on this
     version.
