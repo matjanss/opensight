@@ -89,7 +89,7 @@ so a problem shows up in the step that caused it.
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
 | 3 | Solver and calibration | **simulated tests pass** (bare NodeMCU, 2026-11-22; merged to `main`): 3a-1, 3a-2, 3a-5, 3b (PC), 3c, 3d, 3e. Waiting for the parts: 3a-3 and 3a-4 (DS18B20, BME280). With the boards: the same solver and calibration on real sensors (PLAN phase 1) |
 | 4 | Validity checks | 4a (the verdict) passes its simulated bench tests on a bare NodeMCU (2026-11-22). 4b (the curtain) passes its simulated bench tests on a bare NodeMCU (2026-11-22, run by Claude). 4c (loudness, sharpness) planned |
-| 5 | Protocol and app | 5a (protocol v3), 5b (firmware) and 5c (app) built; their bench test passes over BLE from the PC (2026-11-23, run by Claude, on `step5-protocol`). 5d (the calibration wizard, the Rust fit) planned |
+| 5 | Protocol and app | 5a (protocol v3), 5b (firmware) and 5c (app) built; their bench test passes over BLE from the PC (2026-11-23, run by Claude, merged to `main`). 5d (the calibration wizard, the Rust fit) planned |
 | 6 | Wi-Fi and MQTT | planned |
 
 ### 1. Capture and raw dump
@@ -1239,7 +1239,7 @@ point is kept on the target.
 
 #### 5a. The protocol
 
-Built (on `step5-protocol`):
+Built (done, on `step5-protocol`):
 
 - **The shot** grows to 32 bytes: the event it came from, the calibration ID, the 1σ
   uncertainty, a kind (`shot`, `hole`, `missed`) and flags (dropped, air assumed, stale,
