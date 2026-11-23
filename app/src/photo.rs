@@ -398,6 +398,87 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    /// The black disc's centre on the card's grid (frame mm): its edge along 360 rays from
+    /// `near`, a least-squares circle through the edge points (Kåsa), the points more than
+    /// 0.3 mm off it dropped (holes, the numbers next to the disc), fitted again.
+    fn disc_centre(img: &ColorImage, card: &Card, near: (f64, f64)) -> (f64, f64) {
+        let ppm = f64::from(img.size[0] as f32 / card.size_mm().x);
+        let dark = |x: f64, y: f64| {
+            let at = card.to_card(x as f32, y as f32) * ppm as f32;
+            let c = img.pixels[at.y as usize * img.size[0] + at.x as usize];
+            c.r() < 90 && c.g() < 90 && c.b() < 90
+        };
+        let mut pts: Vec<(f64, f64)> = (0..360)
+            .filter_map(|k| {
+                let t = f64::from(k).to_radians();
+                (0..400).map(|i| 25.0 + i as f64 * 0.025).find_map(|rr| {
+                    let p = (near.0 + rr * t.cos(), near.1 + rr * t.sin());
+                    (!dark(p.0, p.1)).then_some(p)
+                })
+            })
+            .collect();
+        let mut c = near;
+        for _ in 0..3 {
+            // x² + y² = 2 a x + 2 b y + k, least squares.
+            let mut m = nalgebra::Matrix3::<f64>::zeros();
+            let mut v = nalgebra::Vector3::<f64>::zeros();
+            for p in &pts {
+                let row = nalgebra::Vector3::new(2.0 * p.0, 2.0 * p.1, 1.0);
+                m += row * row.transpose();
+                v += row * (p.0 * p.0 + p.1 * p.1);
+            }
+            let s = m.lu().solve(&v).unwrap();
+            c = (s[0], s[1]);
+            let r = (s[2] + c.0 * c.0 + c.1 * c.1).sqrt();
+            pts.retain(|p| ((p.0 - c.0).hypot(p.1 - c.1) - r).abs() < 0.3);
+        }
+        c
+    }
+
+    /// The photo lies on the grid where the placement says the card is: the photo's black
+    /// disc centred on the card's centre in the frame (the demo's card sits about 0.8 mm off
+    /// the sensor's centre in the holder, turned 90.5°).
+    #[test]
+    fn photo_on_the_grid_where_the_card_was() {
+        let card = crate::card::air_pistol();
+        let shots = shots();
+        let jpeg = demo_photo(&card, &shots, 0.0, 5).unwrap();
+        let d = dir("grid");
+        let photo = store(&d, "demo", &jpeg, now_unix()).unwrap();
+        let p = process(photo, &card, &shots).unwrap();
+        let pl = p.placement.as_ref().unwrap();
+        let want = pl.to_frame((0.0, 0.0));
+        // The truth: the demo's card centre in the frame (card = R(90.5°) frame + (0.7, -0.4)).
+        let truth = {
+            let a = (90.0f64 + 0.5).to_radians();
+            let (x, y) = (-0.7, 0.4);
+            (a.cos() * x + a.sin() * y, -a.sin() * x + a.cos() * y)
+        };
+        // The measurement itself, on the printed card: its centre.
+        let printed = disc_centre(&card.render(1700).unwrap(), &card, (0.3, -0.2));
+        // The photo on the grid without the placement: on the printed card's rings.
+        let rgb = Rgb::decode(&std::fs::read(&p.photo.image).unwrap()).unwrap();
+        let reg = register(&rgb.to_gray(), &issf_air_pistol()).unwrap();
+        let plain = disc_centre(&on_grid(&rgb, &reg, None, &card), &card, (0.3, -0.2));
+        let got = disc_centre(p.image.as_ref().unwrap(), &card, want);
+        println!("the disc's centre: printed {printed:?}, the photo without the placement {plain:?}");
+        println!(
+            "card centre in the frame: true ({:+.3}, {:+.3}), placement ({:+.3}, {:+.3}), the photo's disc on the grid ({:+.3}, {:+.3}); rms {:.4}",
+            truth.0,
+            truth.1,
+            want.0,
+            want.1,
+            got.0,
+            got.1,
+            p.rms_mm.unwrap()
+        );
+        assert!(printed.0.hypot(printed.1) < 0.03, "{printed:?}");
+        assert!(plain.0.hypot(plain.1) < 0.05, "{plain:?}");
+        assert!((got.0 - want.0).hypot(got.1 - want.1) < 0.05);
+        assert!((want.0 - truth.0).hypot(want.1 - truth.1) < 0.05);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     /// No shots: every hole found, in the registration's coordinates.
     #[test]
     fn synthetic_photo_without_shots() {
