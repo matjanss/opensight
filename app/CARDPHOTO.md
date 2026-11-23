@@ -12,7 +12,7 @@ and reviews the results.
 | # | Step | Status |
 |---|---|---|
 | C1 | Registration from the rings (`app/cardphoto/`) | synthetic tests pass (2026-11-23); real photos in C5 |
-| C2 | The holes: finding them, matching them to the shots | planned |
+| C2 | The holes: finding them, matching them to the shots | synthetic tests pass (2026-11-23); real holes in C5 |
 | C3 | The upload: QR code, the phone page, storage | planned |
 | C4 | In the app: the photo under the shots, the ground-truth panel | planned |
 | C5 | Real photos: registration (no holes), then holes | waiting for the photos |
@@ -67,25 +67,47 @@ synthetic photos are 2400 × 1800 at 9 px/mm, about half a phone's resolution).
 
 ## C2. The holes
 
-Builds (in `cardphoto`):
+Builds (in `cardphoto`, `src/holes.rs`):
 
-- **Guided:** for each measured shot, a search window of ±3 mm around it in the rectified
-  card (the card's placement is not known yet); a 4.5 mm circle fitted to the hole's edge
-  (the contrast between the paper and what is behind it; in the black area the other way
-  round); overlapping holes fitted together, each started from its shot.
-- **The match:** the card's placement (a shift, a small angle, and the quarter turn: all four
-  tried, the best one kept) fitted between the shots and the holes; per shot, the difference
-  after that fit; shots with no hole and holes no shot explains are flagged.
-- **Unguided** (no shots, the test cards): every hole on the card, found by its shape.
-- **The results:** a small file per card (registration, hole centres with uncertainties,
-  per-shot differences, the placement, the diagnostics, the serial), a patch per hole (8 × 8
-  mm at 40 px/mm, greyscale), a low-resolution rectified card.
+- **In colour.** A hole shows whatever is under the card: a dark table hides a hole in the
+  black, a white one a hole in the white, in grey values. In colour, a table that is neither
+  black nor white-like shows in both.
+- **The expected card, from the photo itself** (not from the SVG, which the real print won't
+  match in its font, logos and serial): the light as smooth surfaces (the paper's and the
+  ink's colour across the card, quadratic per channel, fitted robustly to the plain bands
+  between the printed circles), so every colour is normalised (0 ink, 1 paper); and the print
+  as one profile by radius, the median over the full circle (a hole is a small part of a
+  circle from 1.5 mm out; inside 2 mm the card is plain black). The difference from it is
+  high in a hole.
+- **Each hole is a circle** fitted to the normalised colours: inside, the table's colour
+  (one unknown colour); outside, the card as expected at each point; a soft edge; the radius
+  shared within a group; holes closer than about a diameter fitted together; robust (Huber).
+  This holds for any table colour and for a hole across the black disc's edge. The centre's
+  uncertainty from the fit (a lower bound: neighbouring pixels are correlated).
+- **Guided by the shots:** the quarter turn (all four tried: where the holes show best near
+  the shots, by a matched filter), coarse holes near each shot (±4 mm), the placement (shift
+  and angle; a scale too with 5 or more shots spread over more than 20 mm), the holes fitted
+  from the placed shots, the placement again (twice, robustly). Per shot, the hole minus the
+  placed shot is the sensor's error. A shot with no clear, round hole near it is reported as
+  such (a false shot, or a hole not visible); holes no shot explains are found as below.
+- **Unguided** (no shots: the test cards; and the holes no shot explains): blobs where the
+  photo differs from the card, at least half a hole's area (the numbers' strokes are
+  smaller); per blob, the count of holes from its area, then one or two more if they clearly
+  fit better (cost 5 % lower, centres at least 1 mm apart).
 
-**Tests (synthetic, automated):** holes at known places (single, cutting ring lines, in the
-black, two or three overlapping), the card turned by 0, 90, 180 and 270° plus a small angle,
-shots given with a known placement and 0.1 mm of noise. Expected: hole centres within
-**0.05 mm**; the quarter turn always right; the placement within 0.03 mm and 0.02°; a missing
-hole and an extra hole flagged.
+**Tests (synthetic, automated, `tests/holes.rs`):** holes in the black, in the white, across
+ring lines and the disc's edge, near the centre, three overlapping; the card's placement in
+the frame turned by each quarter turn plus 0.4°, shifted about 1 mm; shots with 0.1 mm of
+noise; tables blue, grey and dark. Expected: hole centres within **0.05 mm**; the quarter
+turn always right; the placement as good as the shots' noise allows (with 9 shots of 0.1 mm
+noise and 4 placement values about 0.07 mm rms at the shots); a false shot and an unmatched
+hole flagged; a clean card with no holes found (the printed numbers aren't holes); the
+unguided search finding every hole; on a table as dark as the ink, holes in the black not
+found, but none placed wrong.
+
+**For the photos (C5 and the shooter's guide):** put the card on a mid-grey or coloured
+surface (a coloured folder, a cutting mat), not black and not white: a black table hides the
+holes in the black disc.
 
 ## C3. The upload
 
@@ -138,4 +160,5 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-23 | C2 | Synthetic photos in colour (`tests/holes.rs`), as C1, 9 holes (two in the black near the centre, one across ring 6's line, one across the disc's edge, two in the white, three overlapping), run by Claude | **Pass**, 6 tests, 28 s. Hole centres within 0.019 mm (all four quarter turns, blue table), 0.022 mm (grey table), 0.026 mm (with a false shot and an extra hole: both flagged); the quarter turn right every time; the placement's angle 0.40–0.49° against 0.4°, its rms at the shots 0.05–0.07 mm (the shots' noise); clean card: no holes; unguided: 9 of 9, within 0.022 mm. Dark table (0.1 against the ink's 0.07): 5 of 9 not found (those in the black), none misplaced. **Found and changed on the way:** (1) an expected card per 5° sector failed: out to 52 mm a hole covers a sector's whole width; now the light as smooth surfaces and the print as one profile over the full circle. (2) A hole with one contrast inside was biased 0.06 mm across the disc's edge (a blue table differs more from paper than from ink); the model is now the table's colour inside and the expected card outside: 0.001 mm. (3) The matched filter missed overlapping holes in the unguided search (their neighbours are in its ring); it now starts from blobs and their area. |
 | 2026-11-23 | C1 | Synthetic photos (`tests/register.rs`), 2400 × 1800 px, the card at 9 px/mm, 3 × 3 samples per pixel, blur σ 1 px, run by Claude | **Pass**, 7 tests, 12 s. Worst error over the scoring area (r ≤ 78 mm): easy (10° turn, tilts 5°/3°, light ±20 %) 0.014 mm; hard (137°, tilts 12°/−9°, off-centre, near camera, k1 0.08, k2 −0.02, 9 holes, three overlapping, light ±30 %, noise 3 %) 0.016 mm, k1 found 0.0797; light table (0.72 against the paper's 0.93) 0.014 mm; barrel k1 −0.12 with 15°/10° tilt 0.013 mm, k1 −0.1213. The edge points' rms 0.006–0.010 mm; 92–96 % of them kept. The outline fixed the rotation in every case. A card bent 2 mm at its edges: rms 0.019 mm against 0.006 flat (so a bend shows), and up to 0.24 mm wrong: flatness matters. No card in view, and a card at 3 px/mm: an error each. |

@@ -5,7 +5,7 @@
 
 use nalgebra::{Matrix3, Rotation3, Vector3};
 
-use crate::{Gray, Lens, Mapping};
+use crate::{Gray, Lens, Mapping, Rgb};
 
 /// The rendered card: `px_per_mm` pixels per mm, covering the whole card (side `size_mm`),
 /// row 0 at the card's top. The card's centre is at its middle.
@@ -41,6 +41,8 @@ pub struct Params {
     pub hole_d_mm: f64,
     /// The table's mean level (0..1) and its texture's strength.
     pub table: f32,
+    /// The table's colour, if not grey (`table` is then its brightness for the texture).
+    pub table_rgb: Option<[f32; 3]>,
     pub table_texture: f32,
     /// Light: ±this fraction across the image.
     pub light: f32,
@@ -66,6 +68,7 @@ impl Default for Params {
             holes: vec![],
             hole_d_mm: 4.5,
             table: 0.2,
+            table_rgb: None,
             table_texture: 0.06,
             light: 0.0,
             blur_px: 0.0,
@@ -152,6 +155,15 @@ impl Camera {
 
 /// A synthetic photo and its truth: the mapping of the flat card (exact unless bent).
 pub fn photo(tex: &CardTexture, p: &Params) -> (Gray, Mapping) {
+    let (rgb, map) = photo_rgb(tex, p);
+    (rgb.to_gray(), map)
+}
+
+/// The paper's tint (a warm white), on the card's grey render.
+const PAPER_TINT: [f32; 3] = [1.0, 0.985, 0.95];
+
+/// A synthetic photo in colour and its truth (the holes are found in colour).
+pub fn photo_rgb(tex: &CardTexture, p: &Params) -> (Rgb, Mapping) {
     let dist = p.distance * tex.size_mm;
     let f = p.px_per_mm * dist;
     let cx = (p.w as f64 - 1.0) / 2.0 + p.offset.0 * p.w as f64;
@@ -178,14 +190,15 @@ pub fn photo(tex: &CardTexture, p: &Params) -> (Gray, Mapping) {
     let inv = map.h.try_inverse().expect("a camera's homography");
     let half = tex.size_mm / 2.0;
     let bend = |x: f64| p.bend_mm * (x / half) * (x / half);
-    let mut out = Gray::new(p.w, p.h);
+    let mut out = Rgb::new(p.w, p.h);
+    let table_rgb = p.table_rgb.unwrap_or([p.table; 3]);
     let hole_r2 = (p.hole_d_mm / 2.0) * (p.hole_d_mm / 2.0);
     // Each pixel averages 3 x 3 points over its area, as a sensor's pixel does (no aliasing
     // of the thin ring lines).
     const SS: usize = 3;
     for y in 0..p.h {
         for x in 0..p.w {
-            let mut sum = 0.0f32;
+            let mut sum = [0.0f32; 3];
             for sj in 0..SS {
                 for si in 0..SS {
                     let (px, py) = (
@@ -202,31 +215,36 @@ pub fn photo(tex: &CardTexture, p: &Params) -> (Gray, Mapping) {
                             q = (q.0 + flat.0 - qb.0, q.1 + flat.1 - qb.1);
                         }
                     }
-                    let table =
-                        (p.table as f64 + p.table_texture as f64 * table_noise(px, py, p.seed)) as f32;
+                    let tn = 1.0 + p.table_texture * table_noise(px, py, p.seed) as f32 / p.table.max(0.05);
+                    let table = table_rgb.map(|c| c * tn);
                     let in_hole = p
                         .holes
                         .iter()
                         .any(|h| (q.0 - h.0).powi(2) + (q.1 - h.1).powi(2) < hole_r2);
-                    sum += if q.0.abs() < half && q.1.abs() < half && !in_hole {
+                    let v = if q.0.abs() < half && q.1.abs() < half && !in_hole {
                         let tx = (q.0 + half) * tex.px_per_mm - 0.5;
                         let ty = (half - q.1) * tex.px_per_mm - 0.5;
-                        tex.img.sample(tx, ty).unwrap_or(table)
+                        match tex.img.sample(tx, ty) {
+                            Some(g) => PAPER_TINT.map(|t| g * t),
+                            None => table,
+                        }
                     } else {
                         table
                     };
+                    for k in 0..3 {
+                        sum[k] += v[k];
+                    }
                 }
             }
-            let v = sum / (SS * SS) as f32;
             let light = 1.0 + p.light * ((x as f32 / p.w as f32 - 0.5) + 0.6 * (y as f32 / p.h as f32 - 0.5));
-            out.set(x, y, v * light);
+            out.px[y * p.w + x] = sum.map(|v| v / (SS * SS) as f32 * light);
         }
     }
     let mut out = out.blur(p.blur_px);
-    if p.noise > 0.0 {
-        let mut rng = Rng::new(p.seed);
-        for v in &mut out.px {
-            *v = (*v + p.noise * rng.gauss() as f32).clamp(0.0, 1.0);
+    let mut rng = Rng::new(p.seed);
+    for v in &mut out.px {
+        for c in v.iter_mut() {
+            *c = (*c + p.noise * rng.gauss() as f32).clamp(0.0, 1.0);
         }
     }
     (out, map)

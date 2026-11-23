@@ -14,6 +14,7 @@
 
 pub mod card;
 pub mod detect;
+pub mod holes;
 pub mod register;
 pub mod synth;
 
@@ -135,6 +136,106 @@ impl Gray {
             out
         };
         pass(&pass(self, true), false)
+    }
+}
+
+/// A colour image, values 0..1 per channel (R, G, B), row by row: the holes are found in
+/// colour (a hole shows the table, which may be as dark as the ink or as light as the paper,
+/// but rarely the same colour as both).
+#[derive(Clone, Debug)]
+pub struct Rgb {
+    pub w: usize,
+    pub h: usize,
+    pub px: Vec<[f32; 3]>,
+}
+
+impl Rgb {
+    pub fn new(w: usize, h: usize) -> Rgb {
+        Rgb {
+            w,
+            h,
+            px: vec![[0.0; 3]; w * h],
+        }
+    }
+
+    /// A photo (JPEG, PNG).
+    pub fn decode(bytes: &[u8]) -> Result<Rgb, String> {
+        let img = image::load_from_memory(bytes).map_err(|e| format!("not a readable image: {e}"))?;
+        let c = img.to_rgb8();
+        let px = c
+            .as_raw()
+            .chunks(3)
+            .map(|p| {
+                [
+                    f32::from(p[0]) / 255.0,
+                    f32::from(p[1]) / 255.0,
+                    f32::from(p[2]) / 255.0,
+                ]
+            })
+            .collect();
+        Ok(Rgb {
+            w: c.width() as usize,
+            h: c.height() as usize,
+            px,
+        })
+    }
+
+    /// Luminance (the registration works in grey).
+    pub fn to_gray(&self) -> Gray {
+        Gray {
+            w: self.w,
+            h: self.h,
+            px: self
+                .px
+                .iter()
+                .map(|p| 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2])
+                .collect(),
+        }
+    }
+
+    /// Bilinear sample; None outside.
+    pub fn sample(&self, x: f64, y: f64) -> Option<[f32; 3]> {
+        if !(x >= 0.0 && y >= 0.0 && x <= (self.w - 1) as f64 && y <= (self.h - 1) as f64) {
+            return None;
+        }
+        let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+        let (x1, y1) = ((x0 + 1).min(self.w - 1), (y0 + 1).min(self.h - 1));
+        let (fx, fy) = ((x - x0 as f64) as f32, (y - y0 as f64) as f32);
+        let g = |i: usize, j: usize| self.px[j * self.w + i];
+        let (a, b, c, d) = (g(x0, y0), g(x1, y0), g(x0, y1), g(x1, y1));
+        let mut out = [0.0; 3];
+        for k in 0..3 {
+            let top = a[k] * (1.0 - fx) + b[k] * fx;
+            let bot = c[k] * (1.0 - fx) + d[k] * fx;
+            out[k] = top * (1.0 - fy) + bot * fy;
+        }
+        Some(out)
+    }
+
+    /// The colour at a card point through a mapping.
+    pub fn sample_at(&self, map: &Mapping, q: (f64, f64)) -> Option<[f32; 3]> {
+        let p = map.to_image(q);
+        self.sample(p.0, p.1)
+    }
+
+    /// Gaussian blur, channel by channel.
+    pub fn blur(&self, sigma: f64) -> Rgb {
+        if sigma <= 0.0 {
+            return self.clone();
+        }
+        let mut out = self.clone();
+        for k in 0..3 {
+            let ch = Gray {
+                w: self.w,
+                h: self.h,
+                px: self.px.iter().map(|p| p[k]).collect(),
+            }
+            .blur(sigma);
+            for (o, v) in out.px.iter_mut().zip(ch.px) {
+                o[k] = v;
+            }
+        }
+        out
     }
 }
 
