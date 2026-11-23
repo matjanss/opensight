@@ -124,10 +124,17 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   `tools/replay [--h mm] [--temp C] [--without ch] [--lost n|off] [--area mm|off]
   [--together us|off] [--pulse us|off] [--curtain lo,hi|off] <log>` (also built in CI).
 - **Release:** `git tag vX.Y.Z && git push origin vX.Y.Z`.
-- **Hardware can't be tested here: the user runs every bench test.** The radio link and
-  the measurement can only be checked by compiling (and by host-side checks of pure code,
-  such as a solver with no Arduino dependencies). Write each bench test so the user can run it and report back, with
-  the numbers to expect.
+- **Claude runs the tests (from 2026-11-23); the user reviews the results** and says when a
+  part of the testing needs revisiting.
+  - The bare NodeMCU is on USB (`/dev/ttyUSB1`): flash with `pio run -t upload`, drive the
+    serial console by script (opening the port resets the board on Linux: open one session
+    and keep it), log to `firmware/logs/` (not in git: upload, serial and probe logs).
+  - BLE from this computer, which is bonded with the sensor: `app/examples/probe.rs`.
+  - Write each test down first (steps, numbers to expect), then run it, then record the
+    results, failures included.
+  - What can't be done here (the sensor boards, the IR curtain, real shots, photos of real
+    cards, pressing BOOT) is written for the user to provide or run, with the numbers to
+    expect.
 
 ## Rules
 
@@ -138,20 +145,20 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   `PROTOCOL_VERSION` when an old app could misread new firmware or the reverse.
 - **The measurement rule:** a measurement step's code and its MEASUREMENT.md update (step
   status, build notes, bench test, bench results) go in the same commit. Every bench
-  result the user reports goes into Bench results, failures included, with what it
-  changed.
+  result goes into Bench results (Claude's runs and the user's), failures included, with
+  what it changed.
 - **The model rule:** `firmware/MODEL.md` is the source of truth for the measurement
   model, mirrored by `firmware/lib/measure/` and `firmware/tools/model.py` (later also the
   Rust fit). A model change touches all of them in one commit, with the vectors made
   again and `pio test -e native` passing.
 - **Pins and timings** go in `firmware/src/config.h`. The pin map must match the host
   board README, and after a map change MEASUREMENT step 1 test 14 is due again.
-- **Commit only when the user asks.**
+- **Commit at will; never push.** The user reviews and pushes (and makes release tags).
 - **Branches:** one branch per measurement step (or any other work that needs a bench
   test), named after it, for example `step3-solver`. It is merged into `main`
-  (fast-forward when possible) only once the user reports its bench test passing; then
-  the branch is deleted. Small fixes and docs-only changes go straight to `main`. So
-  `main` always means "passed on the hardware", and release tags are only made there.
+  (fast-forward when possible) once its tests pass; then the branch is deleted. Small
+  fixes and docs-only changes go straight to `main`. So `main` always means "passed its
+  tests", and release tags are only made there.
 - **Docs style:** plain English, short sentences, numbers with units. Say what was
   measured and what it changed.
 
