@@ -19,6 +19,59 @@ use crate::upload::{Photo, now_unix};
 const GRID_PX_PER_MM: f32 = 10.0;
 const GRID_MAX_PX: f32 = 2048.0;
 
+/// The printed numbers decide the card's quarter turn when the best turn's match beats the
+/// next one's by this much (normalised cross-correlation).
+const MIN_PRINT_MARGIN: f64 = 0.1;
+
+/// Where the printed card was in the sensor's frame: a printed point p (mm from the card's
+/// centre, y up, the numbers upright) was at `centre + scale R(angle) p`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CardPose {
+    pub angle: f64,
+    pub centre: (f64, f64),
+    pub scale: f64,
+}
+
+impl CardPose {
+    pub const IDENTITY: CardPose = CardPose {
+        angle: 0.0,
+        centre: (0.0, 0.0),
+        scale: 1.0,
+    };
+
+    /// From the view (frame → the registration's mm) and the print's quarter turn k (the
+    /// registration's mm = R(k·90°) print).
+    fn new(view: &Placement, k: u8) -> CardPose {
+        CardPose {
+            angle: f64::from(k) * std::f64::consts::FRAC_PI_2 - view.angle,
+            centre: view.to_frame((0.0, 0.0)),
+            scale: 1.0 / view.scale,
+        }
+    }
+
+    pub fn apply(&self, p: (f64, f64)) -> (f64, f64) {
+        let (sn, cs) = self.angle.sin_cos();
+        (
+            self.centre.0 + self.scale * (cs * p.0 - sn * p.1),
+            self.centre.1 + self.scale * (sn * p.0 + cs * p.1),
+        )
+    }
+
+    pub fn invert(&self, f: (f64, f64)) -> (f64, f64) {
+        let (sn, cs) = self.angle.sin_cos();
+        let (x, y) = (
+            (f.0 - self.centre.0) / self.scale,
+            (f.1 - self.centre.1) / self.scale,
+        );
+        (cs * x + sn * y, -sn * x + cs * y)
+    }
+
+    /// The turn, degrees, -180..180.
+    pub fn angle_deg(&self) -> f64 {
+        (self.angle.to_degrees() + 180.0).rem_euclid(360.0) - 180.0
+    }
+}
+
 /// One shot against its hole, in the sensor's frame (mm, x right, y up).
 #[derive(Clone, Debug)]
 pub struct ShotCheck {
@@ -43,9 +96,15 @@ pub struct Processed {
     pub reg_points: (usize, usize),
     pub k1: f64,
     pub px_per_mm: f64,
+    /// The print's quarter turn in the registration's axes (from the printed numbers; None
+    /// when they didn't decide), and by how much the best turn won.
+    pub print_quarter: Option<u8>,
+    pub print_margin: f64,
+    /// Where the printed card was in the frame (with no shots: the frame is the print's).
+    pub pose: CardPose,
     /// With shots: the card's placement in the frame, each shot against its hole, the rms,
     /// the holes no shot explains (frame mm). Without: `placement` None, `holes` every hole
-    /// found, in the registration's coordinates (the quarter turn unknown).
+    /// found (frame mm, here the print's).
     pub placement: Option<Placement>,
     pub scaled: bool,
     pub shots: Vec<ShotCheck>,
@@ -70,6 +129,9 @@ impl Processed {
                 "The rings fit with {:.3} mm rms: the card may not lie flat, or the photo is blurred.",
                 self.reg_rms_mm
             ));
+        }
+        if self.print_quarter.is_none() {
+            w.push("The printed numbers didn't show which way up the card is: the app's card may be drawn turned.".into());
         }
         let missing = self.shots.iter().filter(|s| s.hole.is_none()).count();
         if missing > 0 {
@@ -106,17 +168,37 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
     let bytes = std::fs::read(&photo.image).map_err(|e| format!("could not read the photo: {e}"))?;
     let rgb = Rgb::decode(&bytes)?;
     let reg = register(&rgb.to_gray(), &issf_air_pistol())?;
-    let (placement, scaled, checks, rms, holes) = if shots.is_empty() {
-        let holes = all_holes(&rgb, &reg).iter().map(|h| h.center).collect();
-        (None, false, Vec::new(), None, holes)
+    let (k, margin) = print_quarter(&rgb, &reg, card);
+    let print_quarter = (margin >= MIN_PRINT_MARGIN).then_some(k);
+    let k = print_quarter.unwrap_or(0);
+    let (placement, scaled, checks, rms, holes, view) = if shots.is_empty() {
+        // No shots: the frame is the print's (the numbers upright).
+        let view = Placement {
+            angle: f64::from(k) * std::f64::consts::FRAC_PI_2,
+            quarter: k,
+            shift: (0.0, 0.0),
+            scale: 1.0,
+        };
+        let holes = all_holes(&rgb, &reg)
+            .iter()
+            .map(|h| view.to_frame(h.center))
+            .collect();
+        (None, false, Vec::new(), None, holes, view)
     } else {
         let gt = ground_truth(&rgb, &reg, shots)?;
         let checks = shot_checks(&gt, shots);
         let extra = gt.extra.iter().map(|h| gt.placement.to_frame(h.center)).collect();
         let rms = rms_of(&checks);
-        (Some(gt.placement), gt.scaled, checks, Some(rms), extra)
+        (
+            Some(gt.placement),
+            gt.scaled,
+            checks,
+            Some(rms),
+            extra,
+            gt.placement,
+        )
     };
-    let image = on_grid(&rgb, &reg, placement.as_ref(), card);
+    let image = on_grid(&rgb, &reg, &view, card);
     let result_file = photo.image.with_extension("result.json");
     let mut p = Processed {
         photo,
@@ -126,6 +208,9 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
         reg_points: (reg.kept, reg.points),
         k1: reg.map.lens.k1,
         px_per_mm: px_per_mm(&reg),
+        print_quarter,
+        print_margin: margin,
+        pose: CardPose::new(&view, k),
         placement,
         scaled,
         shots: checks,
@@ -175,7 +260,7 @@ fn px_per_mm(reg: &Registration) -> f64 {
 /// The photo resampled onto the card's grid: each pixel is a card point (mm from the top
 /// left, y down), a frame point, the card point the placement makes of it, a photo pixel.
 /// Outside the photo: transparent.
-fn on_grid(rgb: &Rgb, reg: &Registration, placement: Option<&Placement>, card: &Card) -> ColorImage {
+fn on_grid(rgb: &Rgb, reg: &Registration, view: &Placement, card: &Card) -> ColorImage {
     let size = card.size_mm();
     let ppm = GRID_PX_PER_MM.min(GRID_MAX_PX / size.x.max(size.y));
     let (w, h) = ((size.x * ppm).round() as usize, (size.y * ppm).round() as usize);
@@ -185,7 +270,7 @@ fn on_grid(rgb: &Rgb, reg: &Registration, placement: Option<&Placement>, card: &
         let y = f64::from(centre.y) - (j as f64 + 0.5) / f64::from(ppm);
         for i in 0..w {
             let x = (i as f64 + 0.5) / f64::from(ppm) - f64::from(centre.x);
-            let q = placement.map_or((x, y), |p| p.apply((x, y)));
+            let q = view.apply((x, y));
             if let Some(c) = rgb.sample_at(&reg.map, q) {
                 let u = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
                 px[j * w + i] = Color32::from_rgb(u(c[0]), u(c[1]), u(c[2]));
@@ -193,6 +278,70 @@ fn on_grid(rgb: &Rgb, reg: &Registration, placement: Option<&Placement>, card: &
         }
     }
     ColorImage::new([w, h], px)
+}
+
+/// The print's quarter turn k in the registration's axes (its mm = R(k·90°) print), and the
+/// margin it won by: the photo's luminance in strips along the four axes (where the numbers
+/// are, 31–80 mm out, 6 mm wide) against the app's card turned each way, by normalised
+/// cross-correlation. The rings are the same at every turn; the numbers are not.
+fn print_quarter(rgb: &Rgb, reg: &Registration, card: &Card) -> (u8, f64) {
+    let ppm = 4.0f32;
+    let Some(printed) = card.render((card.size_mm().x * ppm).round() as u32) else {
+        return (0, 0.0);
+    };
+    let lum = |c: Color32| 0.299 * f64::from(c.r()) + 0.587 * f64::from(c.g()) + 0.114 * f64::from(c.b());
+    let mut pts = Vec::new();
+    for i in 0..196 {
+        let along = 31.0 + f64::from(i) * 0.25;
+        for j in -12..=12 {
+            let across = f64::from(j) * 0.25;
+            pts.extend([
+                (along, across),
+                (-along, across),
+                (across, along),
+                (across, -along),
+            ]);
+        }
+    }
+    let a: Vec<f64> = pts
+        .iter()
+        .map(|p| {
+            let at = card.to_card(p.0 as f32, p.1 as f32) * ppm;
+            lum(printed.pixels[at.y as usize * printed.size[0] + at.x as usize])
+        })
+        .collect();
+    let ncc = |b: &[Option<f64>]| -> f64 {
+        let pairs: Vec<(f64, f64)> = a.iter().zip(b).filter_map(|(x, y)| y.map(|y| (*x, y))).collect();
+        let n = pairs.len().max(1) as f64;
+        let (ma, mb) = (
+            pairs.iter().map(|p| p.0).sum::<f64>() / n,
+            pairs.iter().map(|p| p.1).sum::<f64>() / n,
+        );
+        let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
+        for (x, y) in &pairs {
+            sab += (x - ma) * (y - mb);
+            saa += (x - ma) * (x - ma);
+            sbb += (y - mb) * (y - mb);
+        }
+        sab / (saa * sbb).sqrt().max(1e-12)
+    };
+    let mut scores: Vec<(f64, u8)> = (0..4u8)
+        .map(|k| {
+            let (sn, cs) = (f64::from(k) * std::f64::consts::FRAC_PI_2).sin_cos();
+            let b: Vec<Option<f64>> = pts
+                .iter()
+                .map(|p| {
+                    let q = (cs * p.0 - sn * p.1, sn * p.0 + cs * p.1);
+                    rgb.sample_at(&reg.map, q).map(|c| {
+                        255.0 * (0.299 * f64::from(c[0]) + 0.587 * f64::from(c[1]) + 0.114 * f64::from(c[2]))
+                    })
+                })
+                .collect();
+            (ncc(&b), k)
+        })
+        .collect();
+    scores.sort_by(|x, y| y.0.total_cmp(&x.0));
+    (scores[0].1, scores[0].0 - scores[1].0)
 }
 
 fn result_json(p: &Processed) -> String {
@@ -231,6 +380,13 @@ fn result_json(p: &Processed) -> String {
             "scale": (pl.scale * 1e6).round() / 1e6,
             "scale_fitted": p.scaled,
         })),
+        "print_quarter": p.print_quarter,
+        "print_margin": round(p.print_margin),
+        "card_pose": {
+            "angle_deg": round(p.pose.angle_deg()),
+            "centre_mm": pair(p.pose.centre),
+            "scale": (p.pose.scale * 1e6).round() / 1e6,
+        },
         "rms_mm": p.rms_mm.map(round),
         "shots": shots,
         "holes_mm": p.holes.iter().map(|h| pair(*h)).collect::<Vec<_>>(),
@@ -459,7 +615,13 @@ mod tests {
         // The photo on the grid without the placement: on the printed card's rings.
         let rgb = Rgb::decode(&std::fs::read(&p.photo.image).unwrap()).unwrap();
         let reg = register(&rgb.to_gray(), &issf_air_pistol()).unwrap();
-        let plain = disc_centre(&on_grid(&rgb, &reg, None, &card), &card, (0.3, -0.2));
+        let none = Placement {
+            angle: 0.0,
+            quarter: 0,
+            shift: (0.0, 0.0),
+            scale: 1.0,
+        };
+        let plain = disc_centre(&on_grid(&rgb, &reg, &none, &card), &card, (0.3, -0.2));
         let got = disc_centre(p.image.as_ref().unwrap(), &card, want);
         println!("the disc's centre: printed {printed:?}, the photo without the placement {plain:?}");
         println!(
@@ -476,6 +638,35 @@ mod tests {
         assert!(plain.0.hypot(plain.1) < 0.05, "{plain:?}");
         assert!((got.0 - want.0).hypot(got.1 - want.1) < 0.05);
         assert!((want.0 - truth.0).hypot(want.1 - truth.1) < 0.05);
+        // The printed card's pose: turned -90.5°, centred where the card was.
+        println!(
+            "print quarter {:?} (margin {:.3}), pose {:+.3}° at ({:+.3}, {:+.3}) scale {:.5}",
+            p.print_quarter,
+            p.print_margin,
+            p.pose.angle_deg(),
+            p.pose.centre.0,
+            p.pose.centre.1,
+            p.pose.scale
+        );
+        assert!(p.print_quarter.is_some());
+        assert!((p.pose.angle_deg() + 90.5).abs() < 0.2, "{}", p.pose.angle_deg());
+        assert!((p.pose.centre.0 - truth.0).hypot(p.pose.centre.1 - truth.1) < 0.05);
+        // A printed point through the pose lands where the photo shows it: each hole of the
+        // demo (print mm) at its shot (frame mm).
+        let print_holes: Vec<(f64, f64)> = shots
+            .iter()
+            .map(|s| {
+                let a = (90.0f64 + 0.5).to_radians();
+                (
+                    a.cos() * s.0 - a.sin() * s.1 + 0.7,
+                    a.sin() * s.0 + a.cos() * s.1 - 0.4,
+                )
+            })
+            .collect();
+        for (h, s) in print_holes.iter().zip(&shots) {
+            let f = p.pose.apply(*h);
+            assert!((f.0 - s.0).hypot(f.1 - s.1) < 0.1, "{h:?} -> {f:?}, shot {s:?}");
+        }
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -487,9 +678,32 @@ mod tests {
         let d = dir("noshots");
         let photo = store(&d, "demo", &jpeg, now_unix()).unwrap();
         let p = process(photo, &card, &[]).unwrap();
-        println!("{} holes found: {:?}", p.holes.len(), p.holes);
+        println!(
+            "{} holes found: {:?}; print quarter {:?} (margin {:.3})",
+            p.holes.len(),
+            p.holes,
+            p.print_quarter,
+            p.print_margin
+        );
         assert_eq!(p.holes.len(), shots().len());
         assert!(p.placement.is_none() && p.shots.is_empty());
+        // The frame is the print's: the holes where the demo punched them (print mm), the
+        // printed card drawn as it is.
+        assert!(p.print_quarter.is_some());
+        assert_eq!(p.pose, CardPose::IDENTITY);
+        for s in shots() {
+            let a = (90.0f64 + 0.5).to_radians();
+            let h = (
+                a.cos() * s.0 - a.sin() * s.1 + 0.7,
+                a.sin() * s.0 + a.cos() * s.1 - 0.4,
+            );
+            let d = p
+                .holes
+                .iter()
+                .map(|f| (f.0 - h.0).hypot(f.1 - h.1))
+                .fold(f64::INFINITY, f64::min);
+            assert!(d < 0.05, "hole {h:?}: nearest {d}");
+        }
         std::fs::remove_dir_all(&d).unwrap();
     }
 

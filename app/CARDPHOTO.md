@@ -187,18 +187,26 @@ Builds (`src/photo.rs`, the window in `main.rs`):
   `<photo>.result.json` beside the photo (the registration, the placement, per shot the
   hole, the difference and its uncertainty, the holes no shot explains). The clean-up
   leaves results files alone.
-- **On the card view:** the photo over the printed card, faded by a Card–Photo bar at the
-  top right (0.6 when the photo arrives); the holes found as thin rings, also with the photo
-  faded out, so the sensor's markers and the real holes can be compared at any zoom.
-  Cleared with the series, or by "Remove from the card".
+- **On the card view, all in the sensor's frame** (the shots and groups never turn): the
+  shots where the sensor put them; the photo where the real card hung, so its holes lie
+  under the markers (a marker with no hole under it is a shot measured in the wrong place);
+  the app's printed card drawn where the real card hung too (turned and shifted in the
+  holder: `photo::CardPose`), so its rings and numbers lie on the photo's. A Card–Photo bar
+  at the top right fades between the two (0.6 when the photo arrives); the holes found as
+  thin rings, also with the photo faded out. The listed scores stay the sensor's (from its
+  own centre). Cleared with the series, or by "Remove from the card".
+- **Which way up the card was printed** (needed to draw the app's card turned like the real
+  one): the photo's luminance in strips along the four axes, 31–80 mm out, where the numbers
+  are, against the app's card at each quarter turn (normalised cross-correlation; the rings
+  are the same at every turn, the numbers are not). The best turn must win by 0.1, else a
+  warning and the card drawn upright. Without shots the view is the print's frame: the photo
+  with its numbers upright, the holes in printed mm.
 - **The ground-truth panel** in the photo window: the rms of the sensor against the holes,
   the worst shot; warnings (the card small in the photo, the rings fitting badly, shots with
   no hole, holes no shot explains, the series grown since the photo); per shot the shot,
   hole − shot (the sensor's axes), the distance; the photo's resolution, the rings' rms,
   the lens; the card's centre and turn in the holder (and the print's scale when fitted);
   "Keep the photo for evaluation"; "Take another photo", "Open the folder".
-- Without shots the card's quarter turn is unknown (C2): the photo may show turned by a
-  multiple of 90° until C6 reads the print.
 
 **Tests:**
 
@@ -213,8 +221,12 @@ Builds (`src/photo.rs`, the window in `main.rs`):
    its edge): on the printed card itself within 0.03 mm of the centre (the measurement);
    the photo without the placement within 0.05 mm of the printed card's centre (the
    registration); with the placement within 0.05 mm of where the placement and the truth put
-   the card's centre in the frame (the demo: 0.8 mm off the sensor's centre).
-2a. The same photo without shots: all 8 holes found.
+   the card's centre in the frame (the demo: 0.8 mm off the sensor's centre). The print's
+   quarter turn found by the numbers; the printed card's pose within 0.2° and 0.05 mm of the
+   truth (turned −90.5°); the demo's holes (printed mm) through the pose within 0.1 mm of
+   their shots.
+2a. The same photo without shots: all 8 holes found, within 0.05 mm of where the demo
+   punched them in printed mm (the numbers upright, the printed card not moved).
 3. A photo with no card: refused, "no card found".
 4. The UI by a look (the user, when convenient): `OPENSIGHTS_DEMO_PHOTO=1 cargo run` in
    `app/`, connect, make a few shots (BOOT, or `sim` on the serial console), "Card photo",
@@ -248,6 +260,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-23 | C4 | The view decided with the user: everything in the sensor's frame, the app's card drawn where the real card hung; the print's way up from the numbers; `cargo test` run by Claude | **Pass**, tests 1–3 (2 and 2a extended). The numbers found the quarter turn with a margin of 0.18 (with shots) and 0.18 (without), against 0.1 needed; with the app's own font (the demo's card is the app's SVG): a real card's font will match less well, C5 will tell. The printed card's pose −90.44° (true −90.5°), its centre (+0.406, +0.695) mm (true +0.406, +0.696). The UI: to be looked at again (the user). |
 | 2026-11-23 | C4 | The user's look at the demo: the photo's rings beside the printed card's, about 0.8 mm apart, its numbers turned 90°; then test 2 added, run by Claude | **The photo is placed right; the view mixes two frames.** The disc's centre: the printed card (+0.007, −0.011) mm (the measurement), the photo without the placement (−0.010, +0.015) (the registration), with it (+0.388, +0.707) against the demo's card centre (+0.406, +0.696). The demo puts the card 0.8 mm off the sensor's centre and turned 90.5° in the holder; the card view draws the printed card centred and upright in the sensor's frame, and the photo where the real card hung. So the rings can't coincide, and the numbers show turned. Test 1's check (the table under each shot) would have passed a 2 mm error: test 2 now measures the photo's place. Open: which frame the view should use (to decide with the user). |
 | 2026-11-23 | C4 | `cargo test` in `app/` (`photo::tests`), run by Claude; the UI not looked at (no screen capture or input on this Wayland desktop) | **Pass**, tests 1–3. The demo photo: 3.0 s (dev build), the rings 0.008 mm rms over 7509 of 7621 points, 11.0 px/mm, the card's turn 0.44° (true 0.5°), its shift 0.85 mm (true 0.81 mm), the sensor against the holes 0.086 mm rms, the worst 0.14 mm. **Found on the way:** the placement's quarter turn is relative to the registration's own axes (the outline fixes those only modulo 90°), not to the print: the test compared it with the print's and failed; the photo on the grid was right all along (it goes through the same placement). |
 | 2026-11-23 | C3 | `cargo test` in `app/` (HTTP over TCP to 127.0.0.1, and once over the LAN address 192.168.2.201:8710), run by Claude | **Pass**, tests 1–9. The phone-like JPEG: 5 segments dropped (APP1 Exif, APP1 XMP, APP2 MPF, COM, 400 trailing bytes), pixels identical, orientation 6 kept. **Found on the way:** the size limit's message said "0 MB" for limits under 1 MB (now rounded up). The phone itself not yet tried (the user). |

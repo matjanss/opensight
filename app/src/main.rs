@@ -1248,29 +1248,55 @@ impl SensorApp {
         let painter = ui.painter_at(rect);
         let ppp = ui.ctx().pixels_per_point();
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        // With a card photo, the printed card is drawn where the real card hung (turned and
+        // shifted in the holder, `photo::CardPose`), so its rings and numbers lie on the
+        // photo's; the shots stay in the sensor's frame, on the photo's holes.
+        let pose = self
+            .card_photo
+            .as_ref()
+            .map_or(photo::CardPose::IDENTITY, |cp| cp.p.pose);
+        let centre = self.card.to_card(0.0, 0.0);
+        // A point of the printed card (mm from its top left) in the view, and back.
+        let posed = |m: Vec2| -> Vec2 {
+            let f = pose.apply((f64::from(m.x - centre.x), f64::from(centre.y - m.y)));
+            self.card.to_card(f.0 as f32, f.1 as f32)
+        };
+        let unposed = |m: Vec2| -> Vec2 {
+            let p = pose.invert((f64::from(m.x - centre.x), f64::from(centre.y - m.y)));
+            self.card.to_card(p.0 as f32, p.1 as f32)
+        };
+        let quad = |mm: egui::Rect| {
+            [mm.left_top(), mm.right_top(), mm.right_bottom(), mm.left_bottom()]
+                .map(|c| to_screen(posed(c.to_vec2())))
+        };
         if let Some(tex) = self.card_texture.get(ui.ctx(), &self.card, width * ppp) {
-            painter.image(
-                tex.id(),
-                egui::Rect::from_min_size(origin, card_mm * scale),
-                uv,
-                Color32::WHITE,
-            );
+            let all = egui::Rect::from_min_size(egui::Pos2::ZERO, card_mm);
+            paint_quad(&painter, tex.id(), quad(all));
         }
         if self.view.zoom > 1.0 {
             // A sharp render of the visible part, over the stretched full card. Rendered
             // once the view stops moving; while it moves the last one moves along.
             let visible = egui::Rect::from_center_size(self.view.centre_mm.to_pos2(), rect.size() / scale);
+            // The part of the printed card in view (a turned card: what covers the view).
+            let region = egui::Rect::from_points(
+                &[
+                    visible.left_top(),
+                    visible.right_top(),
+                    visible.right_bottom(),
+                    visible.left_bottom(),
+                ]
+                .map(|c| unposed(c.to_vec2()).to_pos2()),
+            );
             let px = [
-                (rect.width() * ppp).round() as u32,
-                (rect.height() * ppp).round() as u32,
+                (region.width() * scale * ppp).round() as u32,
+                (region.height() * scale * ppp).round() as u32,
             ];
             let settled = self.view == view_before && !response.dragged();
             if let Some((tex, mm)) = self
                 .card_texture
-                .detail(ui.ctx(), &self.card, visible, px, settled)
+                .detail(ui.ctx(), &self.card, region, px, settled)
             {
-                let at = egui::Rect::from_min_max(to_screen(mm.min.to_vec2()), to_screen(mm.max.to_vec2()));
-                painter.image(tex.id(), at, uv, Color32::WHITE);
+                paint_quad(&painter, tex.id(), quad(mm));
             }
             if !settled {
                 ui.ctx().request_repaint();
@@ -3394,15 +3420,6 @@ impl SensorApp {
                     "No shots in the series: {n} hole{} found.",
                     if n == 1 { "" } else { "s" }
                 ));
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(
-                            "Without shots the card's quarter turn is unknown: it may show turned.",
-                        )
-                        .weak(),
-                    )
-                    .wrap(),
-                );
             }
             if cp.series_len != series_len {
                 ui.add(
@@ -3450,12 +3467,14 @@ impl SensorApp {
                 p.px_per_mm, p.reg_rms_mm, p.reg_points.0, p.reg_points.1, p.k1
             );
             if let Some(pl) = &p.placement {
-                let c = pl.to_frame((0.0, 0.0));
+                let c = p.pose.centre;
                 details.push_str(&format!(
-                    " The card in the holder: its centre at {:+.2}, {:+.2} mm, turned {:+.2}°{}.",
+                    " The card in the holder: its centre at {:+.2}, {:+.2} mm from the sensor's, turned {:+.2}°{}; \
+                     the app's card is drawn there, the shots where the sensor put them (their scores are the sensor's, \
+                     from its own centre).",
                     c.0,
                     c.1,
-                    -pl.tilt_deg(),
+                    p.pose.angle_deg(),
                     if p.scaled {
                         format!(", printed at {:.4} of the sensor's scale", 1.0 / pl.scale)
                     } else {
@@ -3498,6 +3517,23 @@ impl SensorApp {
             }
         }
     }
+}
+
+/// A texture on a quadrilateral (corners from its top left, clockwise): the printed card,
+/// turned where the real card hung.
+fn paint_quad(painter: &egui::Painter, tex: egui::TextureId, corners: [egui::Pos2; 4]) {
+    let mut mesh = egui::Mesh::with_texture(tex);
+    let uvs = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+    for (pos, uv) in corners.into_iter().zip(uvs) {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos,
+            uv: egui::pos2(uv.0, uv.1),
+            color: Color32::WHITE,
+        });
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// "Card photo", under the series.

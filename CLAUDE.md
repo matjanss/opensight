@@ -345,8 +345,9 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   `photo.rs` processes a photo on a thread (registration, holes against the series' shots,
   the photo resampled onto the card's grid through the placement, `<photo>.result.json`).
   `main.rs`: "Card photo" under the series opens the photo window (QR, status, drop a file,
-  the ground-truth panel); the card view shows the photo under the shots (a Card–Photo fade
-  bar, top right) and the holes as rings. `OPENSIGHTS_DEMO_PHOTO=1` adds a synthetic photo
+  the ground-truth panel); the card view stays in the sensor's frame (the shots never turn):
+  the photo where the real card hung, the app's card drawn there too (`photo::CardPose`, the
+  print's way up from its numbers), a Card–Photo fade bar (top right), the holes as rings. `OPENSIGHTS_DEMO_PHOTO=1` adds a synthetic photo
   of the series (`photo::demo_photo`).
 - **Calibration (step 5d):** `calwizard.rs` holds the wizard and the field check as state
   machines (events, Status and Calibration in; actions out: calibration mode, the template
