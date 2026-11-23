@@ -32,6 +32,7 @@ rust-analyzer picks up `app/`.
   a few sparks at the template's centre and tells you whether the calibration still holds.
 - **Card photo** (under the series): a photo of the shot card, taken with a phone, shows
   under the shots, and the app compares each shot with its hole (the sensor's accuracy).
+  The series list then shows each shot's score on the paper beside the sensor's.
   Scan the QR code with the phone (on the same Wi-Fi), take the photo with the card flat on a
   grey or coloured surface. The photo's metadata (location and the like) is removed;
   photos are kept 30 days unless marked to keep. Work in progress, see

@@ -193,8 +193,17 @@ Builds (`src/photo.rs`, the window in `main.rs`):
   the app's printed card drawn where the real card hung too (turned and shifted in the
   holder: `photo::CardPose`), so its rings and numbers lie on the photo's. A Card–Photo bar
   at the top right fades between the two (0.6 when the photo arrives); the holes found as
-  thin rings, also with the photo faded out. The listed scores stay the sensor's (from its
-  own centre). Cleared with the series, or by "Remove from the card".
+  thin rings, also with the photo faded out. Cleared with the series, or by "Remove from
+  the card".
+- **The score on paper** (the series list): with a photo of the series processed, a
+  "Paper" column beside the sensor's score. Each shot's hole is taken back through the pose
+  to the printed card's mm and scored by the same rule as the sensor's shots (the card's
+  pellet diameter, not the hole's measured size; ring scoring needs only the distance from
+  the centre, so an unknown print quarter changes nothing). Equal scores are faint; a score
+  that differs is as strong as the sensor's, with a tooltip. "–": no hole found for the
+  shot; "·": a shot after the photo. The header line adds the paper's total and how many
+  differ. The sensor's scores, total and chart stay the sensor's. The results file holds
+  each shot's `paper_mm`, `paper_score` and `sensor_score`.
 - **Which way up the card was printed** (needed to draw the app's card turned like the real
   one): the photo's luminance in strips along the four axes, 31–80 mm out, where the numbers
   are, against the app's card at each quarter turn (normalised cross-correlation; the rings
@@ -224,7 +233,8 @@ Builds (`src/photo.rs`, the window in `main.rs`):
    the card's centre in the frame (the demo: 0.8 mm off the sensor's centre). The print's
    quarter turn found by the numbers; the printed card's pose within 0.2° and 0.05 mm of the
    truth (turned −90.5°); the demo's holes (printed mm) through the pose within 0.1 mm of
-   their shots.
+   their shots. The paper: each shot's `paper` within 0.1 mm of where the demo punched its
+   hole in printed mm, and its score the score of that punched point.
 2a. The same photo without shots: all 8 holes found, within 0.05 mm of where the demo
    punched them in printed mm (the numbers upright, the printed card not moved).
 3. A photo with no card: refused, "no card found".
@@ -235,6 +245,9 @@ Builds (`src/photo.rs`, the window in `main.rs`):
    the shots, a ring around each marker, the Card–Photo bar fading between them. Then the
    QR code with the phone (as C3's phone test, but into the app): the photo processed the
    same way (with no holes in it: every shot "no hole found").
+   The series list: a "Paper" column; with the demo's card 0.8 mm off in the holder, in
+   decimal most shots differ by a tenth or a few (faint where equal), the header line with
+   "paper …" and "(n differ)".
 
 ## C5. Real photos
 
@@ -260,6 +273,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-23 | C4 | The score on paper (the user's wish): the "Paper" column in the series list; `cargo test` run by Claude | **Pass**, tests 1–3 (2 extended): every shot's paper position within 0.1 mm of its punched hole, the same score as the punched point; 6 of the demo's 8 shots score differently in tenths on paper (the card 0.8 mm off in the holder). The UI: to be looked at (the user). |
 | 2026-11-23 | C4 | The view decided with the user: everything in the sensor's frame, the app's card drawn where the real card hung; the print's way up from the numbers; `cargo test` run by Claude | **Pass**, tests 1–3 (2 and 2a extended). The numbers found the quarter turn with a margin of 0.18 (with shots) and 0.18 (without), against 0.1 needed; with the app's own font (the demo's card is the app's SVG): a real card's font will match less well, C5 will tell. The printed card's pose −90.44° (true −90.5°), its centre (+0.406, +0.695) mm (true +0.406, +0.696). The UI: to be looked at again (the user). |
 | 2026-11-23 | C4 | The user's look at the demo: the photo's rings beside the printed card's, about 0.8 mm apart, its numbers turned 90°; then test 2 added, run by Claude | **The photo is placed right; the view mixes two frames.** The disc's centre: the printed card (+0.007, −0.011) mm (the measurement), the photo without the placement (−0.010, +0.015) (the registration), with it (+0.388, +0.707) against the demo's card centre (+0.406, +0.696). The demo puts the card 0.8 mm off the sensor's centre and turned 90.5° in the holder; the card view draws the printed card centred and upright in the sensor's frame, and the photo where the real card hung. So the rings can't coincide, and the numbers show turned. Test 1's check (the table under each shot) would have passed a 2 mm error: test 2 now measures the photo's place. Open: which frame the view should use (to decide with the user). |
 | 2026-11-23 | C4 | `cargo test` in `app/` (`photo::tests`), run by Claude; the UI not looked at (no screen capture or input on this Wayland desktop) | **Pass**, tests 1–3. The demo photo: 3.0 s (dev build), the rings 0.008 mm rms over 7509 of 7621 points, 11.0 px/mm, the card's turn 0.44° (true 0.5°), its shift 0.85 mm (true 0.81 mm), the sensor against the holes 0.086 mm rms, the worst 0.14 mm. **Found on the way:** the placement's quarter turn is relative to the registration's own axes (the outline fixes those only modulo 90°), not to the print: the test compared it with the print's and failed; the photo on the grid was right all along (it goes through the same placement). |

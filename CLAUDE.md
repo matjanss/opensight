@@ -347,8 +347,10 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   `main.rs`: "Card photo" under the series opens the photo window (QR, status, drop a file,
   the ground-truth panel); the card view stays in the sensor's frame (the shots never turn):
   the photo where the real card hung, the app's card drawn there too (`photo::CardPose`, the
-  print's way up from its numbers), a Card–Photo fade bar (top right), the holes as rings. `OPENSIGHTS_DEMO_PHOTO=1` adds a synthetic photo
-  of the series (`photo::demo_photo`).
+  print's way up from its numbers), a Card–Photo fade bar (top right), the holes as rings.
+  The series list gets a "Paper" column: each hole scored on the printed card
+  (`ShotCheck::paper`, the hole through the pose), beside the sensor's score.
+  `OPENSIGHTS_DEMO_PHOTO=1` adds a synthetic photo of the series (`photo::demo_photo`).
 - **Calibration (step 5d):** `calwizard.rs` holds the wizard and the field check as state
   machines (events, Status and Calibration in; actions out: calibration mode, the template
   point, the record), run by the calibration window (`CalTask`) or the probe. The fit is

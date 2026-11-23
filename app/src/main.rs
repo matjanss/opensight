@@ -1569,6 +1569,18 @@ impl SensorApp {
         let mut clear = false;
         let mut photo = false;
         let width = ui.available_width();
+        // With a card photo of this series: each shot's score on the paper, its hole gauged
+        // against the printed rings (None: no hole found). Shots added since are left out.
+        let paper: Option<Vec<Option<Score>>> = self
+            .card_photo
+            .as_ref()
+            .filter(|cp| !cp.p.shots.is_empty())
+            .map(|cp| {
+                cp.p.shots
+                    .iter()
+                    .map(|c| c.paper.map(|q| self.card.score(q.0 as f32, q.1 as f32)))
+                    .collect()
+            });
         ui.allocate_ui(egui::vec2(width, series_h), |ui| {
             ui.set_height(series_h);
             card(ui, &format!("Series · {}", self.card.name), |ui| {
@@ -1591,6 +1603,28 @@ impl SensorApp {
                     }
                     if !self.unscored.is_empty() {
                         detail.push_str(&format!(" · {} not scored", self.unscored.len()));
+                    }
+                    if let Some(paper) = &paper {
+                        let differ = paper
+                            .iter()
+                            .zip(&self.series)
+                            .filter(|(p, (_, s))| p.is_some_and(|p| p.text(decimal) != s.text(decimal)))
+                            .count();
+                        let on_paper: Option<Vec<Score>> = paper.iter().copied().collect();
+                        match on_paper.filter(|p| p.len() == n) {
+                            Some(p) if decimal => {
+                                let t: u32 = p.iter().map(|s| s.tenths as u32).sum();
+                                detail.push_str(&format!(" · paper {}.{}", t / 10, t % 10));
+                            }
+                            Some(p) => {
+                                let r: u32 = p.iter().map(|s| s.ring as u32).sum();
+                                detail.push_str(&format!(" · paper {r}"));
+                            }
+                            None => detail.push_str(" · paper incomplete"),
+                        }
+                        if differ > 0 {
+                            detail.push_str(&format!(" ({differ} differ)"));
+                        }
                     }
                     ui.label(RichText::new(detail).weak());
                 });
@@ -1615,6 +1649,23 @@ impl SensorApp {
                             .id_salt("series")
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
+                                if paper.is_some() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("#").small().weak());
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            score_cell(ui, |ui| {
+                                                ui.label(RichText::new("Sensor").small().weak());
+                                            });
+                                            score_cell(ui, |ui| {
+                                                ui.label(RichText::new("Paper").small().weak())
+                                                    .on_hover_text(
+                                                        "The score of the shot's hole in the card photo, \
+                                                         gauged against the printed rings.",
+                                                    );
+                                            });
+                                        });
+                                    });
+                                }
                                 // Newest first; a hit with no score after the scored shot it followed.
                                 for i in (0..=self.series.len()).rev() {
                                     for (_, hit) in
@@ -1632,10 +1683,47 @@ impl SensorApp {
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new(format!("{}", i + 1)).weak());
                                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                            ui.label(RichText::new(score.text(decimal)).strong());
-                                            if score.inner_ten && decimal {
-                                                ui.label(RichText::new("X").small().weak());
-                                            }
+                                            let text = |s: &Score, strong: bool| {
+                                                let t = RichText::new(s.text(decimal));
+                                                if strong { t.strong() } else { t.weak() }
+                                            };
+                                            let x = |ui: &mut Ui, s: &Score| {
+                                                if s.inner_ten && decimal {
+                                                    ui.label(RichText::new("X").small().weak());
+                                                }
+                                            };
+                                            let Some(paper) = &paper else {
+                                                ui.label(text(score, true));
+                                                x(ui, score);
+                                                return;
+                                            };
+                                            score_cell(ui, |ui| {
+                                                ui.label(text(score, true));
+                                                x(ui, score);
+                                            });
+                                            score_cell(ui, |ui| match paper.get(i) {
+                                                Some(Some(p)) => {
+                                                    // Equal: faint; different: as strong as the sensor's.
+                                                    let same = p.text(decimal) == score.text(decimal);
+                                                    let r = ui.label(text(p, !same));
+                                                    x(ui, p);
+                                                    if !same {
+                                                        r.on_hover_text(format!(
+                                                            "On paper {}, the sensor {}.",
+                                                            p.text(decimal),
+                                                            score.text(decimal)
+                                                        ));
+                                                    }
+                                                }
+                                                Some(None) => {
+                                                    ui.label(RichText::new("–").weak())
+                                                        .on_hover_text("No hole found for this shot.");
+                                                }
+                                                None => {
+                                                    ui.label(RichText::new("·").weak())
+                                                        .on_hover_text("Shot after the photo.");
+                                                }
+                                            });
                                         });
                                     });
                                 }
@@ -2357,6 +2445,12 @@ fn nice_step(range: f32, max_steps: usize) -> f32 {
 
 /// Number of shots per score: bars per ring for whole-ring scoring, points per tenth for
 /// decimal scoring. Both axes fit the data. Fills the rest of `ui`.
+/// One score column of the series list (right to left), wide enough for "10.9 X".
+fn score_cell(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    let h = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(egui::vec2(52.0, h), Layout::right_to_left(Align::Center), add);
+}
+
 fn score_chart(ui: &mut Ui, scores: &[Score], decimal: bool) {
     let size = egui::vec2(ui.available_width(), ui.available_height().max(110.0));
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
@@ -3470,8 +3564,8 @@ impl SensorApp {
                 let c = p.pose.centre;
                 details.push_str(&format!(
                     " The card in the holder: its centre at {:+.2}, {:+.2} mm from the sensor's, turned {:+.2}°{}; \
-                     the app's card is drawn there, the shots where the sensor put them (their scores are the sensor's, \
-                     from its own centre).",
+                     the app's card is drawn there, the shots where the sensor put them (scored from the sensor's \
+                     centre; the series lists the paper's scores beside them).",
                     c.0,
                     c.1,
                     p.pose.angle_deg(),

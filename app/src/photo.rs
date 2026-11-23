@@ -83,6 +83,10 @@ pub struct ShotCheck {
     /// The hole centre's uncertainty from the photo (1σ, a lower bound), and its diameter.
     pub sd_mm: f64,
     pub hole_d_mm: f64,
+    /// The hole on the paper: mm from the printed card's centre (y up, the print's way up
+    /// when `print_quarter` is known), what a scorer would gauge. Scoring needs only its
+    /// distance from the centre, so an unknown quarter turn doesn't change the score.
+    pub paper: Option<(f64, f64)>,
 }
 
 /// What came out of one photo.
@@ -199,6 +203,14 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
         )
     };
     let image = on_grid(&rgb, &reg, &view, card);
+    let pose = CardPose::new(&view, k);
+    let checks = checks
+        .into_iter()
+        .map(|c| ShotCheck {
+            paper: c.hole.map(|h| pose.invert(h)),
+            ..c
+        })
+        .collect();
     let result_file = photo.image.with_extension("result.json");
     let mut p = Processed {
         photo,
@@ -210,7 +222,7 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
         px_per_mm: px_per_mm(&reg),
         print_quarter,
         print_margin: margin,
-        pose: CardPose::new(&view, k),
+        pose,
         placement,
         scaled,
         shots: checks,
@@ -219,7 +231,7 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
         image: Some(image),
     };
     p.seconds = t0.elapsed().as_secs_f64();
-    std::fs::write(&p.result_file, result_json(&p))
+    std::fs::write(&p.result_file, result_json(&p, card))
         .map_err(|e| format!("could not save the results: {e}"))?;
     Ok(p)
 }
@@ -238,6 +250,7 @@ fn shot_checks(gt: &GroundTruth, shots: &[(f64, f64)]) -> Vec<ShotCheck> {
                 diff: hole.map(|h| (h.0 - s.0, h.1 - s.1)),
                 sd_mm: r.hole.as_ref().map_or(0.0, |h| h.sd_mm / gt.placement.scale),
                 hole_d_mm: r.hole.as_ref().map_or(0.0, |h| 2.0 * h.radius_mm),
+                paper: None, // set once the card's pose is known
             }
         })
         .collect()
@@ -344,8 +357,13 @@ fn print_quarter(rgb: &Rgb, reg: &Registration, card: &Card) -> (u8, f64) {
     (scores[0].1, scores[0].0 - scores[1].0)
 }
 
-fn result_json(p: &Processed) -> String {
+fn result_json(p: &Processed, card: &Card) -> String {
     let pair = |v: (f64, f64)| serde_json::json!([round(v.0), round(v.1)]);
+    // Scored by the card's rule (the pellet's diameter, decimal in tenths).
+    let score = |v: (f64, f64)| {
+        let s = card.score(v.0 as f32, v.1 as f32);
+        serde_json::json!({ "ring": s.ring, "tenths": s.tenths, "inner_ten": s.inner_ten })
+    };
     let shots: Vec<_> = p
         .shots
         .iter()
@@ -358,6 +376,9 @@ fn result_json(p: &Processed) -> String {
                 "diff_mm": s.diff.map(pair),
                 "hole_sd_mm": s.hole.map(|_| round(s.sd_mm)),
                 "hole_d_mm": s.hole.map(|_| round(s.hole_d_mm)),
+                "paper_mm": s.paper.map(pair),
+                "sensor_score": score(s.shot),
+                "paper_score": s.paper.map(score),
             })
         })
         .collect();
@@ -667,6 +688,17 @@ mod tests {
             let f = p.pose.apply(*h);
             assert!((f.0 - s.0).hypot(f.1 - s.1) < 0.1, "{h:?} -> {f:?}, shot {s:?}");
         }
+        // The paper: each hole where the demo punched it on the print, scored as the print
+        // scores it; the card 0.8 mm off in the holder, some differ from the sensor's.
+        let mut differ = 0;
+        for ((c, h), s) in p.shots.iter().zip(&print_holes).zip(&shots) {
+            let q = c.paper.unwrap();
+            assert!((q.0 - h.0).hypot(q.1 - h.1) < 0.1, "paper {q:?}, punched {h:?}");
+            let paper = card.score(q.0 as f32, q.1 as f32);
+            assert_eq!(paper, card.score(h.0 as f32, h.1 as f32), "shot {s:?}");
+            differ += usize::from(paper != card.score(s.0 as f32, s.1 as f32));
+        }
+        println!("{differ} of {} shots score differently on paper", shots.len());
         std::fs::remove_dir_all(&d).unwrap();
     }
 
