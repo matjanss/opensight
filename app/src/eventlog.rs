@@ -15,82 +15,11 @@ use crate::protocol::{
     NO_VALUE, Settings,
 };
 
-/// C's `printf("%.*g", prec, v)`: `prec` significant digits, trailing zeros dropped, the
-/// exponent form below 1e-4 and from 10^prec up (the firmware's floats in its log lines).
-pub fn fmt_g(v: f64, prec: usize) -> String {
-    if v == 0.0 {
-        return if v.is_sign_negative() {
-            "-0".into()
-        } else {
-            "0".into()
-        };
-    }
-    if v.is_nan() {
-        return if v.is_sign_negative() {
-            "-nan".into()
-        } else {
-            "nan".into()
-        };
-    }
-    if v.is_infinite() {
-        return if v < 0.0 { "-inf".into() } else { "inf".into() };
-    }
-    let p = prec.max(1);
-    let sci = format!("{:.*e}", p - 1, v);
-    let (mant, exp) = sci.split_once('e').unwrap();
-    let x: i32 = exp.parse().unwrap();
-    if x < -4 || x >= p as i32 {
-        let sign = if x < 0 { '-' } else { '+' };
-        format!("{}e{}{:02}", strip_zeros(mant), sign, x.abs())
-    } else {
-        strip_zeros(&format!("{:.*}", (p as i32 - 1 - x) as usize, v)).to_owned()
-    }
-}
-
-fn strip_zeros(s: &str) -> &str {
-    if s.contains('.') {
-        s.trim_end_matches('0').trim_end_matches('.')
-    } else {
-        s
-    }
-}
-
-fn g9(v: f32) -> String {
-    fmt_g(f64::from(v), 9)
-}
-
-/// CRC-32 (IEEE 802.3, as zlib's): the firmware's `cfg` and calibration IDs.
-pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
-}
+use calib::text::{crc32, g9};
 
 /// The `cfg` line's fields, as `measure::formatFields` writes them.
 fn cfg_fields(cal: &Calibration, set: &Settings) -> String {
-    let mut s = String::new();
-    for (i, ch) in cal.ch.iter().enumerate() {
-        if i > 0 {
-            s.push(' ');
-        }
-        s += &format!("CH{}=", i + 1);
-        if ch.mic {
-            s += &[ch.x, ch.y, ch.h, ch.k, ch.offset_ns, ch.sigma_ns]
-                .map(g9)
-                .join(",");
-        } else {
-            s.push('-');
-        }
-    }
+    let mut s = calib::text::channel_fields(&cal.ch);
     s += &format!(
         " lim={} drop={} lost={} area={} tog={} pmax={}",
         g9(set.res_limit_ns),
@@ -118,10 +47,8 @@ pub fn cfg_line(cal: &Calibration, set: &Settings) -> (u32, String) {
 
 /// The calibration ID: the CRC-32 of the channel fields alone (`measure::calibrationId`).
 #[allow(dead_code)] // the calibration wizard (step 5d)
-pub fn calibration_id(cal: &Calibration, set: &Settings) -> u32 {
-    let fields = cfg_fields(cal, set);
-    let channels = &fields[..fields.find(" lim=").unwrap_or(fields.len())];
-    crc32(channels.as_bytes())
+pub fn calibration_id(cal: &Calibration, _set: &Settings) -> u32 {
+    calib::text::calibration_id(&cal.ch)
 }
 
 fn ns_time(t_ns: u64, digits: usize) -> String {
@@ -216,7 +143,7 @@ pub fn event_line(e: &Event) -> String {
 }
 
 /// Today's date (UTC), "YYYY-MM-DD".
-fn utc_date() -> String {
+pub fn utc_date() -> String {
     let days = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() / 86_400)
@@ -302,41 +229,6 @@ mod tests {
     const REC_LINE: &str = "rec n=21 t=30.9781094 cfg=4A87309E T=18.00 RH=50.0 p=1013.25 meas=--- c=342.739716 \
         CH3=320400,321500 CH4=214100,215000 CH5=5800,6200 CH6=214100,215000 CH7=167100,167900 CH8=0,500 \
         pt=30.0000,30.0000 cal=- ir=-160725/27075";
-
-    #[test]
-    fn g_matches_c() {
-        // gcc's printf("%.9g") of these floats.
-        let cases: [(f32, &str); 20] = [
-            (0.33333, "0.333330005"),
-            (1.0 / 3.0, "0.333333343"),
-            (-105.0, "-105"),
-            (10.5, "10.5"),
-            (0.0, "0"),
-            (1500.0, "1500"),
-            (1e-5, "9.99999975e-06"),
-            (123_456_789.0, "123456792"),
-            (1_234_567_890.0, "1.23456794e+09"),
-            (0.0001, "9.99999975e-05"),
-            (-0.5, "-0.5"),
-            (42.5, "42.5"),
-            (342.739_716, "342.739716"),
-            (99_999.992_2, "99999.9922"),
-            (1e10, "1e+10"),
-            (0.000_123_456, "0.000123456004"),
-            (-0.0, "-0"),
-            (65.0, "65"),
-            (100_000.0, "100000"),
-            (3.141_592_65, "3.14159274"),
-        ];
-        for (v, want) in cases {
-            assert_eq!(g9(v), want, "{v:e}");
-        }
-    }
-
-    #[test]
-    fn crc_is_zlibs() {
-        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
-    }
 
     #[test]
     fn cfg_line_as_the_firmware() {

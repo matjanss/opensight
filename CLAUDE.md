@@ -56,7 +56,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Host board (`hardware/host-board/`) | v0.3 designed and routed, not yet on the bench; firmware already on its pin map | Order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner moved out along the diagonal (d about 15–25 mm, PLAN D1's update; principle in `hardware/frame/top-right-holder.svg`), plus bottom-middle and right-middle mics; the user designs and prints the holders. The firmware defaults still use the old slid position (65, 105) until d is fixed |
 | IR curtain | Designed (receiver on the host board, emitter board); firmware built and passing simulated (step 4b, on GPIO 13) | Its bench test (summary, PLAN phase 1.6), then the real gate |
-| App (`app/`) | v0.1.2, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay; protocol v3 (step 5c, merged to `main`): unscored holes and missed shots, the event log, a read-only Measurement section | The calibration wizard with a Rust fit (step 5d, PLAN D5, phase 3) |
+| App (`app/`) | v0.1.2, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay; protocol v3 (step 5c, merged to `main`): unscored holes and missed shots, the event log, a read-only Measurement section; the calibration wizard and the field check with the Rust fit (step 5d, merged to `main`) | A settings editor; the shot store in flash (PLAN D6) |
 | Range server, MQTT, management, wasm viewer | Not started (wasm parked) | FUTURE_ARCHITECTURE step 2, PLAN phase 4 |
 
 ## Repository
@@ -80,10 +80,13 @@ firmware/                     PlatformIO, Arduino-ESP32 3.x on pioarduino (IDF 5
   tools/calibrate.py          the calibration fit (numpy, scipy)
   tools/layout_study.py       mic layout study behind PLAN D1/D2 (numpy)
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
-  src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs, eventlog.rs
+  src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs, eventlog.rs,
+                              calwizard.rs
+  calib/                      the calibration crate (workspace member): the target's solver
+                              (Rust port), the calibration fit (calibrate.py's), log-line text
   examples/probe.rs           a protocol v3 test client without the UI (bench tests over BLE)
   TODO.md                     the app's to-do list
-  assets/                     cards/, fonts/ (IBM Plex Sans), icon/
+  assets/                     cards/, fonts/ (IBM Plex Sans), icon/, templates/ (calibration)
 hardware/acoustic-sensor/     sensor board, KiCad 10
 hardware/host-board/          host board, KiCad 10
 hardware/frame/               frame drawings: top-right-holder.svg (the moved corner mic's holder, principle)
@@ -102,9 +105,15 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   encoding against the examples in PROTOCOL.md, and the event log's lines against the
   firmware's. On Linux the app builds libdbus from source (`vendored`), so no
   `libdbus-1-dev` is needed.
-- **Over BLE without the UI:** `cargo run --example probe -- <seconds> <log> [writes]` in
+- **The calibration crate:** `cargo test` in `app/` also runs `calib/` (the workspace's
+  default members): the solver against `firmware/test/vectors`, the fit against
+  `calibrate.py`'s self-test (`calib/tests/data`, made by `calibrate.py --selftest
+  --write-log ... --json ...`).
+- **Over BLE without the UI:** `cargo run --example probe -- <seconds> <log> [writes|drive]` in
   `app/` connects to a bonded sensor, subscribes to everything, writes the event log as the
-  app does, and with `writes` exercises Settings, Calibration and Control (MEASUREMENT 5).
+  app does, and with `writes` exercises Settings, Calibration and Control (MEASUREMENT 5);
+  `drive` runs the calibration wizard and the field check from stdin (`check`, `calibrate`,
+  `quit`; MEASUREMENT 5d).
   Opening the serial port resets the board (Linux): start a serial session first, then the
   probe.
 - **Tools:** `python3 firmware/tools/layout_study.py [--drop] [--offsets]` (a few
@@ -318,6 +327,11 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   `eventlog.rs` writes them as the firmware's log lines (`cfg`, `rec`, `dip`, `MISSED`; C's
   `%.9g` and CRC-32, so the IDs match) to `logs/YYYY-MM-DD.log` in the app's data folder (a
   setting, on by default). The sensor settings show them read-only ("Measurement").
+- **Calibration (step 5d):** `calwizard.rs` holds the wizard and the field check as state
+  machines (events, Status and Calibration in; actions out: calibration mode, the template
+  point, the record), run by the calibration window (`CalTask`) or the probe. The fit is
+  `calib::fit` (`calibrate.py` ported; the record rounded as it prints it). The template is
+  `assets/templates/grid-4x4.json`. A report goes next to the event logs.
 - `main.rs`: the egui UI.
   - **The main window, while connected:** the target card with the series' shots, and the
     series list with a shots-per-score chart below it (bars per ring, or points per tenth

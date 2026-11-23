@@ -462,9 +462,10 @@ recovered as +1.99 °C. Left for the parts: the DS18B20 and BME280 tests (3a-3, 
 ### Phase 3: protocol and app (MEASUREMENT step 5)
 
 The raw-event message and calibration over BLE (D7): **done 2026-11-23** (MEASUREMENT
-5a–5c, protocol v3, passing over BLE). Next: the Rust fit, ported from `calibrate.py` and
-checked against the same logs, and a calibration wizard in the desktop app (5d). The shot
-store in flash.
+5a–5c, protocol v3, passing over BLE). The Rust fit (`app/calib`, ported from
+`calibrate.py` and checked against the same logs) and the calibration wizard with the field
+check in the desktop app: **done 2026-11-23** (5d, passing over BLE with the simulator).
+The shot store in flash.
 
 ### Phase 4: the network (FUTURE_ARCHITECTURE step 2)
 

@@ -39,6 +39,10 @@ pub enum Command {
     SetPin(u32),
     /// Makes the sensor forget the shots the app has received, so they aren't sent again.
     ClearShots,
+    /// A Control command (calibration mode, template point: `protocol::encode_*`).
+    Control(Vec<u8>),
+    /// Writes the calibration record (the wizard's fit); the sensor confirms it in Status.
+    WriteCalibration(Box<proto::Calibration>),
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +150,7 @@ struct Connection {
     /// None on firmware from before the shot characteristic.
     shot: Option<Characteristic>,
     /// Protocol v3 (required: the version check makes sure of it).
+    control: Characteristic,
     calibration: Characteristic,
     settings: Characteristic,
     /// The cfg ID of the calibration and settings last read (eventlog::cfg_line's).
@@ -318,6 +323,18 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                             events.send(Event::Error(format!("Could not clear the sensor's shots: {e}")));
                         }
                     }
+                }
+                Some(Command::Control(bytes)) => {
+                    if let Some(c) = &conn
+                        && let Err(e) = c.peripheral.write(&c.control, &bytes, WriteType::WithResponse).await {
+                            events.send(Event::Error(format!("Could not send a command to the sensor: {e}")));
+                        }
+                }
+                Some(Command::WriteCalibration(cal)) => {
+                    if let Some(c) = &conn
+                        && let Err(e) = c.peripheral.write(&c.calibration, &proto::encode_calibration(&cal), WriteType::WithResponse).await {
+                            events.send(Event::Error(format!("Could not write the calibration: {e}")));
+                        }
                 }
                 Some(Command::SetPin(pin)) => {
                     if let Some(c) = &conn && let Some(chr) = &c.pin {
@@ -572,6 +589,7 @@ async fn open(
     };
     let event = v3(proto::EVENT_UUID).ok_or_else(missing)?;
     let status = v3(proto::STATUS_UUID).ok_or_else(missing)?;
+    let control = v3(proto::CONTROL_UUID).ok_or_else(missing)?;
     let calibration = v3(proto::CALIBRATION_UUID).ok_or_else(missing)?;
     let settings = v3(proto::SETTINGS_UUID).ok_or_else(missing)?;
     let name_value = proto::decode_name(&p.read(&name).await.map_err(read_err)?).unwrap_or_default();
@@ -617,6 +635,7 @@ async fn open(
             name,
             pin,
             shot,
+            control,
             calibration,
             settings,
             config_id: None,

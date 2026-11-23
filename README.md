@@ -26,6 +26,10 @@ rust-analyzer picks up `app/`.
 - The app can save every event the sensor captured (also the rejected ones) to a log file,
   one per day, in the same format as the sensor's serial log (Settings → Measurement; on by
   default). Settings also show the sensor's calibration, settings and air readings.
+- Calibrate from the app: Settings → Measurement → **Calibrate…** walks through the spark
+  points of the calibration template (16 points, 10 sparks each), fits the microphones'
+  positions and timing, shows the result, and writes it to the sensor. **Field check…** makes
+  a few sparks at the template's centre and tells you whether the calibration still holds.
 - Settings also show the heartbeat (the sensor's `millis()`, every 2 s). The blue LED
   only shows the sensor's status: pairing mode, a PIN reset, a shot.
 - The sensor has a name (`OpenSights-xyz` at first) that you can change from the app.

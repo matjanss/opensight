@@ -21,8 +21,11 @@ It takes calibration mode's sparks (`mode=cal`) of the newest session in the log
 settings the last one was made with); --any-pt adds the simulator's other shots, which
 carry their true point too.
 
-Usage: calibrate.py LOG... [--date YYYYMMDD] [--any-pt]
-       calibrate.py --selftest     (a simulated calibration, fitted and checked)
+Usage: calibrate.py LOG... [--date YYYYMMDD] [--any-pt] [--json OUT]
+       calibrate.py --selftest [--write-log LOG] [--json OUT]
+           (a simulated calibration, fitted and checked; --write-log keeps its log)
+--json writes the fit's results (per channel x, y, k, offset, sigma, their uncertainties, the
+residual, the record's lines and id): the Rust fit (app/calib) is checked against them.
 """
 import argparse
 import datetime
@@ -195,8 +198,11 @@ class Fit:
         lo[2 * n:3 * n], hi[2 * n:3 * n] = 0.0, 2.0
         q0 = q0.copy()
         q0[2 * n:3 * n] = np.clip(q0[2 * n:3 * n], 0.01, 1.99)
+        # Tight tolerances: k and the offsets trade off along a flat valley, and scipy's
+        # defaults (1e-8) stop a few ns short of the minimum, enough to change the record's
+        # last digits (the Rust fit, app/calib, goes to the minimum: bench 5d-1).
         return least_squares(self.scaled, q0, jac_sparsity=self.sparsity(), method="trf",
-                             x_scale="jac", bounds=(lo, hi))
+                             x_scale="jac", bounds=(lo, hi), jac="3-point", ftol=1e-14, xtol=1e-14, gtol=1e-14)
 
 
 def position(mics_xyh, t0, c):
@@ -331,13 +337,35 @@ def calibrate(cfgs, recs, date, out=print, any_pt=False):
     for l in lines:
         out(l)
     return {"chans": chans, "x": mx, "y": my, "k": k, "off": off, "sigma": sigma, "rms": rms,
-            "sd_k": sd_k, "sd_off": sd_off,
-            "lines": lines, "id": cal_id, "err_after": tot_after}
+            "sd_x": sd_x, "sd_y": sd_y, "sd_k": sd_k, "sd_off": sd_off,
+            "sparks": int(keep.sum()), "points": len(points), "outliers": outliers,
+            "lines": lines, "id": cal_id, "err_before": tot_before, "err_after": tot_after}
 
 
 # ---- The self-test: a simulated calibration, as the target's simulator makes one ----
 
-def selftest(per_point=10, seed=20261122):
+def write_json(path, res):
+    import json
+    chans = res["chans"]
+    out = {
+        "channels": [i + 1 for i in chans],
+        "x": list(map(float, res["x"])), "y": list(map(float, res["y"])),
+        "k": list(map(float, res["k"])), "offset": list(map(float, res["off"])),
+        "sigma": list(map(float, res["sigma"])),
+        "sd_x": list(map(float, res["sd_x"])), "sd_y": list(map(float, res["sd_y"])),
+        "sd_k": list(map(float, res["sd_k"])), "sd_offset": list(map(float, res["sd_off"])),
+        "rms": float(res["rms"]), "sparks": int(res["sparks"]), "points": int(res["points"]),
+        "outliers": int(res["outliers"]), "id": "%08X" % res["id"], "lines": res["lines"],
+        "err_before_rms": float(math.sqrt(np.mean(np.square(res["err_before"])))),
+        "err_after_rms": float(math.sqrt(np.mean(np.square(res["err_after"])))),
+    }
+    if "truth" in res:
+        out["truth"] = res["truth"]
+    with open(path, "w") as f:
+        json.dump(out, f, indent=1)
+
+
+def selftest(per_point=10, seed=20261122, write_log=None, json_out=None):
     sys.path.insert(0, __file__.rsplit("/", 1)[0])
     import model
     rng = np.random.default_rng(seed)
@@ -377,6 +405,9 @@ def selftest(per_point=10, seed=20261122):
                 edges = " ".join("CH%d=%d,%d" % (i + 1, s1[j] - ref, s2[j] - ref) for j, i in enumerate(chans))
                 lines.append("rec n=%d t=%.7f cfg=%08X T=18.00 RH=50.0 p=1013.25 meas=--- c=%.9g %s "
                              "pt=%.4f,%.4f mode=cal cal=-" % (ev, ev * 0.15, cfg_id, c_ms, edges, px, py))
+    if write_log:
+        with open(write_log, "w") as f:
+            f.write("\n".join(lines) + "\n")
     cfgs, recs = {}, []
     for l in lines:
         cc = parse_cfg(l)
@@ -389,6 +420,10 @@ def selftest(per_point=10, seed=20261122):
     if res is None:
         print("selftest: FAIL (no fit)")
         return 1
+    if json_out:
+        res["truth"] = {"x": true_xy[:, 0].tolist(), "y": true_xy[:, 1].tolist(), "k": true_k.tolist(),
+                        "offset": (true_off - true_off.mean()).tolist()}
+        write_json(json_out, res)
     ex = np.abs(res["x"] - true_xy[:, 0]).max()
     ey = np.abs(res["y"] - true_xy[:, 1]).max()
     zk = np.abs(res["k"] - true_k) / res["sd_k"]
@@ -415,13 +450,18 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--sparks", type=int, default=10, help="--selftest: sparks per point")
     ap.add_argument("--seed", type=int, default=20261122, help="--selftest: random seed")
+    ap.add_argument("--write-log", help="--selftest: write its simulated log here")
+    ap.add_argument("--json", help="write the fit's results as JSON here")
     a = ap.parse_args()
     if a.selftest:
-        return selftest(a.sparks, a.seed)
+        return selftest(a.sparks, a.seed, a.write_log, a.json)
     if not a.logs:
         ap.error("give a log, or --selftest")
     cfgs, recs = read_logs(a.logs)
-    return 0 if calibrate(cfgs, recs, a.date, any_pt=a.any_pt) else 1
+    res = calibrate(cfgs, recs, a.date, any_pt=a.any_pt)
+    if res and a.json:
+        write_json(a.json, res)
+    return 0 if res else 1
 
 
 if __name__ == "__main__":

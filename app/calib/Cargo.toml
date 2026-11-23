@@ -1,0 +1,12 @@
+[package]
+name = "calib"
+version = "0.1.0"
+edition = "2024"
+description = "OpenSights calibration: the target's solver and the calibration fit (PLAN D5), portable (native, wasm)"
+publish = false
+
+[dependencies]
+nalgebra = "0.33"
+
+[dev-dependencies]
+serde_json = "1"

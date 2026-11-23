@@ -15,7 +15,6 @@ pub const PIN_UUID: Uuid = uuid!("5631f105-5314-4f02-b637-0654ff6d409d");
 pub const SHOT_UUID: Uuid = uuid!("5631f106-5314-4f02-b637-0654ff6d409d");
 pub const EVENT_UUID: Uuid = uuid!("5631f107-5314-4f02-b637-0654ff6d409d");
 pub const STATUS_UUID: Uuid = uuid!("5631f108-5314-4f02-b637-0654ff6d409d");
-#[allow(dead_code)] // the calibration wizard (step 5d)
 pub const CONTROL_UUID: Uuid = uuid!("5631f109-5314-4f02-b637-0654ff6d409d");
 pub const CALIBRATION_UUID: Uuid = uuid!("5631f10a-5314-4f02-b637-0654ff6d409d");
 pub const SETTINGS_UUID: Uuid = uuid!("5631f10b-5314-4f02-b637-0654ff6d409d");
@@ -487,17 +486,9 @@ pub fn encode_settings(s: &Settings) -> [u8; SETTINGS_LEN] {
     out.try_into().unwrap()
 }
 
-/// One channel of the calibration: its mic, and its arrival-time calibration.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Channel {
-    pub mic: bool,
-    pub x: f32,
-    pub y: f32,
-    pub h: f32,
-    pub k: f32,
-    pub offset_ns: f32,
-    pub sigma_ns: f32,
-}
+/// One channel of the calibration: its mic, and its arrival-time calibration (the
+/// calibration crate's, so the fit's results go straight into a Calibration write).
+pub use calib::Channel;
 
 /// The calibration record (PROTOCOL.md "Calibration", 213 bytes).
 #[derive(Clone, Debug, PartialEq)]
@@ -551,7 +542,6 @@ pub fn decode_calibration(bytes: &[u8]) -> Option<Calibration> {
     })
 }
 
-#[allow(dead_code)] // the calibration wizard (step 5d)
 pub fn encode_calibration(c: &Calibration) -> [u8; CALIBRATION_LEN] {
     let mut out = Vec::with_capacity(CALIBRATION_LEN);
     out.push(LAYOUT);
@@ -569,12 +559,10 @@ pub fn encode_calibration(c: &Calibration) -> [u8; CALIBRATION_LEN] {
 }
 
 /// Control commands (PROTOCOL.md "Control").
-#[allow(dead_code)] // the calibration wizard (step 5d)
 pub fn encode_cal_mode(on: bool) -> [u8; 2] {
     [0x01, on as u8]
 }
 
-#[allow(dead_code)] // the calibration wizard (step 5d)
 pub fn encode_point(x_mm: f32, y_mm: f32) -> [u8; 9] {
     let mut out = [0; 9];
     out[0] = 0x02;
@@ -583,7 +571,6 @@ pub fn encode_point(x_mm: f32, y_mm: f32) -> [u8; 9] {
     out
 }
 
-#[allow(dead_code)] // the calibration wizard (step 5d)
 pub fn encode_no_point() -> [u8; 1] {
     [0x03]
 }

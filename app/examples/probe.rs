@@ -2,13 +2,23 @@
 //! everything, optionally exercises the writes, and writes the event log as the app does.
 //! For bench tests over BLE without the UI (MEASUREMENT step 5).
 //!
-//! cargo run --example probe -- <seconds> <log file> [writes]
+//! cargo run --example probe -- <seconds> <log file> [writes | drive]
 //!
 //! `writes`: after connecting, rewrite the settings unchanged, send an invalid settings
 //! write (span 10 mm), write the calibration record back with a date, and run the Control
 //! commands (calibration mode on, a template point, no point, off), each checked against the
 //! Status notifications. Prints every shot, every event's verdict, and a summary.
+//!
+//! `drive`: the calibration wizard and the field check (src/calwizard.rs), in test mode (each
+//! spark at the point it carries: the simulator's), run by commands on stdin, one per line:
+//! `check` (the field check: prints `READY check`, then `CHECK <sparks> <mean> <worst>
+//! PASS|FAIL`), `calibrate` (prints `READY calibrate`, collects the template's sparks, fits,
+//! writes, prints the report and `CALIBRATED <id>` once the sensor confirms it), `quit`.
+//! A script on the serial port makes the sparks after each READY.
 
+#[path = "../src/calwizard.rs"]
+#[allow(dead_code)]
+mod calwizard;
 #[path = "../src/eventlog.rs"]
 #[allow(dead_code)]
 mod eventlog;
@@ -58,6 +68,7 @@ async fn main() -> Result<(), String> {
     let seconds: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(60);
     let log_path = std::path::PathBuf::from(args.get(2).cloned().unwrap_or("probe.log".into()));
     let writes = args.get(3).is_some_and(|s| s == "writes");
+    let drive = args.get(3).is_some_and(|s| s == "drive");
     let _ = std::fs::remove_file(&log_path);
     let mut log_lines: Vec<String> = Vec::new();
 
@@ -228,6 +239,132 @@ async fn main() -> Result<(), String> {
         w(&control, &[0x07], "an unknown command (must be ignored)").await;
     }
 
+    if drive {
+        // Commands from stdin, through a thread (tokio here has no stdin support).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        std::thread::spawn(move || {
+            for line in std::io::stdin().lines().map_while(Result::ok) {
+                if tx.send(line.trim().to_owned()).is_err() {
+                    break;
+                }
+            }
+        });
+        let send = async |p: &Peripheral, actions: Vec<calwizard::Action>| {
+            for a in actions {
+                let (chr, bytes, what) = match &a {
+                    calwizard::Action::CalMode(on) => {
+                        (&control, proto::encode_cal_mode(*on).to_vec(), "calibration mode")
+                    }
+                    calwizard::Action::Point(x, y) => {
+                        (&control, proto::encode_point(*x, *y).to_vec(), "template point")
+                    }
+                    calwizard::Action::NoPoint => (&control, proto::encode_no_point().to_vec(), "no point"),
+                    calwizard::Action::WriteCalibration(c) => (
+                        &calibration,
+                        proto::encode_calibration(c).to_vec(),
+                        "the calibration record",
+                    ),
+                };
+                match p.write(chr, &bytes, WriteType::WithResponse).await {
+                    Ok(()) => println!("probe: sent {what}: {a:?}"),
+                    Err(e) => println!("probe: sending {what} FAILED: {e}"),
+                }
+            }
+        };
+        let mut status = st0.clone();
+        let mut check: Option<calwizard::FieldCheck> = None;
+        let mut wizard: Option<calwizard::Wizard> = None;
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        let mut events_seen = 0u32;
+        while Instant::now() < deadline {
+            tokio::select! {
+                cmd = rx.recv() => match cmd.as_deref() {
+                    Some("check") => {
+                        let mut c = calwizard::FieldCheck::new(&calwizard::grid_template());
+                        send(&p, c.take_actions()).await;
+                        check = Some(c);
+                        println!("READY check");
+                    }
+                    Some("calibrate") => {
+                        let (cal, _) = read_config(&p).await?;
+                        status = proto::decode_status(&p.read(&status_chr_ref(&chars)).await.map_err(|e| e.to_string())?).unwrap_or(status);
+                        match calwizard::Wizard::new(calwizard::grid_template(), &status, &cal, true) {
+                            Ok(mut w) => {
+                                w.start();
+                                send(&p, w.take_actions()).await;
+                                wizard = Some(w);
+                                println!("READY calibrate");
+                            }
+                            Err(e) => println!("CALIBRATE FAILED {e}"),
+                        }
+                    }
+                    Some("quit") | None => break,
+                    Some(other) => println!("probe: unknown command {other:?}"),
+                },
+                n = tokio::time::timeout(Duration::from_millis(500), stream.next()) => {
+                    let Ok(Some(n)) = n else { continue };
+                    if n.uuid == proto::EVENT_UUID {
+                        let e = proto::decode_event(&n.value).ok_or("event decode")?;
+                        events_seen += 1;
+                        if !cfg_seen.contains(&e.cfg) {
+                            let (c, s) = read_config(&p).await?;
+                            let (id, line) = eventlog::cfg_line(&c, &s);
+                            cfg_seen.insert(id);
+                            log_lines.push(line);
+                        }
+                        log_lines.push(eventlog::event_line(&e));
+                        if let Some(c) = &mut check {
+                            c.on_event(&e);
+                            if c.done {
+                                let r = c.result().unwrap();
+                                println!("CHECK {} {:.4} {:.4} {}", r.sparks, r.mean_mm, r.worst_mm, if r.pass { "PASS" } else { "FAIL" });
+                                send(&p, c.take_actions()).await;
+                                check = None;
+                            }
+                        }
+                        if let Some(w) = &mut wizard {
+                            w.on_event(&e);
+                            if w.point_done() {
+                                let (have, want) = w.progress();
+                                println!("probe: {have} of {want} sparks (ignored {}): fitting", w.ignored);
+                                w.next_point();
+                                match &w.phase {
+                                    calwizard::Phase::Fitted(_) => {
+                                        println!("{}", w.report("the bench NodeMCU").unwrap());
+                                        w.write(20261123);
+                                        send(&p, w.take_actions()).await;
+                                    }
+                                    other => println!("CALIBRATE FAILED {other:?}"),
+                                }
+                            }
+                        }
+                    } else if n.uuid == proto::STATUS_UUID
+                        && let Some(st) = proto::decode_status(&n.value)
+                    {
+                        {
+                            status = st.clone();
+                            if let Some(w) = &mut wizard {
+                                w.on_status(&st);
+                                if let calwizard::Phase::Done { id } = w.phase {
+                                    send(&p, w.take_actions()).await;
+                                    println!("CALIBRATED {id:08X}");
+                                    wizard = None;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::fs::write(&log_path, log_lines.join("\n") + "\n").map_err(|e| e.to_string())?;
+        println!(
+            "probe: drive ended; {events_seen} events, log {}",
+            log_path.display()
+        );
+        p.disconnect().await.ok();
+        return Ok(());
+    }
+
     let start = Instant::now();
     let (mut shots, mut events, mut statuses) = (Vec::new(), Vec::new(), 0u32);
     let mut kinds = [0u32; 3];
@@ -314,4 +451,14 @@ async fn main() -> Result<(), String> {
     );
     p.disconnect().await.ok();
     Ok(())
+}
+
+fn status_chr_ref(
+    chars: &std::collections::BTreeSet<btleplug::api::Characteristic>,
+) -> btleplug::api::Characteristic {
+    chars
+        .iter()
+        .find(|c| c.uuid == proto::STATUS_UUID)
+        .cloned()
+        .unwrap()
 }

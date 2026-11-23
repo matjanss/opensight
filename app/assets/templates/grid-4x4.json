@@ -1,0 +1,77 @@
+{
+ "name": "4 × 4 grid",
+ "description": "The calibration template on the card holder: 16 spark points on a 4 × 4 grid at ±25 and ±75 mm, and a check point at the centre (PLAN D5). 1 unit = 1 mm, x right, y up, as seen by the shooter.",
+ "points": [
+  [
+   -75,
+   -75
+  ],
+  [
+   -25,
+   -75
+  ],
+  [
+   25,
+   -75
+  ],
+  [
+   75,
+   -75
+  ],
+  [
+   -75,
+   -25
+  ],
+  [
+   -25,
+   -25
+  ],
+  [
+   25,
+   -25
+  ],
+  [
+   75,
+   -25
+  ],
+  [
+   -75,
+   25
+  ],
+  [
+   -25,
+   25
+  ],
+  [
+   25,
+   25
+  ],
+  [
+   75,
+   25
+  ],
+  [
+   -75,
+   75
+  ],
+  [
+   -25,
+   75
+  ],
+  [
+   25,
+   75
+  ],
+  [
+   75,
+   75
+  ]
+ ],
+ "sparks_per_point": 10,
+ "check_point": [
+  0,
+  0
+ ],
+ "check_sparks": 5,
+ "check_limit_mm": 0.5
+}

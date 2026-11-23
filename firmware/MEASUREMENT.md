@@ -89,7 +89,7 @@ so a problem shows up in the step that caused it.
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
 | 3 | Solver and calibration | **simulated tests pass** (bare NodeMCU, 2026-11-22; merged to `main`): 3a-1, 3a-2, 3a-5, 3b (PC), 3c, 3d, 3e. Waiting for the parts: 3a-3 and 3a-4 (DS18B20, BME280). With the boards: the same solver and calibration on real sensors (PLAN phase 1) |
 | 4 | Validity checks | 4a (the verdict) passes its simulated bench tests on a bare NodeMCU (2026-11-22). 4b (the curtain) passes its simulated bench tests on a bare NodeMCU (2026-11-22, run by Claude). 4c (loudness, sharpness) planned |
-| 5 | Protocol and app | 5a (protocol v3), 5b (firmware) and 5c (app) built; their bench test passes over BLE from the PC (2026-11-23, run by Claude, merged to `main`). 5d (the calibration wizard, the Rust fit) planned |
+| 5 | Protocol and app | 5a (protocol v3), 5b (firmware) and 5c (app) built; their bench test passes over BLE from the PC (2026-11-23, run by Claude, merged to `main`). 5d (the calibration wizard, the Rust fit, the field check) passes its bench test over BLE (2026-11-23, run by Claude, merged to `main`) |
 | 6 | Wi-Fi and MQTT | planned |
 
 ### 1. Capture and raw dump
@@ -1313,6 +1313,65 @@ from the app`, calibration mode on and off, the point, `control command ignored`
 with 0 event gaps and every hit linked to a received event. Then the app log's `rec` and `cfg`
 lines identical to the serial log's, and `tools/replay <app log>` giving the board's verdicts.
 
+#### 5d. The calibration wizard
+
+Decisions (2026-11-23): the template is the simulator's 4 × 4 grid at ±25 and ±75 mm, 10
+sparks per point, with a check point at the centre; the fit uses `nalgebra`; the field check
+comes now.
+
+Built (done, on `step5d-calibration`):
+
+- **`app/calib/`** (a library crate, pure Rust, part of the app's workspace: `cargo test` runs
+  it): the target's solver (`solver.rs`, a line-for-line port in f32 of `lib/measure`), the
+  fit (`fit.rs`, `calibrate.py` ported), the log-line text (`%.9g`, CRC-32, the IDs; the
+  app's event log uses it), and a `cfg`/`rec` reader.
+  - The fit: per channel x, y, k and the offset, h fixed, each spark's emission time solved
+    exactly for the current values (variable projection: the same minimum as `calibrate.py`'s
+    joint fit, over 4n − 1 values); a robust first fit (soft L1, 50 ns, by reweighting), the
+    sparks beyond 5 MADs out, the final fit Deming-scaled with k within 0–2
+    (Levenberg-Marquardt); uncertainties from the covariance; the error per point before and
+    after through the solver; the record rounded as `calibrate.py` prints it, and its ID.
+  - `calibrate.py`: `--json` (its results) and `--write-log` (the self-test's log), and tighter
+    tolerances in its final fit (see the results).
+- **`app/src/calwizard.rs`:** the wizard and the field check as state machines without UI.
+  They take the events, Status and Calibration, and give the actions to send (calibration
+  mode, the point, the record). A spark counts only in calibration mode, at the current point,
+  with the cfg the wizard started with, and with both edges on every mic channel; a changed
+  cfg stops the run; cancel sends calibration mode off. After the write, the run is done when
+  Status reports the record's ID. The field check: N sparks at the check point, the sensor's
+  solved positions against it, mean within the limit.
+- **`app/assets/templates/grid-4x4.json`:** the template (points, sparks per point, check
+  point, check sparks 5, limit 0.5 mm).
+- **The app:** "Calibrate…" and "Field check…" in the sensor settings' Measurement section
+  open a window: the template drawn with the current point and progress, Next / Redo /
+  Cancel, then the fit (residual, error before and after, per channel with ±, per point,
+  warnings), "Write to the sensor", the confirmation; the report saved next to the event logs
+  (`calibration-<date>-<id>.txt`). Closing the window cancels. New BLE commands: Control and
+  the Calibration write.
+- **`examples/probe.rs` `drive`:** runs the same wizard and check from commands on stdin, in
+  test mode (each spark at the point it carries: the simulator's own grid).
+
+##### 5d bench test
+
+**On the PC** (`cargo test` in `app/`): the solver against the firmware's vectors (as its
+native test: positions within 0.001 mm, residuals and tau within 0.5 ns); the fit against
+`calibrate.py` on the self-test's log (`app/calib/tests/data`): every value within 0.1 of its
+uncertainty, the Rust fit's objective not higher than `calibrate.py`'s, the same error after
+(0.0129 mm rms); against the truth as the self-test (mics within 0.05 mm, k and offsets within
+3.5 sd); the wizard point by point, with stray and wrong-cfg sparks, redo, cancel, a changed
+cfg; the field check.
+
+**On the board**, over BLE with the probe (`drive`) and the simulator on serial, coordinated
+by a script: `valid default`, `offset clear`, `sigma 50`, `mic sim`, `k 0.33333`, `sim fault
+none`, `curtain off`, `cal clear`, `deadtime 30`, `sim cal truth`. Then: probe `check`, `sim at
+0 0 5`; probe `calibrate`, `sim cal 10`; probe `check`, `sim at 0 0 5`; `sim random 200`
+(calibration mode off). Afterwards `sim cal reset`, `mic default`, `cal clear`, `offset
+clear`, `sigma 50`, `k 0.33333`.
+
+**Expected:** the first check a few tenths of a mm off (the simulator's truth isn't the
+nominal layout), `CALIBRATED <id>` (the sensor holds the record: serial `cal: record <id> ...
+in use`), the second check about 0.01 mm, `sim random 200` about 0.013–0.015 mm rms (as 3e-3).
+
 ### 6. Wi-Fi and MQTT
 
 FUTURE_ARCHITECTURE.md step 2. Check the GPIO 36/39 erratum here (see Risks).
@@ -1339,6 +1398,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-23 | 5d | Bare NodeMCU, BLE from the PC (the probe in `drive` mode, `target/release/examples/probe`), the simulator on serial, run by Claude; serial `logs/device-monitor-261123-074754-5d.log`, probe `logs/probe-261123-074754-5d.out`, app log `logs/app-events-261123-074754-5d.log` | **Passes.** Field check before: 5 sparks at (0, 0), 0.436 mm (within the 0.5 mm limit: at the centre `sim cal truth` is least off). The wizard took the 160 sparks of `sim cal 10` (0 ignored), fitted: residual 38.5 ns, the error over the 16 points 0.814 → 0.013 mm rms (every point's worst under 0.035 mm); wrote record `E2BA6297`, which the sensor confirmed in Status and serial (`in use`). Field check after: 0.010 mm. `sim random 200` afterwards: 0.0145 mm rms, worst 0.061 mm (3e-3 with calibrate.py: 0.0140). `calibrate.py` on the same 160 sparks: mics within 0.0004 mm, k within 0.0001, offsets within 1.3 ns (±50 ns), the same 38.5 ns and 0.814 → 0.013 mm. On the PC: the solver meets the firmware's vector tolerances (worst position 0.000055 mm); the fit against calibrate.py's self-test within 0.1 sd. **Found:** scipy's defaults (1e-8) stop a few ns short of the minimum along the flat k–offset valley (objective 629 427 against the Rust fit's 629 420): `calibrate.py`'s final fit now uses tolerances of 1e-14 and central differences (629 420.24; offsets within 0.25 ns of the Rust fit). The last printed digits can still differ, so the two records' IDs aren't compared. |
 | 2026-11-23 | 5a–5c | Bare NodeMCU, the PC's Bluetooth (BlueZ 5.85) with the probe (`app/examples/probe.rs`), run by Claude; serial `logs/device-monitor-261123-071418-5b.log`, probe `logs/probe-261123-071418.out`, app log `logs/app-events-261123-071418.log` | **Passes.** All 6 `sim` runs PASS. Over BLE: 50 events (38 acoustic, 5 holes, 7 missed), 0 gaps; 40 hits (28 shots, 5 holes, 7 missed), all 40 linked to a received event marked sent; 28 Status notifications. The app log's 38 `rec` lines and 3 `cfg` lines are identical to the serial log's (IDs included); `tools/replay` on the app log: ok 28, lost 5, outside 5 (the board's), 5 `dip` lines, the shots 0.0084 mm rms from the true points. Writes: settings unchanged accepted, span 10 mm rejected, the 213-byte calibration record (a long write) became the record (`05FB1059`, the ID the app computes too), calibration mode and the point in Status, an unknown command ignored. Native tests 23 (7 new), app tests 33. **Found on the way:** after the update BlueZ kept the v2 GATT layout cached. The sensor's "services changed" (at boot, then on the live link, then directly on its handle: rc 0) didn't make it read again. Pairing again does; the app now waits 8 s for a new layout, then says so. NimBLE's GATT caching (a database hash) doesn't build in NimBLE-Arduino 2.3. The re-pair needed the sensor's PIN (123456, not the default) and pairing mode: the serial `pairing` command was added for that. |
 | 2026-11-22 | 4b | 4b-0 to 4b-8 again with the edge tie, bare NodeMCU, run by Claude over serial, logs `logs/device-monitor-261122-230319.log` (diagnostic) and `-230420.log` (the full test), upload `logs/upload-261122-230227.log` | **Passes.** The tie now comes from one 20 µs pulse on GPIO 12 seen by both the I2S and capture channel 2 (the user chose this over a fixed correction). First try (`-203458.log`): 10.58 ms off and every dip unclaimed, because `gpio_reset_pin` briefly pulled GPIO 12 up and that rise opened the tie's event 10 ms before the real pulse. Fixed: the pin is set up as a quiet low output before it is routed, the tie waits out the dead time, and it checks the two agree within 50 µs (else a warning, and the catch stays). Both boots: `the start's catch was -4100 ns off` and `-4175 ns off`, so the edge corrected the bad case. The firmware's dip time against the hardware truth: mean −122 to −146 ns per run, rms 126–150 ns, worst 224 ns (200 shots of `sim random 200`), the same over both boots. All runs PASS; 4b-1 to 4b-6 as in the row below. Replay: 340 events, 0 verdicts differ, 20 `dip` lines; positions 0.013 mm rms against the truth. Native tests: 16 pass. Still in the code: the simulator's diagnostics (`steps late`, `tick 0 vs the sync edge`). |
 | 2026-11-22 | 4b | 4b-0 to 4b-8, bare NodeMCU, run by Claude over serial (scripted; the user's OK for this step), logs `logs/device-monitor-261122-195051.log` (first run) to `-201814.log`, uploads `logs/upload-261122-*.log` | **Not passed yet: an open problem in the clock tie.** Boot: no `curtain:` error, so the capture unit and the pulse generator share MCPWM group 0. **Bugs found and fixed on the way:** (1) firmware: when the capture interrupt runs late, the driver hands over a dip's fall before its rise, and the fall was dropped (`len=-`); the ring now keeps a fall until its rise. (2) replay: a `rec` line ending in `ir=-` with its line end did not parse (0 events); fixed, native test added. (3) this bench test: 4b-4 never set the dip back to 30 µs (it ran 4b-3's 120 µs); `sim dip 30` added. (4) simulator: its truth came from CPU cycle counts, and one shot of 200 was off by 1 µs from that; it now comes from the capture unit itself (channel 2 latches the sync edge during a run). Edges closer than 60 µs stay in one masked stretch. **What passed** (`-200234.log`, all runs PASS): the firmware's dip time against the hardware truth was +83 to +124 ns mean per run, rms about 95 ns, worst 196 ns. 4b-1: 20 `[curtain]`. 4b-2: 20 + 200 `[ok]`, position 0.012 mm rms. 4b-3: 40 `[curtain]` with the dip at +30 and +120 µs. 4b-5: `[lost]` and `[outside]` kept with a dip in the window (acoustic reject with a dip: 40). 4b-6: 20 `dip` lines, 0 events. Replay: 340 events, 0 verdicts differ; `--curtain off` 80 differ. **The open problem:** register writes to the MCPWM unit can stall for several µs. At boot the tie's catch took 3866 cycles (16 µs), the I2S start right after it 42 cycles. Where in that stall the catch lands decides the tie: in 3 boots the dip time was +0.1 µs from the truth, in 3 others +4.1 µs, steady within a boot. On a real curtain that is a dip-time offset of up to about 4 µs, different each boot. The simulator's own dips also come 3–12 µs late when a dip edge is the run's first step (the GPIO write stalls too); that doesn't affect its check, since the truth is latched in hardware. Still in the code: the diagnostics (`steps late`, `tick 0 vs the sync edge`, `curtain: tie:` at boot). |

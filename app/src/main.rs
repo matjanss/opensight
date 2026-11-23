@@ -3,6 +3,7 @@
 
 mod agent;
 mod ble;
+mod calwizard;
 mod card;
 mod eventlog;
 mod protocol;
@@ -18,6 +19,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use agent::PasskeyReply;
 use ble::{Command, Event, SensorInfo};
+use calwizard::{Action, FieldCheck, Phase, Wizard};
 use card::{Card, CardTexture, Higher, Score};
 use eventlog::EventLog;
 
@@ -666,6 +668,10 @@ struct SensorApp {
     save_events: bool,
     event_log: Option<EventLog>,
     log_error: Option<String>,
+    /// The calibration window: the wizard or the field check (step 5d), while open.
+    cal: Option<CalTask>,
+    /// Where the last calibration report was saved, or why it wasn't.
+    cal_report: Option<String>,
     /// (boot, seq) of the shot whose info popup is open on the card.
     selected_shot: Option<(u32, u32)>,
     view: CardView,
@@ -727,6 +733,8 @@ impl SensorApp {
                 .is_none_or(|v| v == "true"),
             event_log: eframe::storage_dir(APP_ID).map(|d| EventLog::new(d.join("logs"))),
             log_error: None,
+            cal: None,
+            cal_report: None,
             selected_shot: None,
             view: CardView::default(),
             replay: Replay {
@@ -810,6 +818,7 @@ impl SensorApp {
                     self.event_counts = EventCounts::default();
                     self.status = None;
                     self.config = None;
+                    self.cal = None;
                     self.log_note(&format!("connected to {name} ({id})"));
                     self.pin_input.clear();
                     self.pin_confirm = false;
@@ -823,6 +832,9 @@ impl SensorApp {
                 }
                 Event::Disconnected { reason } => {
                     self.passkey_prompt = None;
+                    if let Some(task) = &mut self.cal {
+                        task.lost();
+                    }
                     self.link = Link::Idle;
                     self.heartbeat = None;
                     self.heartbeat_at = None;
@@ -840,6 +852,15 @@ impl SensorApp {
                 Event::Shot(shot) => self.unscored.push((self.series.len(), shot)),
                 Event::Captured(e) => {
                     self.event_counts.add(&e);
+                    match &mut self.cal {
+                        Some(CalTask::Calibrate(w)) => {
+                            w.on_event(&e);
+                        }
+                        Some(CalTask::Check(c)) => {
+                            c.on_event(&e);
+                        }
+                        None => {}
+                    }
                     if self.save_events
                         && let Some(log) = &mut self.event_log
                         && let Err(err) = log.event(&e)
@@ -847,7 +868,12 @@ impl SensorApp {
                         self.log_error = Some(format!("Could not write the event log: {err}"));
                     }
                 }
-                Event::Status(st) => self.status = Some(st),
+                Event::Status(st) => {
+                    if let Some(CalTask::Calibrate(w)) = &mut self.cal {
+                        w.on_status(&st);
+                    }
+                    self.status = Some(st);
+                }
                 Event::Config(cal, set) => {
                     if self.save_events
                         && let Some(log) = &mut self.event_log
@@ -879,6 +905,41 @@ impl SensorApp {
                 Event::Error(e) => self.message = Some(e),
             }
         }
+        self.run_cal_actions();
+    }
+
+    /// Sends what the calibration wizard or the field check asks for.
+    fn run_cal_actions(&mut self) {
+        let actions = match &mut self.cal {
+            Some(CalTask::Calibrate(w)) => w.take_actions(),
+            Some(CalTask::Check(c)) => c.take_actions(),
+            None => return,
+        };
+        for a in actions {
+            self.send(match a {
+                Action::CalMode(on) => Command::Control(protocol::encode_cal_mode(on).to_vec()),
+                Action::Point(x, y) => Command::Control(protocol::encode_point(x, y).to_vec()),
+                Action::NoPoint => Command::Control(protocol::encode_no_point().to_vec()),
+                Action::WriteCalibration(c) => Command::WriteCalibration(c),
+            });
+        }
+    }
+
+    /// Saves the calibration report next to the event logs.
+    fn save_cal_report(&mut self, text: &str, id: u32) {
+        let Some(log) = &self.event_log else {
+            self.cal_report = Some("No folder for the report on this system.".into());
+            return;
+        };
+        let path = log
+            .dir()
+            .join(format!("calibration-{}-{id:08X}.txt", eventlog::utc_date()));
+        self.cal_report = Some(
+            match std::fs::create_dir_all(log.dir()).and_then(|_| std::fs::write(&path, text)) {
+                Ok(()) => format!("Report saved: {}", path.display()),
+                Err(e) => format!("Could not save the report: {e}"),
+            },
+        );
     }
 
     /// Whether this computer is paired with the sensor. Where the OS doesn't say,
@@ -969,6 +1030,34 @@ impl eframe::App for SensorApp {
             );
         } else {
             self.passkey_modal(&ctx);
+        }
+
+        if self.cal.is_some() {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("calibration"),
+                with_app_icon(
+                    egui::ViewportBuilder::default()
+                        .with_title("OpenSights · Calibration")
+                        .with_inner_size([620.0, 720.0])
+                        .with_min_inner_size([420.0, 480.0]),
+                ),
+                |ui, _| {
+                    let close = ui.input(|i| i.viewport().close_requested());
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            centered_column(ui, |ui| {
+                                ui.add_space(20.0);
+                                self.calibration_body(ui);
+                                ui.add_space(16.0);
+                            });
+                        });
+                    });
+                    if close {
+                        self.close_calibration();
+                    }
+                },
+            );
+            self.run_cal_actions();
         }
 
         if self.dark_mode != was_dark {
@@ -1688,6 +1777,24 @@ impl SensorApp {
                 }
             }
             ui.label(self.event_counts.text());
+            let ready = self.status.is_some() && self.config.is_some() && self.cal.is_none();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(ready, egui::Button::new("Calibrate…"))
+                    .on_hover_text("Sparks at the template's points, then the fit, then the record written to the sensor.")
+                    .clicked()
+                {
+                    self.open_calibration();
+                }
+                if ui
+                    .add_enabled(ready, egui::Button::new("Field check…"))
+                    .on_hover_text("A few sparks at the template's check point: how far off the sensor solves them.")
+                    .clicked()
+                {
+                    self.cal = Some(CalTask::Check(FieldCheck::new(&calwizard::grid_template())));
+                    self.cal_report = None;
+                }
+            });
             ui.checkbox(&mut self.save_events, "Save every event to a log file")
                 .on_hover_text(
                     "As the target's serial log lines (cfg, rec): firmware/tools/replay reads them.",
@@ -2341,6 +2448,381 @@ fn toggle_switch(ui: &mut Ui, on: &mut bool) -> egui::Response {
             .circle_filled(egui::pos2(x, rect.center().y), radius - 4.0, knob);
     }
     response
+}
+
+/// The calibration window's task (step 5d).
+enum CalTask {
+    Calibrate(Box<Wizard>),
+    Check(FieldCheck),
+}
+
+impl CalTask {
+    /// The link dropped: nothing more can be sent; the sensor leaves calibration mode by
+    /// itself only on a reboot, so say so.
+    fn lost(&mut self) {
+        match self {
+            CalTask::Calibrate(w) if !matches!(w.phase, Phase::Done { .. }) => {
+                w.phase = Phase::Failed(
+                    "The sensor disconnected. When it's back, start again (the sensor may still be in calibration mode: \
+                     cancelling a new run or a field check turns it off)."
+                        .into(),
+                );
+                w.take_actions();
+            }
+            CalTask::Check(c) => {
+                c.done = true;
+                c.take_actions();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl SensorApp {
+    fn open_calibration(&mut self) {
+        let (Some(st), Some((cal, _))) = (&self.status, &self.config) else {
+            return;
+        };
+        self.cal_report = None;
+        match Wizard::new(calwizard::grid_template(), st, cal, false) {
+            Ok(w) => self.cal = Some(CalTask::Calibrate(Box::new(w))),
+            Err(e) => self.message = Some(e),
+        }
+    }
+
+    /// The window's close button: cancels a run (calibration mode off).
+    fn close_calibration(&mut self) {
+        match &mut self.cal {
+            Some(CalTask::Calibrate(w)) => w.cancel(),
+            Some(CalTask::Check(c)) => c.cancel(),
+            None => {}
+        }
+        self.run_cal_actions();
+        self.cal = None;
+    }
+
+    fn calibration_body(&mut self, ui: &mut Ui) {
+        let sensor = self.sensor_name.clone();
+        match &mut self.cal {
+            Some(CalTask::Calibrate(_)) => self.wizard_ui(ui, &sensor),
+            Some(CalTask::Check(_)) => self.check_ui(ui),
+            None => {}
+        }
+    }
+
+    fn wizard_ui(&mut self, ui: &mut Ui, sensor: &str) {
+        let Some(CalTask::Calibrate(w)) = &mut self.cal else {
+            return;
+        };
+        title(
+            ui,
+            "Calibration",
+            &format!("{} · template \"{}\"", sensor, w.template.name),
+        );
+        ui.add_space(10.0);
+        let mut close = false;
+        let mut save: Option<(String, u32)> = None;
+        match w.phase.clone() {
+            Phase::Ready => {
+                card(ui, "Before you start", |ui| {
+                    ui.add(egui::Label::new(&w.template.description).wrap());
+                    ui.label(format!(
+                        "{} points, {} sparks each ({} in all). Put the spark gap in each point's hole in turn and make the sparks; \
+                         the sensor is in calibration mode meanwhile, so nothing is scored.",
+                        w.template.points.len(),
+                        w.template.sparks_per_point,
+                        w.template.points.len() * w.template.sparks_per_point
+                    ));
+                    template_map(ui, &w.template, None, &w.sparks);
+                    ui.horizontal(|ui| {
+                        if ui.button("Start").clicked() {
+                            w.start();
+                        }
+                        close = ui.button("Cancel").clicked();
+                    });
+                });
+            }
+            Phase::Collecting { point } => {
+                let p = w.template.points[point];
+                let got = w.sparks[point].len();
+                let want = w.template.sparks_per_point;
+                card(
+                    ui,
+                    &format!("Point {} of {}", point + 1, w.template.points.len()),
+                    |ui| {
+                        ui.label(
+                            RichText::new(format!("({:+.0}, {:+.0}) mm", p.0, p.1))
+                                .size(26.0)
+                                .strong(),
+                        );
+                        ui.label("Put the spark gap in this point's hole and make sparks.");
+                        ui.add(
+                            egui::ProgressBar::new(got as f32 / want as f32)
+                                .text(format!("{got} of {want} sparks")),
+                        );
+                        let (have, all) = w.progress();
+                        let mut detail = format!("{have} of {all} sparks in all");
+                        if w.ignored > 0 {
+                            detail += &format!(
+                                " · {} not counted (another point, a channel without both edges, or other settings)",
+                                w.ignored
+                            );
+                        }
+                        ui.add(egui::Label::new(RichText::new(detail).weak()).wrap());
+                        template_map(ui, &w.template, Some(point), &w.sparks);
+                        ui.horizontal(|ui| {
+                            let last = point + 1 == w.template.points.len();
+                            let next = if last { "Fit" } else { "Next point" };
+                            if ui.add_enabled(w.point_done(), egui::Button::new(next)).clicked() {
+                                w.next_point();
+                            }
+                            if ui
+                                .add_enabled(got > 0, egui::Button::new("Redo this point"))
+                                .clicked()
+                            {
+                                w.redo_point();
+                            }
+                            if ui.button("Cancel").clicked() {
+                                w.cancel();
+                            }
+                        });
+                    },
+                );
+            }
+            Phase::Fitted(r) => {
+                card(ui, "The fit", |ui| {
+                    ui.label(format!(
+                        "{} sparks at {} points, {} left out as outliers · residual {:.1} ns",
+                        r.sparks,
+                        r.points.len(),
+                        r.outliers,
+                        r.rms_ns
+                    ));
+                    ui.label(
+                        RichText::new(format!(
+                            "Position error: {:.3} mm rms before, {:.3} mm after",
+                            r.before_rms_mm, r.after_rms_mm
+                        ))
+                        .strong(),
+                    );
+                    for warn in fit_warnings(&r) {
+                        ui.label(RichText::new(format!("⚠ {warn}")).strong());
+                    }
+                    ui.add_space(6.0);
+                    egui::Grid::new("fit_channels").striped(true).show(ui, |ui| {
+                        for h in ["", "x mm", "y mm", "k", "offset ns", "sigma ns"] {
+                            ui.label(RichText::new(h).weak());
+                        }
+                        ui.end_row();
+                        for c in &r.channels {
+                            ui.label(format!("CH{}", c.channel + 1));
+                            ui.label(format!("{:.3} ±{:.3}", c.x, c.sd_x));
+                            ui.label(format!("{:.3} ±{:.3}", c.y, c.sd_y));
+                            ui.label(format!("{:.4} ±{:.4}", c.k, c.sd_k));
+                            ui.label(format!("{:.1} ±{:.1}", c.offset_ns, c.sd_offset));
+                            ui.label(format!("{:.1}", c.sigma_ns));
+                            ui.end_row();
+                        }
+                    });
+                    ui.add_space(6.0);
+                    egui::CollapsingHeader::new("Error per point").show(ui, |ui| {
+                        egui::Grid::new("fit_points").striped(true).show(ui, |ui| {
+                            for h in ["point mm", "before mean, worst", "after mean, worst"] {
+                                ui.label(RichText::new(h).weak());
+                            }
+                            ui.end_row();
+                            for p in &r.points {
+                                ui.label(format!("({:+.0}, {:+.0})", p.x, p.y));
+                                ui.label(format!("{:.3}, {:.3}", p.before_mean, p.before_worst));
+                                ui.label(format!("{:.3}, {:.3}", p.after_mean, p.after_worst));
+                                ui.end_row();
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Write to the sensor").clicked() {
+                            save = w.report(sensor).map(|t| (t, r.id));
+                            let date = eventlog::utc_date().replace('-', "").parse().unwrap_or(0);
+                            w.write(date);
+                        }
+                        if ui.button("Discard").clicked() {
+                            w.cancel();
+                        }
+                    });
+                });
+            }
+            Phase::Writing { expected } => {
+                card(ui, "Writing", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(format!(
+                            "Waiting for the sensor to confirm calibration {expected:08X}…"
+                        ));
+                    });
+                });
+            }
+            Phase::Done { id } => {
+                card(ui, "Done", |ui| {
+                    ui.label(RichText::new(format!("The sensor holds calibration {id:08X} now.")).strong());
+                    ui.label("Calibration mode is off again. A field check is a good next step.");
+                    close = ui.button("Close").clicked();
+                });
+            }
+            Phase::Failed(why) => {
+                card(ui, "Stopped", |ui| {
+                    ui.add(egui::Label::new(why).wrap());
+                    close = ui.button("Close").clicked();
+                });
+            }
+            Phase::Cancelled => {
+                card(ui, "Cancelled", |ui| {
+                    ui.label("Nothing was written; calibration mode is off.");
+                    close = ui.button("Close").clicked();
+                });
+            }
+        }
+        if let Some((text, id)) = save {
+            self.save_cal_report(&text, id);
+        }
+        if let Some(r) = &self.cal_report {
+            ui.add(egui::Label::new(RichText::new(r).small().weak()).wrap());
+        }
+        if close {
+            self.cal = None;
+        }
+    }
+
+    fn check_ui(&mut self, ui: &mut Ui) {
+        let Some(CalTask::Check(c)) = &mut self.cal else {
+            return;
+        };
+        title(
+            ui,
+            "Field check",
+            "Sparks at the template's check point, solved by the sensor",
+        );
+        ui.add_space(10.0);
+        let mut close = false;
+        card(
+            ui,
+            &format!("Check point ({:+.0}, {:+.0}) mm", c.point.0, c.point.1),
+            |ui| match (c.done, c.result()) {
+                (true, Some(r)) => {
+                    let verdict = if r.pass {
+                        format!("Within {:.2} mm: the calibration holds.", c.limit_mm)
+                    } else {
+                        format!("More than {:.2} mm off: calibrate again.", c.limit_mm)
+                    };
+                    ui.label(RichText::new(verdict).size(20.0).strong());
+                    ui.label(format!(
+                        "{} sparks: mean {:.3} mm, worst {:.3} mm from the point.",
+                        r.sparks, r.mean_mm, r.worst_mm
+                    ));
+                    close = ui.button("Close").clicked();
+                }
+                (true, None) => {
+                    ui.label("Stopped.");
+                    close = ui.button("Close").clicked();
+                }
+                (false, _) => {
+                    ui.label("Put the spark gap in the check point's hole and make sparks. Calibration mode is on: nothing is scored.");
+                    let got = c.errors.len();
+                    ui.add(
+                        egui::ProgressBar::new(got as f32 / c.needed as f32)
+                            .text(format!("{got} of {} sparks", c.needed)),
+                    );
+                    if c.ignored > 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} not counted (another point, or not solved)",
+                                c.ignored
+                            ))
+                            .weak(),
+                        );
+                    }
+                    if ui.button("Cancel").clicked() {
+                        c.cancel();
+                    }
+                }
+            },
+        );
+        if close {
+            self.cal = None;
+        }
+    }
+}
+
+/// What to look at before writing a fit.
+fn fit_warnings(r: &calib::fit::FitResult) -> Vec<String> {
+    let mut w = Vec::new();
+    for c in &r.channels {
+        if c.sd_k > 0.05 {
+            w.push(format!(
+                "CH{}'s k is uncertain (±{:.3}): more sparks of varied loudness help.",
+                c.channel + 1,
+                c.sd_k
+            ));
+        }
+    }
+    if r.rms_ns > 150.0 {
+        w.push(format!(
+            "The residual is high ({:.0} ns): check the mics and the sparks.",
+            r.rms_ns
+        ));
+    }
+    if r.after_rms_mm > 0.1 {
+        w.push(format!(
+            "Shots would still be {:.2} mm off on average.",
+            r.after_rms_mm
+        ));
+    }
+    if r.outliers * 10 > r.sparks {
+        w.push(format!("{} sparks were left out as outliers.", r.outliers));
+    }
+    w
+}
+
+/// The template's points in the frame: done points filled, the current one ringed.
+fn template_map(
+    ui: &mut Ui,
+    t: &calwizard::Template,
+    current: Option<usize>,
+    sparks: &[Vec<calib::fit::Spark>],
+) {
+    let side = ui.available_width().min(280.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let v = ui.visuals();
+    painter.rect_stroke(
+        rect,
+        4.0,
+        Stroke::new(1.0, v.weak_text_color()),
+        egui::StrokeKind::Inside,
+    );
+    let half = 125.0f32; // the 250 mm frame
+    let to = |p: (f32, f32)| rect.center() + egui::vec2(p.0 / half * side / 2.0, -p.1 / half * side / 2.0);
+    // The scoring area (200 mm) and the check point.
+    let a = side / 2.0 * 100.0 / half;
+    painter.rect_stroke(
+        egui::Rect::from_center_size(rect.center(), egui::vec2(2.0 * a, 2.0 * a)),
+        0.0,
+        Stroke::new(0.5, v.weak_text_color()),
+        egui::StrokeKind::Inside,
+    );
+    painter.circle_stroke(to(t.check_point), 3.0, Stroke::new(1.0, v.weak_text_color()));
+    for (i, &p) in t.points.iter().enumerate() {
+        let c = to(p);
+        let done = sparks.get(i).is_some_and(|s| s.len() >= t.sparks_per_point);
+        if done {
+            painter.circle_filled(c, 5.0, v.strong_text_color());
+        } else {
+            painter.circle_stroke(c, 5.0, Stroke::new(1.0, v.text_color()));
+        }
+        if current == Some(i) {
+            painter.circle_stroke(c, 10.0, Stroke::new(2.5, LAST_SHOT_COLOR));
+        }
+    }
 }
 
 /// What the sensor's events said since connecting (protocol v3).

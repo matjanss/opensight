@@ -10,8 +10,12 @@ status and settings are in (step 5c).
   shooter (or range officer) should be able to place it on the card by hand after checking
   the paper, or mark it a miss, so the total is complete.
 - **Settings editor.** The sensor's settings (span, dead time, validity limits, the curtain's
-  window) are shown read-only; the protocol can write them (Settings). Comes with the
-  calibration wizard (5d).
+  window) are shown read-only; the protocol can write them (Settings).
+- **Calibration templates.** The wizard has the 4 × 4 grid built in
+  (`assets/templates/grid-4x4.json`); choosing another template file, and the sparks per
+  point, in the window.
+- **Fit from a log file.** `calib::logline` reads the firmware's and the app's logs: a
+  "Calibrate from a log…" button would fit sparks recorded earlier (as `calibrate.py` does).
 - **An events list** at the range: the recent events with time, verdict, position and
   residual, beside the counters (chosen against for 5c: counters only).
 
