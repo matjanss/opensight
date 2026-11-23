@@ -281,6 +281,11 @@ the app needs no change. Everything else goes to serial, in lines the PC can rep
 Protocol v3 (these messages, plus h per mic from the app) is its own branch, designed for
 BLE and MQTT alike.
 
+**Built in step 5** (2026-11-23, `protocol/PROTOCOL.md` v3): the hit (shot, hole, missed)
+with its calibration ID and uncertainty, the raw event, Status, Control (calibration mode,
+template point), Calibration (h per mic is in it) and Settings, one characteristic each, the
+same bytes for MQTT later. The calibration wizard is step 5d.
+
 ### D8 Air: temperature, humidity, pressure
 
 - The summary's budget is 0.17 % of c per °C, about 0.2 mm at the edge. The study gives
@@ -456,9 +461,10 @@ recovered as +1.99 °C. Left for the parts: the DS18B20 and BME280 tests (3a-3, 
 
 ### Phase 3: protocol and app (MEASUREMENT step 5)
 
-The raw-event message and calibration over BLE (D7). The Rust fit, ported from
-`calibrate.py` and checked against the same logs. A calibration wizard in the desktop app.
-The shot store in flash.
+The raw-event message and calibration over BLE (D7): **done 2026-11-23** (MEASUREMENT
+5a–5c, protocol v3, passing over BLE). Next: the Rust fit, ported from `calibrate.py` and
+checked against the same logs, and a calibration wizard in the desktop app (5d). The shot
+store in flash.
 
 ### Phase 4: the network (FUTURE_ARCHITECTURE step 2)
 

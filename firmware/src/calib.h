@@ -27,6 +27,19 @@ bool calibPoint(float* x, float* y);   // false: no template point set
 bool calibRecord(uint32_t* id, bool* stale);
 void calibPrintStatus();   // `cal`, `stat`
 
+// The record's details for the app (Calibration, PROTOCOL.md): false if there is none.
+bool calibRecordInfo(uint32_t* date, uint16_t* points, uint16_t* sparks, float* resNs);
+
+// From the app (uplink.cpp), each checked by the caller (proto::settingsValid,
+// proto::calibrationValid), stored, and the `cfg` line printed once.
+void calibSetMode(bool on);                          // `cal on|off`
+void calibSetPoint(bool have, float x, float y);     // `cal pt x y`, `cal pt -`
+// The policy and validity fields of `p` (resLimitNs ... curtainHiNs); its channels unused.
+void calibSetPolicy(const measure::Cfg& p);
+// Every channel at once, and a calibration record for them (not stale): `cal ch` x8, `cal id`.
+void calibSetChannels(const measure::ChannelCfg ch[8], uint32_t date, uint16_t points,
+                      uint16_t sparks, float resNs);
+
 // `mic`, `k`, `offset`, `sigma`, `reslimit`, `dropone`, `valid`, `cal`.
 bool calibCommand(const char* cmd, const char* line);
 void calibHelp();

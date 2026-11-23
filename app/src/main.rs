@@ -4,6 +4,7 @@
 mod agent;
 mod ble;
 mod card;
+mod eventlog;
 mod protocol;
 
 use std::sync::{Arc, OnceLock, mpsc};
@@ -18,6 +19,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use agent::PasskeyReply;
 use ble::{Command, Event, SensorInfo};
 use card::{Card, CardTexture, Higher, Score};
+use eventlog::EventLog;
 
 const CONTENT_MAX_WIDTH: f32 = 460.0;
 /// Width of the column next to the target card; below this window width they stack.
@@ -38,6 +40,7 @@ const KEY_REPLAY_CONTROLS: &str = "replay_controls";
 const KEY_CLOSE_CALLS: &str = "close_calls";
 const KEY_CLOSE_CALL_MM: &str = "close_call_mm";
 const KEY_REPLAY_DELAY: &str = "replay_delay_s";
+const KEY_SAVE_EVENTS: &str = "save_events";
 
 /// The window and taskbar icon (assets/icon/). None if the PNG can't be read: the
 /// window then gets the system's default icon.
@@ -286,13 +289,25 @@ fn review_detail(h: Higher) -> String {
 /// At most this many close calls are listed on the notice; the rest are counted.
 const REVIEW_MAX_LINES: usize = 8;
 
-/// The close-call notice at the top left of the card: a title, then one line per close call
-/// (`lines`, in shot order). Returns the index of a line that was clicked.
-fn review_notice(ui: &Ui, painter: &egui::Painter, card_rect: egui::Rect, lines: &[String]) -> Option<usize> {
+/// A notice at the top left of the card, `top` points below the card's top: a title, then
+/// one line per item (`lines`, in shot order). The close calls, and the hits with no score.
+/// With `hover`, a line can be clicked. Returns the clicked line, and the space the notice
+/// takes from the card's top (for the next one).
+#[allow(clippy::too_many_arguments)]
+fn review_notice(
+    ui: &Ui,
+    painter: &egui::Painter,
+    card_rect: egui::Rect,
+    title: &str,
+    top: f32,
+    salt: &str,
+    lines: &[String],
+    hover: Option<&str>,
+) -> (Option<usize>, f32) {
     let visuals = ui.visuals();
     let small = TextStyle::Small.resolve(ui.style());
     let title = painter.layout_no_wrap(
-        "Close Call - Manual review recommended".into(),
+        title.into(),
         TextStyle::Body.resolve(ui.style()),
         visuals.strong_text_color(),
     );
@@ -316,9 +331,9 @@ fn review_notice(ui: &Ui, painter: &egui::Painter, card_rect: egui::Rect, lines:
         pad + icon + gap + text_w + pad + 4.0,
         pad + (title.size().y + 4.0 + rows_h).max(icon) + pad,
     );
-    let rect = egui::Rect::from_min_size(card_rect.min + egui::vec2(10.0, 10.0), size);
+    let rect = egui::Rect::from_min_size(card_rect.min + egui::vec2(10.0, 10.0 + top), size);
     // Clicks on the notice mustn't reach the card (and close the shot popup).
-    ui.interact(rect, ui.scope_id().with("review_notice"), egui::Sense::click());
+    ui.interact(rect, ui.scope_id().with((salt, "notice")), egui::Sense::click());
     painter.rect(
         rect,
         CornerRadius::same(10),
@@ -351,13 +366,15 @@ fn review_notice(ui: &Ui, painter: &egui::Painter, card_rect: egui::Rect, lines:
             egui::pos2(x - 4.0, y - 1.0),
             egui::vec2(text_w + 8.0, g.size().y + 2.0),
         );
-        let response = ui.interact(row, ui.scope_id().with(("review_line", i)), egui::Sense::click());
-        if response.hovered() {
-            painter.rect_filled(row, 4.0, visuals.widgets.hovered.weak_bg_fill);
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        if response.on_hover_text("Show this shot").clicked() {
-            clicked = Some(i);
+        if let Some(hover) = hover {
+            let response = ui.interact(row, ui.scope_id().with((salt, i)), egui::Sense::click());
+            if response.hovered() {
+                painter.rect_filled(row, 4.0, visuals.widgets.hovered.weak_bg_fill);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if response.on_hover_text(hover).clicked() {
+                clicked = Some(i);
+            }
         }
         let h = g.size().y;
         painter.galley(egui::pos2(x, y), g, Color32::PLACEHOLDER);
@@ -366,7 +383,7 @@ fn review_notice(ui: &Ui, painter: &egui::Painter, card_rect: egui::Rect, lines:
     if let Some(g) = more {
         painter.galley(egui::pos2(x, y), g, Color32::PLACEHOLDER);
     }
-    clicked
+    (clicked, top + size.y + 8.0)
 }
 
 /// Replaying the series on the card: the shots appear again one by one.
@@ -636,7 +653,19 @@ struct SensorApp {
     /// The shots of the current series, oldest first. Kept across reconnects to the same
     /// sensor; cleared by the user or when another sensor connects.
     series: Vec<(protocol::Shot, Score)>,
+    /// The series' hits with no position (a hole, a missed shot), each with how many scored
+    /// shots came before it: listed in their place, never scored.
+    unscored: Vec<(usize, protocol::Shot)>,
     series_sensor: Option<String>,
+    /// Protocol v3: the sensor's state, its calibration and settings, and what its events
+    /// said since connecting (read-only here; the calibration wizard comes in step 5d).
+    status: Option<protocol::Status>,
+    config: Option<(protocol::Calibration, protocol::Settings)>,
+    event_counts: EventCounts,
+    /// Every event written to a log file (`eventlog`), as the firmware's serial log lines.
+    save_events: bool,
+    event_log: Option<EventLog>,
+    log_error: Option<String>,
     /// (boot, seq) of the shot whose info popup is open on the card.
     selected_shot: Option<(u32, u32)>,
     view: CardView,
@@ -688,7 +717,16 @@ impl SensorApp {
             card_texture: CardTexture::default(),
             shots_supported: false,
             series: Vec::new(),
+            unscored: Vec::new(),
             series_sensor: None,
+            status: None,
+            config: None,
+            event_counts: EventCounts::default(),
+            save_events: storage
+                .and_then(|s| s.get_string(KEY_SAVE_EVENTS))
+                .is_none_or(|v| v == "true"),
+            event_log: eframe::storage_dir(APP_ID).map(|d| EventLog::new(d.join("logs"))),
+            log_error: None,
             selected_shot: None,
             view: CardView::default(),
             replay: Replay {
@@ -732,6 +770,15 @@ impl SensorApp {
         let _ = self.cmd.send(c); // fails only if the BLE thread died, which shows as `fatal`
     }
 
+    fn log_note(&mut self, text: &str) {
+        if self.save_events
+            && let Some(log) = &mut self.event_log
+            && let Err(err) = log.note(text)
+        {
+            self.log_error = Some(format!("Could not write the event log: {err}"));
+        }
+    }
+
     fn connect(&mut self, id: &str) {
         self.message = None;
         self.auto_connect = true;
@@ -757,8 +804,13 @@ impl SensorApp {
                     self.shots_supported = shots_supported;
                     if self.series_sensor.as_deref() != Some(id.as_str()) {
                         self.series.clear();
+                        self.unscored.clear();
                         self.series_sensor = Some(id.clone());
                     }
+                    self.event_counts = EventCounts::default();
+                    self.status = None;
+                    self.config = None;
+                    self.log_note(&format!("connected to {name} ({id})"));
                     self.pin_input.clear();
                     self.pin_confirm = false;
                     self.remembered = Some(id.clone());
@@ -781,9 +833,29 @@ impl SensorApp {
                     self.heartbeat = Some(ms);
                     self.heartbeat_at = Some(Instant::now());
                 }
-                Event::Shot(shot) => {
+                Event::Shot(shot) if shot.scored() => {
                     let score = self.card.score(shot.x_mm(), shot.y_mm());
                     self.series.push((shot, score));
+                }
+                Event::Shot(shot) => self.unscored.push((self.series.len(), shot)),
+                Event::Captured(e) => {
+                    self.event_counts.add(&e);
+                    if self.save_events
+                        && let Some(log) = &mut self.event_log
+                        && let Err(err) = log.event(&e)
+                    {
+                        self.log_error = Some(format!("Could not write the event log: {err}"));
+                    }
+                }
+                Event::Status(st) => self.status = Some(st),
+                Event::Config(cal, set) => {
+                    if self.save_events
+                        && let Some(log) = &mut self.event_log
+                        && let Err(err) = log.config(&cal, &set)
+                    {
+                        self.log_error = Some(format!("Could not write the event log: {err}"));
+                    }
+                    self.config = Some((cal, set));
                 }
                 Event::Name(name) => {
                     self.name_input = name.clone();
@@ -917,6 +989,7 @@ impl eframe::App for SensorApp {
         storage.set_string(KEY_CLOSE_CALLS, self.show_close_calls.to_string());
         storage.set_string(KEY_CLOSE_CALL_MM, self.close_call_mm.to_string());
         storage.set_string(KEY_REPLAY_DELAY, self.replay_delay_s.to_string());
+        storage.set_string(KEY_SAVE_EVENTS, self.save_events.to_string());
     }
 }
 
@@ -1160,12 +1233,24 @@ impl SensorApp {
             .filter_map(|(i, (s, _))| Some((i, self.card.higher(s.x_mm(), s.y_mm())?)))
             .filter(|(_, h)| h.gap_mm <= self.close_call_mm)
             .collect();
+        let mut notice_top = 0.0;
         if self.show_close_calls && !close_calls.is_empty() {
             let lines: Vec<String> = close_calls
                 .iter()
                 .map(|&(i, h)| format!("Shot {} · {}", i + 1, review_detail(h)))
                 .collect();
-            if let Some(line) = review_notice(ui, &painter, rect, &lines) {
+            let (clicked, below) = review_notice(
+                ui,
+                &painter,
+                rect,
+                "Close Call - Manual review recommended",
+                0.0,
+                "close_calls",
+                &lines,
+                Some("Show this shot"),
+            );
+            notice_top = below;
+            if let Some(line) = clicked {
                 let i = close_calls[line].0;
                 let shot = &self.series[i].0;
                 self.selected_shot = Some((shot.boot, shot.seq));
@@ -1174,6 +1259,25 @@ impl SensorApp {
                 }
                 ui.ctx().request_repaint();
             }
+        }
+
+        // The hits with no position (protocol v3): the shooter checks the paper card.
+        if !self.unscored.is_empty() {
+            let lines: Vec<String> = self
+                .unscored
+                .iter()
+                .map(|(after, s)| unscored_line(*after, s))
+                .collect();
+            review_notice(
+                ui,
+                &painter,
+                rect,
+                "Not scored - check the card",
+                notice_top,
+                "unscored",
+                &lines,
+                None,
+            );
         }
 
         // Gone when the series was cleared or replaced.
@@ -1218,6 +1322,9 @@ impl SensorApp {
                     ui.label(format!("x {:+.2} mm · y {:+.2} mm", shot.x_mm(), shot.y_mm()));
                     let off = shot.x_mm().hypot(shot.y_mm());
                     ui.label(RichText::new(format!("{off:.2} mm from the centre")).weak());
+                    if let Some(details) = shot_details(shot) {
+                        ui.label(RichText::new(details).small().weak());
+                    }
                     let higher = self.card.higher(shot.x_mm(), shot.y_mm());
                     if let Some(h) =
                         higher.filter(|h| self.show_close_calls && h.gap_mm <= self.close_call_mm)
@@ -1287,9 +1394,12 @@ impl SensorApp {
                     } else if inner_tens > 0 {
                         detail.push_str(&format!(" · {inner_tens}X"));
                     }
+                    if !self.unscored.is_empty() {
+                        detail.push_str(&format!(" · {} not scored", self.unscored.len()));
+                    }
                     ui.label(RichText::new(detail).weak());
                 });
-                if self.series.is_empty() {
+                if self.series.is_empty() && self.unscored.is_empty() {
                     ui.allocate_space(ui.available_size()); // fill the column anyway
                     return;
                 }
@@ -1306,7 +1416,20 @@ impl SensorApp {
                             .id_salt("series")
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                for (i, (_, score)) in self.series.iter().enumerate().rev() {
+                                // Newest first; a hit with no score after the scored shot it followed.
+                                for i in (0..=self.series.len()).rev() {
+                                    for (_, hit) in
+                                        self.unscored.iter().rev().filter(|(after, _)| *after == i)
+                                    {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("·").weak());
+                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                ui.label(RichText::new(unscored_label(hit)).weak().italics());
+                                            });
+                                        });
+                                    }
+                                    let Some(i) = i.checked_sub(1) else { break };
+                                    let score = &self.series[i].1;
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new(format!("{}", i + 1)).weak());
                                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1336,6 +1459,7 @@ impl SensorApp {
         if clear {
             self.send(Command::ClearShots);
             self.series.clear();
+            self.unscored.clear();
         }
     }
 
@@ -1498,6 +1622,8 @@ impl SensorApp {
                     ui.separator();
                     self.heartbeat_card(ui);
                     ui.separator();
+                    self.measurement_card(ui);
+                    ui.separator();
                     section_title(ui, "Connection");
                     ui.label(format!("Connected to {}.", self.sensor_name));
                     ui.horizontal(|ui| {
@@ -1522,6 +1648,68 @@ impl SensorApp {
                 pairing_help_card(ui);
             }
         }
+    }
+
+    /// Protocol v3, read-only: the calibration, the settings, the air, what the events said,
+    /// and the event log. (Changing them: serial for now, the calibration wizard in step 5d.)
+    fn measurement_card(&mut self, ui: &mut Ui) {
+        section(ui, "Measurement", |ui| {
+            let weak = |ui: &mut Ui, t: String| {
+                ui.add(egui::Label::new(RichText::new(t).weak()).wrap());
+            };
+            match (&self.status, &self.config) {
+                (Some(st), Some((cal, set))) => {
+                    ui.label(calibration_text(st, cal));
+                    if st.flags & protocol::ST_CAL_MODE != 0 {
+                        let point = if st.flags & protocol::ST_POINT != 0 {
+                            format!(", template point ({:.2}, {:.2}) mm", st.pt_x, st.pt_y)
+                        } else {
+                            String::new()
+                        };
+                        ui.label(
+                            RichText::new(format!("Calibration mode is on{point}: nothing is scored."))
+                                .strong(),
+                        );
+                    }
+                    weak(ui, settings_text(set));
+                    weak(ui, air_text(st));
+                    if st.flags & protocol::ST_MTU_SMALL != 0 {
+                        ui.label(
+                            "This computer's Bluetooth link is too small for the events (MTU under 183): \
+                             they stay on the sensor.",
+                        );
+                    }
+                }
+                _ => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new("Reading the sensor's settings…").weak());
+                    });
+                }
+            }
+            ui.label(self.event_counts.text());
+            ui.checkbox(&mut self.save_events, "Save every event to a log file")
+                .on_hover_text(
+                    "As the target's serial log lines (cfg, rec): firmware/tools/replay reads them.",
+                );
+            if self.save_events {
+                match &self.event_log {
+                    Some(log) => {
+                        let dir = log.dir().display().to_string();
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Label::new(RichText::new(&dir).small().weak()).wrap());
+                            if ui.small_button("Open").clicked() {
+                                open_folder(log.dir());
+                            }
+                        });
+                    }
+                    None => weak(ui, "No folder for the log on this system.".into()),
+                }
+                if let Some(e) = &self.log_error {
+                    ui.label(e);
+                }
+            }
+        });
     }
 
     fn heartbeat_card(&mut self, ui: &mut Ui) {
@@ -2153,6 +2341,195 @@ fn toggle_switch(ui: &mut Ui, on: &mut bool) -> egui::Response {
             .circle_filled(egui::pos2(x, rect.center().y), radius - 4.0, knob);
     }
     response
+}
+
+/// What the sensor's events said since connecting (protocol v3).
+#[derive(Default)]
+struct EventCounts {
+    total: u32,
+    verdicts: [u32; 8],
+    holes: u32,
+    missed: u32,
+    last: Option<String>,
+}
+
+impl EventCounts {
+    fn add(&mut self, e: &protocol::Event) {
+        self.total += 1;
+        match e.kind {
+            protocol::Kind::Shot => {
+                if let Some(v) = self.verdicts.get_mut(e.verdict as usize) {
+                    *v += 1;
+                }
+                let mode = if e.flags & protocol::EV_CAL_MODE != 0 {
+                    " (calibration mode)"
+                } else {
+                    ""
+                };
+                self.last = Some(format!("{}{mode}", e.verdict_name().unwrap_or("?")));
+            }
+            protocol::Kind::Hole => {
+                self.holes += 1;
+                self.last = Some("a hole".into());
+            }
+            protocol::Kind::Missed => {
+                self.missed += 1;
+                self.last = Some("missed".into());
+            }
+        }
+    }
+
+    fn text(&self) -> String {
+        if self.total == 0 {
+            return "No events since connecting.".into();
+        }
+        let mut parts: Vec<String> = protocol::VERDICTS
+            .iter()
+            .zip(self.verdicts)
+            .filter(|(_, n)| *n > 0)
+            .map(|(v, n)| format!("{n} {v}"))
+            .collect();
+        if self.holes > 0 {
+            parts.push(format!(
+                "{} hole{}",
+                self.holes,
+                if self.holes == 1 { "" } else { "s" }
+            ));
+        }
+        if self.missed > 0 {
+            parts.push(format!("{} missed", self.missed));
+        }
+        format!(
+            "{} event{} since connecting: {}. Last: {}.",
+            self.total,
+            if self.total == 1 { "" } else { "s" },
+            parts.join(", "),
+            self.last.as_deref().unwrap_or("-")
+        )
+    }
+}
+
+/// What the sensor said about a shot (protocol v3): its uncertainty and flags.
+fn shot_details(s: &protocol::Shot) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(sigma) = s.sigma_mm() {
+        parts.push(format!("±{sigma:.2} mm (1σ)"));
+    }
+    for (bit, text) in [
+        (protocol::SHOT_CURTAIN, "confirmed by the curtain"),
+        (protocol::SHOT_DROPPED, "one mic left out"),
+        (protocol::SHOT_AIR_ASSUMED, "air partly assumed"),
+        (protocol::SHOT_CAL_STALE, "calibration changed since it was made"),
+    ] {
+        if s.flags & bit != 0 {
+            parts.push(text.to_string());
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// A hit with no score, in the series list.
+fn unscored_label(s: &protocol::Shot) -> &'static str {
+    match s.kind {
+        protocol::Kind::Hole => "hole – not scored",
+        _ => "missed – not scored",
+    }
+}
+
+/// A hit with no score, on the card's notice: where it came in the series, and what it was.
+fn unscored_line(after: usize, s: &protocol::Shot) -> String {
+    let what = match s.kind {
+        protocol::Kind::Hole => "through an existing hole (the curtain saw it, no sound)",
+        _ => "missed: a shot in the dead time after the last one, not measured",
+    };
+    if after == 0 {
+        format!("Before shot 1 · {what}")
+    } else {
+        format!("After shot {after} · {what}")
+    }
+}
+
+fn calibration_text(st: &protocol::Status, cal: &protocol::Calibration) -> String {
+    if st.cal == 0 {
+        return "No calibration record: the mics' nominal positions.".into();
+    }
+    let (y, m, d) = (cal.date / 10_000, cal.date / 100 % 100, cal.date % 100);
+    let stale = if st.flags & protocol::ST_CAL_STALE != 0 {
+        " · STALE: a value changed since"
+    } else {
+        ""
+    };
+    format!(
+        "Calibration {:08X} of {y:04}-{m:02}-{d:02} ({} points, {} sparks, residual {:.0} ns){stale}",
+        st.cal, cal.points, cal.sparks, cal.res_ns
+    )
+}
+
+fn settings_text(s: &protocol::Settings) -> String {
+    let off = |v: f32, f: &dyn Fn(f32) -> String| if v > 0.0 { f(v) } else { "off".into() };
+    let curtain = if s.curtain_hi_ns > 0.0 {
+        format!(
+            "{:.0}–{:.0} µs",
+            s.curtain_lo_ns / 1000.0,
+            s.curtain_hi_ns / 1000.0
+        )
+    } else {
+        "off".into()
+    };
+    format!(
+        "Residual limit {:.0} ns, drop-one {} · lost {} · area {} · together {} · pulse {} · curtain {curtain} · span {} mm · dead time {} ms · channels {:02X}",
+        s.res_limit_ns,
+        if s.drop_one { "on" } else { "off" },
+        if s.max_lost < 0 {
+            "off".into()
+        } else {
+            s.max_lost.to_string()
+        },
+        off(s.area_mm, &|v| format!("±{v:.0} mm")),
+        off(s.together_ns, &|v| format!("{:.0} µs", v / 1000.0)),
+        off(s.pulse_max_ns, &|v| format!("{:.0} µs", v / 1000.0)),
+        s.span_mm,
+        s.deadtime_ms,
+        s.mask
+    )
+}
+
+fn air_text(st: &protocol::Status) -> String {
+    let all = protocol::MEAS_T | protocol::MEAS_RH | protocol::MEAS_P;
+    let how = match st.measured {
+        m if m == all => "measured".to_string(),
+        0 => "assumed: no air sensor".to_string(),
+        m => format!(
+            "partly assumed ({} measured)",
+            [
+                (protocol::MEAS_T, "T"),
+                (protocol::MEAS_RH, "RH"),
+                (protocol::MEAS_P, "p")
+            ]
+            .iter()
+            .filter(|(b, _)| m & b != 0)
+            .map(|(_, n)| *n)
+            .collect::<Vec<_>>()
+            .join(", ")
+        ),
+    };
+    format!(
+        "Air {:.1} °C, {:.0} % RH, {:.0} hPa ({how}) · speed of sound {:.2} m/s",
+        st.t_c, st.rh, st.hpa, st.c
+    )
+}
+
+/// Opens a folder in the system's file manager.
+fn open_folder(dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let program = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(program).arg(dir).spawn();
 }
 
 #[cfg(test)]

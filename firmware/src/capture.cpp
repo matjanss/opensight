@@ -37,6 +37,7 @@
 #include "event.h"
 #include "pulsegen.h"
 #include "simulate.h"
+#include "uplink.h"
 
 // ---- Sizes derived from config.h ----
 
@@ -320,6 +321,7 @@ static void measureTask(void*) {
 bool captureIdle() { return evState == EV_IDLE; }
 uint64_t captureSamplesNow() { return (uint64_t)blocksDone * SAMPLES_PER_BLOCK; }
 uint32_t captureMissedCount() { return missedCount; }
+uint32_t captureEventCount() { return eventCount; }
 uint32_t captureWindowUs() { return coveredUs(postBlocks); }
 uint32_t captureDeadtimeMs() { return deadtimeMs; }
 uint32_t captureDeadUs() {
@@ -875,6 +877,9 @@ void captureService(uint32_t nowMs) {
   if (missed != missedReported) {
     Serial.printf("MISSED: activity after the dead time while the previous event was still "
                   "being read (%u in all): a shot may not have been measured\n", (unsigned)missed);
+    // To the app as a `missed` hit (PROTOCOL.md), one per count, but not the self-test's.
+    if (!st.active)
+      for (uint32_t m = missedReported; m != missed; m++) uplinkMissed(eventCount, nowMs);
     missedReported = missed;
   }
   curtainService(evState == EV_IDLE && uxQueueMessagesWaiting(results) == 0);
@@ -902,7 +907,8 @@ void captureCommand(const char* line) {
                    "                       after OUT_L, OUT_H pulse ns long (default 1000 ns,\n"
                    "                       20 pairs, 10000 ns)\n"
                    "  temp                 the air: sensor, temperature, humidity, pressure, speed of sound\n"
-                   "  temp scan            look for an air sensor on J5 again (it stops after 2 min)");
+                   "  temp scan            look for an air sensor on J5 again (it stops after 2 min)\n"
+                   "  pairing              pairing mode for 60 s, as BOOT held 2 s");
     calibHelp();
     positionHelp();
     simHelp();
@@ -959,4 +965,33 @@ void captureCommand(const char* line) {
   } else if (!calibCommand(cmd, line) && !positionCommand(cmd, line) && !simCommand(cmd, line)) {
     Serial.printf("unknown command '%s', type 'help'\n", cmd);
   }
+}
+
+// ---- Settings from the app (uplink.cpp) ----
+
+uint8_t  captureMask() { return (uint8_t)savedMask; }
+uint32_t captureSpanMm() { return spanMm; }
+uint32_t captureSpanMaxMm() {
+  uint32_t max = 50;
+  while (postBlocksFor(max + 10) <= POST_MAX) max += 10;
+  return max;
+}
+
+bool captureSetSettings(uint8_t mask, uint32_t span, uint32_t deadtime) {
+  if (span < 50 || postBlocksFor(span) > POST_MAX || deadtime < 1 || deadtime > 1000) return false;
+  if (mask != savedMask && (st.active || simActive())) return false;   // as `mask`
+  if (mask != savedMask) {
+    applyMask(mask);
+    savedMask = channelMask;
+    prefs.putUShort("mask", channelMask);
+  }
+  deadtimeMs = deadtime;
+  deadBlocks = deadtimeMs * 1000 / BLOCK_US;
+  prefs.putUInt("deadtime", deadtimeMs);
+  spanMm = span;
+  postBlocks = postBlocksFor(spanMm);
+  prefs.putUInt("span", spanMm);
+  Serial.printf("capture: channel mask %02X, dead time %u ms, mic span %u mm (from the app)\n",
+                channelMask, (unsigned)deadtimeMs, (unsigned)spanMm);
+  return true;
 }

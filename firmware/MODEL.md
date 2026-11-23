@@ -247,6 +247,12 @@ dip n=3 t=1234.567890123 len=35000
 `n` counts them from 1 per boot, `t` is its rise (s since the capture started, as `rec`'s
 `t`), `len` its length in ns (`-`: not seen). The replay counts them.
 
+**The app's event log** (protocol v3, step 5c) has the same lines, made from the Event
+messages and the Calibration and Settings reads (`app/src/eventlog.rs`): `cfg` (identical,
+ID included), `rec` (identical), `dip` (with `n` the event's stream number), and a `MISSED`
+line for a missed shot. So `tools/replay` reads an app's log like a serial one (bench 5:
+38 of 38 `rec` lines identical).
+
 ## Test vectors
 
 `test/vectors/`, written by `tools/model.py` (fixed seed: the same files every run). Plain

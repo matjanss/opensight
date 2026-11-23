@@ -20,6 +20,12 @@ rust-analyzer picks up `app/`.
   list and total sit next to the card.
 - No shot is lost when the link drops: the sensor keeps its last 64 shots and resends the
   ones the app missed.
+- A shot the sensor heard but couldn't measure (a second shot too soon after another), or
+  one only the light curtain saw (through an existing hole), is listed in the series as
+  "not scored", with a notice on the card: check the paper card for those.
+- The app can save every event the sensor captured (also the rejected ones) to a log file,
+  one per day, in the same format as the sensor's serial log (Settings → Measurement; on by
+  default). Settings also show the sensor's calibration, settings and air readings.
 - Settings also show the heartbeat (the sensor's `millis()`, every 2 s). The blue LED
   only shows the sensor's status: pairing mode, a PIN reset, a shot.
 - The sensor has a name (`OpenSights-xyz` at first) that you can change from the app.
@@ -70,6 +76,9 @@ and macOS and the firmware. The binaries aren't signed, so each system warns onc
     This also erases the stored name, PIN and pairings.
   - Update, keeping name, PIN and pairings:
     `esptool.py --chip esp32 write_flash 0x10000 opensights-firmware-…-app.bin`.
+  - The app and the firmware must speak the same protocol version (now 3): update both.
+    After a firmware update, a Linux computer may keep the sensor's old Bluetooth layout:
+    the app then asks you to pair again (hold BOOT for 2 s, press Pair).
 
 To make a release: `git tag v0.1.0 && git push origin v0.1.0`.
 

@@ -17,6 +17,8 @@ const uint32_t SHOT_FLASH_MS       = 80;     // LED flashes this long for every 
 
 const int      SHOT_BUFFER          = 64;     // shots kept for resending after a link drop
 const uint32_t SHOT_RETRY_MS        = 500;    // wait after a failed indication before retrying
+const int      EVENT_BUFFER         = 32;     // events kept for resending (protocol v3, 180 bytes each)
+const uint32_t STATUS_PERIOD_MS     = 500;    // Status is rebuilt this often, notified if it changed
 // Test shots (BOOT short press) until there is measuring hardware: normally distributed
 // around the centre. 15 mm puts most of them in the 7-10 rings of the air pistol card.
 const float    TEST_SHOT_SIGMA_MM   = 15.0f;

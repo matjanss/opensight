@@ -25,7 +25,7 @@ The web/wasm viewer is parked.
 | `firmware/MEASUREMENT.md` | The measurement firmware's steps 1–6, each with its build list and bench test, the step status table, and every bench result (newest first) | Before any measurement work; update it in the same commit as the code |
 | `firmware/MODEL.md` | The measurement model: units, mics, arrival time, speed of sound, propagation, the solver and its outputs, drop-one, the log lines (`cfg`, `rec`), the test vector format | Before touching `lib/measure/` or `tools/model.py` (see the model rule) |
 | `FUTURE_ARCHITECTURE.md` | The target system: target, range server, viewers, management, network per lane, updates, its steps 1–4 | Before anything network, server, viewer or fleet |
-| `protocol/PROTOCOL.md` | The BLE protocol, v2: advertising, GATT, shots, security, buttons and LED | Before touching the link (see the protocol rule) |
+| `protocol/PROTOCOL.md` | The BLE protocol, v3: advertising, GATT, hits, events, status, control, calibration, settings, security, buttons and LED | Before touching the link (see the protocol rule) |
 | `hardware/acoustic-sensor/README.md` | Sensor board v0.3: one mic channel, files, checks before ordering | Hardware questions |
 | `hardware/host-board/README.md` | Host board v0.3: layout, GPIO map, assembly | Hardware questions, pin changes |
 | `hardware/host-board/TODO.md` | The host board's to-do: changes before ordering, first bench checks | Host board work; add board changes there |
@@ -50,13 +50,13 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 
 | Part | Where it stands | Next (see) |
 |---|---|---|
-| Firmware: BLE, pairing, shot buffer | Done; protocol v2 | Flash shot store, uplink interface (PLAN D6, phase 3–4) |
+| Firmware: BLE, pairing, uplink | Protocol v3 (step 5b): `uplink.cpp` with the hit and event rings, Status, Control, Calibration and Settings; bench test passes over BLE (2026-11-23, on `step5-protocol`) | Flash shot store (PLAN D6), MQTT (phase 4) |
 | Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration, PLAN phase 0) passes all its simulated tests on a bare NodeMCU (2026-11-22, merged to `main`): the solver on the board, drop-one, the blast check, calibration mode and `tools/calibrate.py`. The DS18B20 and BME280 tests (3a-3, 3a-4) wait for the parts. Step 4a (the verdict) passes its simulated bench tests (2026-11-22, merged to `main`). Step 4b (the curtain) passes its simulated bench tests (2026-11-22, run by Claude, merged to `main`) | The boards' arrival (PLAN phase 1); 3a-3/3a-4 when the parts are there |
 | Sensor board (`hardware/acoustic-sensor/`) | v0.3 designed (KiCad 10), not yet on the bench | Its "check before ordering" list; then the summary's initial calibration, polarity, PLAN phase 1 |
 | Host board (`hardware/host-board/`) | v0.3 designed and routed, not yet on the bench; firmware already on its pin map | Order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner moved out along the diagonal (d about 15–25 mm, PLAN D1's update; principle in `hardware/frame/top-right-holder.svg`), plus bottom-middle and right-middle mics; the user designs and prints the holders. The firmware defaults still use the old slid position (65, 105) until d is fixed |
 | IR curtain | Designed (receiver on the host board, emitter board); firmware built and passing simulated (step 4b, on GPIO 13) | Its bench test (summary, PLAN phase 1.6), then the real gate |
-| App (`app/`) | v0.1.2, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay | Raw events and the calibration wizard with a Rust fit (PLAN D5, phase 3) |
+| App (`app/`) | v0.1.2, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay; protocol v3 (step 5c, on `step5-protocol`): unscored holes and missed shots, the event log, a read-only Measurement section | The calibration wizard with a Rust fit (step 5d, PLAN D5, phase 3) |
 | Range server, MQTT, management, wasm viewer | Not started (wasm parked) | FUTURE_ARCHITECTURE step 2, PLAN phase 4 |
 
 ## Repository
@@ -71,14 +71,17 @@ firmware/                     PlatformIO, Arduino-ESP32 3.x on pioarduino (IDF 5
   lib/measure/                the portable measurement core: air.h, model.h, solver,
                               record (the log lines), blast (the blast check)
   lib/bme280/                 BME280/BMP280 compensation (portable)
+  lib/proto/                  protocol v3's messages, encoded and decoded (portable)
   test/test_measure/          Unity tests of the core on the PC (`pio test -e native`)
+  test/test_proto/            Unity tests of lib/proto against PROTOCOL.md's examples
   test/vectors/               shared test vectors, written by tools/model.py
   tools/model.py              the model's reference implementation (numpy)
   tools/replay.cpp            replays a serial log's events through lib/measure (g++)
   tools/calibrate.py          the calibration fit (numpy, scipy)
   tools/layout_study.py       mic layout study behind PLAN D1/D2 (numpy)
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
-  src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs
+  src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs, eventlog.rs
+  examples/probe.rs           a protocol v3 test client without the UI (bench tests over BLE)
   TODO.md                     the app's to-do list
   assets/                     cards/, fonts/ (IBM Plex Sans), icon/
 hardware/acoustic-sensor/     sensor board, KiCad 10
@@ -96,8 +99,14 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
 - **Measurement core on the PC:** `pio test -d firmware -e native` (also in CI). After a
   model change: `python3 firmware/tools/model.py` writes the vectors again.
 - **App:** `cargo run` / `cargo build --release` in `app/`. `cargo test` checks the protocol
-  encoding against the examples in PROTOCOL.md. On Linux the app builds libdbus from
-  source (`vendored`), so no `libdbus-1-dev` is needed.
+  encoding against the examples in PROTOCOL.md, and the event log's lines against the
+  firmware's. On Linux the app builds libdbus from source (`vendored`), so no
+  `libdbus-1-dev` is needed.
+- **Over BLE without the UI:** `cargo run --example probe -- <seconds> <log> [writes]` in
+  `app/` connects to a bonded sensor, subscribes to everything, writes the event log as the
+  app does, and with `writes` exercises Settings, Calibration and Control (MEASUREMENT 5).
+  Opening the serial port resets the board (Linux): start a serial session first, then the
+  probe.
 - **Tools:** `python3 firmware/tools/layout_study.py [--drop] [--offsets]` (a few
   minutes). The replay, from `firmware/`: `g++ -std=gnu++17 -O2 -mfma -ffp-contract=fast
   -I lib/measure -o tools/replay tools/replay.cpp lib/measure/solver.cpp
@@ -114,8 +123,9 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
 ## Rules
 
 - **The protocol rule:** `protocol/PROTOCOL.md` is the source of truth, mirrored by
-  `firmware/src/protocol.h` and `app/src/protocol.rs`. Any protocol change touches all
-  three in the same commit, updates the examples and tests in `protocol.rs`, and bumps
+  `firmware/src/protocol.h` with `firmware/lib/proto/`, and `app/src/protocol.rs`. Any
+  protocol change touches all of them in the same commit, updates the examples and tests in
+  `test/test_proto` and `protocol.rs`, and bumps
   `PROTOCOL_VERSION` when an old app could misread new firmware or the reverse.
 - **The measurement rule:** a measurement step's code and its MEASUREMENT.md update (step
   status, build notes, bench test, bench results) go in the same commit. Every bench
@@ -237,23 +247,34 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   stops until `temp scan`. Missing values are assumed (18 °C, 50 % RH,
   1013.25 hPa, marked "assumed"). The speed of sound (Cramer) is in `lib/measure/air.h`,
   the start of the portable measurement core (step 3b).
-- `main.cpp`: the main loop and the shot buffer.
+- `main.cpp`: the main loop.
   - The button: short press = a random test shot (`testshot on|off`); 2 s
     hold = pairing mode; 10 s hold = PIN reset.
   - The heartbeat, and the name and PIN in NVS (namespace `"sensor"`).
   - The status LED: pairing blink, PIN reset, shot flash. The app can't switch it.
-  - The shot buffer: the last 64 shots, in RAM, indicated one at a time until the app
-    confirms each (`serviceShots`). A clear request from the app drops the shots it has
-    (`clearedSeq`).
-  - Serial lines go to `captureCommand`.
+  - Serial lines go to `captureCommand`, but `pairing` (pairing mode, as BOOT held 2 s).
   - A simple 10 ms loop.
 - **Cores:** NimBLE and the air sensor task run on core 0. `loop()` and the measurement task
   (higher priority) run on core 1, and so does the capture interrupt. Arrival times run in
   `loop()` (microseconds per event). The interrupt and the code it calls
   stay in IRAM, because NVS writes stall the flash cache.
+- `uplink.cpp` (step 5b, PLAN D6): what goes to the app, in protocol v3 (`lib/proto/`).
+  - The hit ring: the last 64 hits (kind shot, hole or missed), indicated one at a time until
+    the app confirms each; shot requests and clear requests (`clearedSeq`).
+  - The event ring: the last 32 events (every verdict, everything a `rec` line has), the
+    same way, after any waiting hit. `position.cpp` adds each event and its hit, `curtain.cpp`
+    a hole, `capture.cpp` a missed shot.
+  - Status (rebuilt every 0.5 s, notified on a change), Control (calibration mode, template
+    point), Calibration and Settings (written whole by the app, checked, then
+    `calibSetChannels`, `calibSetPolicy`, `captureSetSettings`).
 - `ble_link.cpp`: NimBLE GATT server. NimBLE callbacks run in NimBLE's task: they only
   store requests, which `loop()` picks up with `bleTake*()`. Don't touch pins, NVS or app
   state from a callback.
+  - Two indicated streams (`BLE_SHOT`, `BLE_EVENT`) share the link's one indication in
+    flight.
+  - After a firmware update, every bonded computer is told "services changed" on its next
+    secured connection (NVS `"blesc"`). BlueZ ignores it with NimBLE (bench 5): a Linux
+    computer has to pair again after a GATT change; the app waits 8 s, then says so.
 - **Security:**
   - Every characteristic needs an encrypted, MITM-authenticated link. The passkey is the
     PIN: 6 digits, default 000000, NVS key `"pin"`, with bonding.
@@ -290,6 +311,13 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
 - **Shots:** `ble.rs` asks for missed shots on every connect and drops duplicates by
   (boot, seq). The app keeps the series in memory. "Clear series" also sends a clear
   request, so the sensor forgets those shots and doesn't resend them after an app restart.
+  Holes and missed shots (no position) are kept apart (`unscored`), listed in their place
+  and on a card notice, never scored.
+- **Events (protocol v3):** `ble.rs` subscribes to events and Status, asks for missed events
+  like shots, and reads the calibration and settings again when Status shows a new cfg ID.
+  `eventlog.rs` writes them as the firmware's log lines (`cfg`, `rec`, `dip`, `MISSED`; C's
+  `%.9g` and CRC-32, so the IDs match) to `logs/YYYY-MM-DD.log` in the app's data folder (a
+  setting, on by default). The sensor settings show them read-only ("Measurement").
 - `main.rs`: the egui UI.
   - **The main window, while connected:** the target card with the series' shots, and the
     series list with a shots-per-score chart below it (bars per ring, or points per tenth
@@ -339,7 +367,8 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
     channel, the speed of sound from the BME280's T, RH and p.
   - **Solver** (D12): on the ESP, x, y and the emission time by Levenberg–Marquardt in
     float, residuals and an uncertainty per shot, drop-one; a portable core tested on the
-    PC; shots to the app in the v2 message, the rest on serial until protocol v3.
+    PC; since step 5, protocol v3: every event's raw data, hits of every kind, the status,
+    and the calibration and settings to the app (the calibration wizard is step 5d).
   - **Validity** (step 4): 4a the verdict (pulse shape, all at once, residual, lost
     channels, area), 4b the curtain (a dip 45–100 µs after the emission, judged apart
     from the acoustic checks; a dip alone is a shot through an existing hole), 4c

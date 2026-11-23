@@ -1,5 +1,6 @@
 // OpenSights - the IR light curtain: see curtain.h.
 #include "curtain.h"
+#include "uplink.h"
 #include "calib.h"
 #include "capture.h"
 #include "config.h"
@@ -208,8 +209,12 @@ void curtainService(bool quiet) {
     else strcpy(lenText, "-");
     Serial.printf("dip n=%u t=%lld.%09lld len=%s\n", (unsigned)nOrphans, (long long)(at / 1000000000LL),
                   (long long)(at % 1000000000LL), lenText);
-    Serial.println("  a curtain dip with no acoustic event within 1.5 ms: a shot through an existing "
-                   "hole? (no position: not sent)");
+    // To the app as a hole (protocol v3): an event, and an unscored hit outside calibration mode.
+    const uint32_t seq = uplinkHole((uint64_t)at, len >= 0 ? (int32_t)len : proto::NO_VALUE, ms);
+    if (seq) Serial.printf("  a curtain dip with no acoustic event within 1.5 ms: a shot through an "
+                           "existing hole? Sent as hit %u (hole, no position)\n", (unsigned)seq);
+    else Serial.println("  a curtain dip with no acoustic event within 1.5 ms (calibration mode: "
+                        "not a hit)");
   }
 }
 

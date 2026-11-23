@@ -8,7 +8,7 @@
 #include "curtain.h"
 #include "esp_cpu.h"
 #include "esp_timer.h"
-#include "shots.h"
+#include "uplink.h"
 #include "simulate.h"
 
 static Preferences prefs;
@@ -159,13 +159,27 @@ void positionProcess(const EventResult& r, Position& p, uint32_t nowMs) {
     if (f.curtain == 0) n += snprintf(line + n, sizeof line - n, ", outside the window");
   }
   const char* tag = measure::verdictName(f.verdict);
+  // Every event goes to the app's event stream (protocol v3); a good one outside calibration
+  // mode is a shot too, linked to it.
+  const bool send = f.good && !rec.calMode;
+  proto::Event ev;
+  proto::eventFromRec(rec, f, ev);
+  if (send) ev.flags |= proto::EV_SENT;
+  const uint32_t evSeq = uplinkEvent(ev, nowMs);
   if (!f.good) {
     verdictText(why, sizeof why, f, cfg);
     n += snprintf(line + n, sizeof line - n, "; not sent [%s]: %s", tag, why);
   } else if (rec.calMode) {
     n += snprintf(line + n, sizeof line - n, "; not sent [%s]: calibration mode", tag);
   } else {
-    const uint32_t seq = shotAdd(lroundf(f.s.x * 100), lroundf(f.s.y * 100), nowMs);
+    const float sigma = roundf(f.s.major * 100);
+    const uint8_t flags = (f.s.dropped >= 0 ? proto::SHOT_DROPPED : 0) |
+                          (strcmp(rec.measured, "TRP") ? proto::SHOT_AIR_ASSUMED : 0) |
+                          (rec.hasCal && rec.calStale ? proto::SHOT_CAL_STALE : 0) |
+                          (f.curtain == 1 ? proto::SHOT_CURTAIN : 0);
+    const uint32_t seq = uplinkShot(proto::KIND_SHOT, lroundf(f.s.x * 100), lroundf(f.s.y * 100),
+                                    sigma >= 0 && sigma < proto::SIGMA_UNKNOWN ? (uint16_t)sigma : proto::SIGMA_UNKNOWN,
+                                    flags, evSeq, nowMs);
     p.sent = true;
     nSent++;
     n += snprintf(line + n, sizeof line - n, "; sent as shot %u [%s]", (unsigned)seq, tag);

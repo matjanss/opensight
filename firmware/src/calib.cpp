@@ -192,6 +192,67 @@ void calibPrintStatus() {
 }
 uint32_t calibId() { return cfgIdNow; }
 
+bool calibRecordInfo(uint32_t* date, uint16_t* points, uint16_t* sparks, float* resNs) {
+  *date = haveRec ? rec.date : 0;
+  *points = haveRec ? rec.points : 0;
+  *sparks = haveRec ? rec.sparks : 0;
+  *resNs = haveRec ? rec.resNs : 0;
+  return haveRec;
+}
+
+void calibSetMode(bool on) {
+  calMode = on;
+  calibPrintStatus();
+}
+
+void calibSetPoint(bool have, float x, float y) {
+  havePt = have;
+  if (have) {
+    ptX = x;
+    ptY = y;
+  }
+  calibPrintStatus();
+}
+
+void calibSetPolicy(const measure::Cfg& p) {
+  cfg.resLimitNs = p.resLimitNs;
+  cfg.dropOne = p.dropOne;
+  cfg.maxLost = p.maxLost;
+  cfg.areaMm = p.areaMm;
+  cfg.togetherNs = p.togetherNs;
+  cfg.pulseMaxNs = p.pulseMaxNs;
+  cfg.curtainLoNs = p.curtainLoNs;
+  cfg.curtainHiNs = p.curtainHiNs;
+  prefs.putFloat("reslimit", cfg.resLimitNs);
+  prefs.putBool("dropone", cfg.dropOne);
+  prefs.putChar("lost", cfg.maxLost);
+  prefs.putFloat("area", cfg.areaMm);
+  prefs.putFloat("together", cfg.togetherNs);
+  prefs.putFloat("pulsemax", cfg.pulseMaxNs);
+  if (cfg.curtainHiNs > 0) {
+    prefs.putFloat("irlo", cfg.curtainLoNs);
+    prefs.putFloat("irhi", cfg.curtainHiNs);
+  } else {
+    for (const char* k : {"irlo", "irhi"})
+      if (prefs.isKey(k)) prefs.remove(k);
+  }
+  curtainApply();
+  changed();
+}
+
+void calibSetChannels(const measure::ChannelCfg ch[8], uint32_t date, uint16_t points,
+                      uint16_t sparks, float resNs) {
+  for (int c = 0; c < CHANNELS; c++) {
+    cfg.ch[c] = ch[c];
+    save(c);
+  }
+  rec = {CALREC_VERSION, 0, points, sparks, measure::calibrationId(cfg), date, resNs};
+  haveRec = true;
+  saveRec();
+  changed();
+  calibPrintStatus();
+}
+
 void calibPrintCfg() {
   char line[640];
   measure::formatCfg(line, sizeof line, cfg);

@@ -17,7 +17,12 @@ use futures::{Stream, StreamExt};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::agent::{AgentEvent, PairingAgent, PasskeyReply};
+use crate::eventlog;
 use crate::protocol::{self as proto, AdvInfo};
+
+/// After a firmware update: how many seconds to wait for the computer to read the new GATT
+/// layout (see `open`).
+const V3_DISCOVERY_TRIES: u32 = 8;
 
 /// A sensor that isn't heard from for this long drops off the "nearby" list.
 const SENSOR_STALE_AFTER: Duration = Duration::from_secs(15);
@@ -70,6 +75,13 @@ pub enum Event {
     Name(String),
     /// A shot the app hasn't had before (duplicates are dropped here).
     Shot(proto::Shot),
+    /// An event the app hasn't had before (protocol v3: every event, all verdicts).
+    Captured(proto::Event),
+    /// The sensor's state, as notified.
+    Status(proto::Status),
+    /// The sensor's calibration and settings, read together after a change. Their `cfg`
+    /// line's ID matches the Status's cfg ID.
+    Config(proto::Calibration, proto::Settings),
     /// The sensor accepted a new PIN.
     PinChanged,
     /// Pairing needs the sensor's PIN: ask the user, answer through the reply (Linux).
@@ -123,6 +135,7 @@ struct Opened {
     stream: Notifications,
     name: String,
     heartbeat: Option<u32>,
+    status: Option<proto::Status>,
 }
 
 struct Connection {
@@ -132,6 +145,31 @@ struct Connection {
     pin: Option<Characteristic>,
     /// None on firmware from before the shot characteristic.
     shot: Option<Characteristic>,
+    /// Protocol v3 (required: the version check makes sure of it).
+    calibration: Characteristic,
+    settings: Characteristic,
+    /// The cfg ID of the calibration and settings last read (eventlog::cfg_line's).
+    config_id: Option<u32>,
+}
+
+impl Connection {
+    /// Reads the calibration and settings. Returns them with their cfg ID.
+    async fn read_config(&self) -> Result<(proto::Calibration, proto::Settings, u32), String> {
+        let cal = self
+            .peripheral
+            .read(&self.calibration)
+            .await
+            .map_err(|e| e.to_string())?;
+        let set = self
+            .peripheral
+            .read(&self.settings)
+            .await
+            .map_err(|e| e.to_string())?;
+        let cal = proto::decode_calibration(&cal).ok_or("The sensor's calibration record can't be read.")?;
+        let set = proto::decode_settings(&set).ok_or("The sensor's settings can't be read.")?;
+        let (id, _) = eventlog::cfg_line(&cal, &set);
+        Ok((cal, set, id))
+    }
 }
 
 async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Result<(), String> {
@@ -176,8 +214,9 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
     let mut notifications: Option<Notifications> = None;
     let mut prune = tokio::time::interval(Duration::from_secs(2));
     // (boot, seq) of the newest shot received, kept across reconnects: after a link drop
-    // the sensor is asked for everything after it.
+    // the sensor is asked for everything after it. The same for events.
     let mut last_shot: Option<(u32, u32)> = None;
+    let mut last_event: Option<(u32, u32)> = None;
 
     loop {
         tokio::select! {
@@ -231,14 +270,22 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                     events.send(Event::Connecting { name: info.name.clone() });
                     let pid = pid.clone();
                     let pairing_mode = info.adv.is_some_and(|a| a.pairing);
-                    let attempt = connect(&adapter, &pid, agent.as_ref(), pairing_mode, last_shot);
+                    let attempt = connect(&adapter, &pid, agent.as_ref(), pairing_mode, last_shot, last_event);
                     let result = tokio::time::timeout(CONNECT_TIMEOUT, attempt).await;
                     if let Ok(Err(e)) = &result { eprintln!("ble: connect failed: {e}"); }
                     match result {
-                        Ok(Ok(Opened { conn: c, stream, name, heartbeat })) => {
+                        Ok(Ok(Opened { conn: mut c, stream, name, heartbeat, status })) => {
                             let pin_supported = c.pin.is_some();
                             let shots_supported = c.shot.is_some();
                             events.send(Event::Connected { id, name, heartbeat, pin_supported, shots_supported });
+                            match c.read_config().await {
+                                Ok((cal, set, cfg)) => {
+                                    c.config_id = Some(cfg);
+                                    events.send(Event::Config(cal, set));
+                                }
+                                Err(e) => events.send(Event::Error(e)),
+                            }
+                            if let Some(st) = status { events.send(Event::Status(st)); }
                             conn = Some(c);
                             notifications = Some(stream);
                         }
@@ -290,8 +337,26 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                         u if u == proto::SHOT_UUID => proto::decode_shot(&n.value)
                             .and_then(|shot| new_shot(&mut last_shot, shot, events))
                             .map(Event::Shot),
+                        u if u == proto::EVENT_UUID => proto::decode_event(&n.value)
+                            .and_then(|e| new_event(&mut last_event, e))
+                            .map(Event::Captured),
+                        u if u == proto::STATUS_UUID => proto::decode_status(&n.value).map(Event::Status),
                         _ => None,
                     };
+                    // A new cfg ID (a change on the sensor): read its calibration and settings,
+                    // so the event log gets the matching `cfg` line.
+                    if let Some(Event::Status(st)) = &ev
+                        && let Some(c) = &mut conn
+                        && c.config_id != Some(st.cfg)
+                    {
+                        match c.read_config().await {
+                            Ok((cal, set, cfg)) => {
+                                c.config_id = Some(cfg);
+                                events.send(Event::Config(cal, set));
+                            }
+                            Err(e) => events.send(Event::Error(e)),
+                        }
+                    }
                     if let Some(ev) = ev { events.send(ev); }
                 }
                 None => {
@@ -325,6 +390,19 @@ fn new_shot(last: &mut Option<(u32, u32)>, shot: proto::Shot, events: &EventSink
     }
     *last = Some((shot.boot, shot.seq));
     Some(shot)
+}
+
+/// Drops events the app already has (resent after a link drop). Unlike shots, a gap is no
+/// error: the sensor keeps only the last 32 events, and they are diagnostics.
+fn new_event(last: &mut Option<(u32, u32)>, e: proto::Event) -> Option<proto::Event> {
+    if let Some((boot, seq)) = *last
+        && boot == e.boot
+        && e.seq <= seq
+    {
+        return None;
+    }
+    *last = Some((e.boot, e.seq));
+    Some(e)
 }
 
 /// Waits for the next notification, or forever while not connected.
@@ -398,6 +476,7 @@ async fn connect(
     agent: Option<&PairingAgent>,
     pairing_mode: bool,
     last_shot: Option<(u32, u32)>,
+    last_event: Option<(u32, u32)>,
 ) -> Result<Opened, String> {
     let path = bluez_path(pid);
     if pairing_mode
@@ -411,7 +490,7 @@ async fn connect(
         }
     }
     let p = adapter.peripheral(pid).await.map_err(|e| e.to_string())?;
-    let result = open(&p, agent, &path, last_shot).await;
+    let result = open(&p, agent, &path, last_shot, last_event).await;
     if result.is_err() {
         let _ = p.disconnect().await;
     }
@@ -426,6 +505,7 @@ async fn open(
     agent: Option<&PairingAgent>,
     path: &str,
     last_shot: Option<(u32, u32)>,
+    last_event: Option<(u32, u32)>,
 ) -> Result<Opened, String> {
     let refused = "The sensor refused the connection. If it isn't paired with this computer yet, \
                    hold BOOT for 2 s until the LED blinks, then press Pair.";
@@ -470,11 +550,36 @@ async fn open(
             proto::PROTOCOL_VERSION
         ));
     }
+    // Version 3's characteristics. Right after a firmware update the computer may still have
+    // the old layout cached: the sensor tells it to re-read (a "services changed" indication,
+    // about a second after the link is secured, which the version read above did), and the
+    // OS discovers again. Wait for that a few seconds.
+    let mut chars = chars;
+    for _ in 0..V3_DISCOVERY_TRIES {
+        if chars.iter().any(|c| c.uuid == proto::EVENT_UUID) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        p.discover_services().await.map_err(|_| refused.to_string())?;
+        chars = p.characteristics();
+    }
+    let v3 = |uuid| chars.iter().find(|c| c.uuid == uuid).cloned();
+    let missing = || {
+        "This computer still has the sensor's old Bluetooth layout (from before a firmware update). \
+         Hold BOOT on the sensor for 2 s until the LED blinks, then press Pair: pairing again makes \
+         the computer read it afresh."
+            .to_string()
+    };
+    let event = v3(proto::EVENT_UUID).ok_or_else(missing)?;
+    let status = v3(proto::STATUS_UUID).ok_or_else(missing)?;
+    let calibration = v3(proto::CALIBRATION_UUID).ok_or_else(missing)?;
+    let settings = v3(proto::SETTINGS_UUID).ok_or_else(missing)?;
     let name_value = proto::decode_name(&p.read(&name).await.map_err(read_err)?).unwrap_or_default();
+    let status_value = proto::decode_status(&p.read(&status).await.map_err(read_err)?);
     let heartbeat_value = proto::decode_heartbeat(&p.read(&heartbeat).await.map_err(read_err)?);
 
     let stream = p.notifications().await.map_err(|e| e.to_string())?;
-    for c in [&heartbeat, &name] {
+    for c in [&heartbeat, &name, &status] {
         p.subscribe(c)
             .await
             .map_err(|e| format!("Could not subscribe: {e}"))?;
@@ -493,6 +598,18 @@ async fn open(
         .await
         .map_err(|e| format!("Could not ask for missed shots: {e}"))?;
     }
+    // Events after shots: the sensor sends a waiting shot first anyway.
+    p.subscribe(&event)
+        .await
+        .map_err(|e| format!("Could not subscribe to events: {e}"))?;
+    let (boot, next) = last_event.map_or((0, 0), |(boot, seq)| (boot, seq + 1));
+    p.write(
+        &event,
+        &proto::encode_event_request(boot, next),
+        WriteType::WithResponse,
+    )
+    .await
+    .map_err(|e| format!("Could not ask for missed events: {e}"))?;
 
     Ok(Opened {
         conn: Connection {
@@ -500,9 +617,13 @@ async fn open(
             name,
             pin,
             shot,
+            calibration,
+            settings,
+            config_id: None,
         },
         stream,
         name: name_value,
         heartbeat: heartbeat_value,
+        status: status_value,
     })
 }

@@ -15,9 +15,10 @@ commit as the code, and every bench test result goes into [Bench results](#bench
 - **The IR light curtain** comes in step 4b, simulated first: IR_IN (GPIO 13) is timed by
   the MCPWM capture, and IR_EN (GPIO 27) is high while its gate is on (`curtain on`; off
   by default).
-- Results go out over **serial** (115200) until step 5. From step 3c, solved shots go to
-  the app in the v2 shot message; everything else (raw events, residuals, uncertainty)
-  stays on serial. No protocol change before step 5.
+- Results go out over **serial** (115200), and over BLE: from step 3c solved shots in the v2
+  shot message, from step 5 protocol v3 (`protocol/PROTOCOL.md`): every event with its raw
+  data, hits of every kind (shot, hole, missed), the sensor's status, calibration mode, and
+  the calibration and settings read and written by the app.
 - Accuracy target after calibration: 0.2–0.5 mm (1σ). Every 1 µs of timing error is about
   0.37 mm, so the firmware must add well under 0.1 µs.
 
@@ -88,7 +89,7 @@ so a problem shows up in the step that caused it.
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
 | 3 | Solver and calibration | **simulated tests pass** (bare NodeMCU, 2026-11-22; merged to `main`): 3a-1, 3a-2, 3a-5, 3b (PC), 3c, 3d, 3e. Waiting for the parts: 3a-3 and 3a-4 (DS18B20, BME280). With the boards: the same solver and calibration on real sensors (PLAN phase 1) |
 | 4 | Validity checks | 4a (the verdict) passes its simulated bench tests on a bare NodeMCU (2026-11-22). 4b (the curtain) passes its simulated bench tests on a bare NodeMCU (2026-11-22, run by Claude). 4c (loudness, sharpness) planned |
-| 5 | Protocol and app | planned |
+| 5 | Protocol and app | 5a (protocol v3), 5b (firmware) and 5c (app) built; their bench test passes over BLE from the PC (2026-11-23, run by Claude, on `step5-protocol`). 5d (the calibration wizard, the Rust fit) planned |
 | 6 | Wi-Fi and MQTT | planned |
 
 ### 1. Capture and raw dump
@@ -1230,13 +1231,87 @@ summaries. For any FAIL, send the log too.
 
 ### 5. Protocol and app
 
-Raw-event message (t1/t2 or t0 per channel, fit residual, accept/reject reason, and
-`MISSED` events so the shooter is told), calibration-mode switch, reading and writing
-calibration data. **The mic span becomes an app setting** (now serial `span`), with the
-frame geometry; once the calibration (step 3) knows the mic positions, the app can fill
-it in from them. Follows the repo's protocol
-rule (PROTOCOL.md, `protocol.h`, `protocol.rs` in one commit). The shot message stays as it
-is.
+Protocol v3 (`protocol/PROTOCOL.md`, PLAN D4, D5, D7, D9): what step 3 and 4 kept on serial
+goes to the app too, in messages that will go over MQTT unchanged. Decisions (2026-11-23):
+holes and missed shots are hits in the shot stream, shown unscored; events are delivered
+reliably (indications, a ring of 32); the calibration record is one long write; the template
+point is kept on the target.
+
+#### 5a. The protocol
+
+Built (on `step5-protocol`):
+
+- **The shot** grows to 32 bytes: the event it came from, the calibration ID, the 1σ
+  uncertainty, a kind (`shot`, `hole`, `missed`) and flags (dropped, air assumed, stale,
+  curtain confirmed).
+- **New characteristics:** Event (180 bytes: everything the `rec` line has, plus the fit and
+  the verdicts), Status (52 bytes), Control (calibration mode, template point), Calibration
+  (213 bytes, long read and write), Settings (36 bytes). `PROTOCOL_VERSION` 3.
+- Floats travel as the firmware's `f32` bits, so the app writes the firmware's `cfg` and `rec`
+  lines exactly. Worked byte examples for every message; both sides' tests check them.
+
+#### 5b. The firmware
+
+Built:
+
+- **`lib/proto/`** (portable): the encoders and decoders, an event from a `rec` and its fit
+  and back, the range checks of writes. **`test/test_proto`** (native, 7 tests): the examples,
+  the round trip `rec` → event → `rec` for every line shape, the checks.
+- **`uplink.cpp`** (PLAN D6: the uplink interface): the shot ring (moved from `main.cpp`,
+  64 hits), the event ring (32), delivery (one indication in flight, hits first), Status
+  (rebuilt every 0.5 s, notified on a change), the Control commands, and the Calibration and
+  Settings writes (checked whole, then `calibSetChannels`, `calibSetPolicy`,
+  `captureSetSettings`; rejected writes change nothing).
+- Every event (`position.cpp`) goes to the event ring; an `ok` one outside calibration mode
+  is a hit too, linked to it. An unclaimed curtain dip (`curtain.cpp`) is a hole; activity in
+  the dead time (`capture.cpp`) a missed shot: an event, and a hit outside calibration mode.
+- **`ble_link.cpp`:** two indicated streams sharing the link's one indication, the new
+  characteristics, the MTU (`bleMtu`). After a firmware update every bonded computer is told
+  "services changed" on its next secured connection (kept in NVS `"blesc"` until then).
+- Serial `pairing`: pairing mode for 60 s, as BOOT held 2 s.
+
+#### 5c. The app
+
+Built:
+
+- **`protocol.rs`:** v3's messages, tested against PROTOCOL.md's examples.
+- **`eventlog.rs`:** every event as the firmware's log line (`cfg` when Status shows a new ID,
+  `rec`, `dip` for a hole, `MISSED`), with C's `%.9g` and the CRC-32, so the IDs match. One
+  file per day in the app's data folder (`logs/`); a setting, on by default.
+- **`ble.rs`:** the new characteristics, events deduplicated and asked for again after a
+  reconnect like shots, the calibration and settings read again when Status shows a new cfg
+  ID. Right after a firmware update it waits 8 s for the computer to read the new layout,
+  then asks the user to pair again.
+- **UI:** holes and missed shots as unscored rows in the series and a notice on the card;
+  the shot popup shows the 1σ and the flags; a read-only "Measurement" section in the sensor
+  settings (calibration, settings, air, event counts, the log).
+- **`examples/probe.rs`:** a v3 test client without the UI (the bench test below).
+
+##### 5 bench test
+
+**What it shows:** over real BLE from a PC, every event reaches the app with the board's
+data, so the app's log replays like the serial log; hits of every kind arrive and link to
+their events; Status, Control, Calibration and Settings work, and wrong writes change
+nothing.
+
+**Setup:** the bare NodeMCU on USB, nothing on CH3–CH8, GPIO 12 or GPIO 13. The PC bonded
+with the sensor after the v3 firmware was flashed (on Linux: pair again, as the app asks).
+The app closed (one connection at a time).
+
+1. Flash, then start the plan on the serial port. It begins with a few `stat` (no events),
+   then: `valid default`, `offset clear`, `sigma 50`, `mic sim`, `k 0.33333`, `sim fault
+   none`, `sim dip none`, `curtain off`, `deadtime 30`; `sim at 30 30 10`; `sim fault missing
+   5 7`, `sim at 30 30 5`; `sim fault none`, `sim at 115 0 5`; `sim dip 70`, `curtain on`, `sim
+   at 30 30 5`; `sim fault silent`, `sim at 30 30 5`; `sim fault none`, `curtain off`, `sim dip
+   off`; `deadtime 1`, `sim fault double 2500`, `sim at 0 0 10`; `sim fault none`, `deadtime
+   30`, `stat`; `mic default`, `cal clear`, `cal`.
+2. Right after the boot, from `app/`: `cargo run --example probe -- 200 <log> writes`.
+
+**Expected:** every `sim` run PASS. The probe: `cfg id from the reads ... MATCH`; the writes
+as labelled (serial: `settings from the app`, `settings write rejected`, `a calibration record
+from the app`, calibration mode on and off, the point, `control command ignored`); a summary
+with 0 event gaps and every hit linked to a received event. Then the app log's `rec` and `cfg`
+lines identical to the serial log's, and `tools/replay <app log>` giving the board's verdicts.
 
 ### 6. Wi-Fi and MQTT
 
@@ -1264,6 +1339,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-23 | 5a–5c | Bare NodeMCU, the PC's Bluetooth (BlueZ 5.85) with the probe (`app/examples/probe.rs`), run by Claude; serial `logs/device-monitor-261123-071418-5b.log`, probe `logs/probe-261123-071418.out`, app log `logs/app-events-261123-071418.log` | **Passes.** All 6 `sim` runs PASS. Over BLE: 50 events (38 acoustic, 5 holes, 7 missed), 0 gaps; 40 hits (28 shots, 5 holes, 7 missed), all 40 linked to a received event marked sent; 28 Status notifications. The app log's 38 `rec` lines and 3 `cfg` lines are identical to the serial log's (IDs included); `tools/replay` on the app log: ok 28, lost 5, outside 5 (the board's), 5 `dip` lines, the shots 0.0084 mm rms from the true points. Writes: settings unchanged accepted, span 10 mm rejected, the 213-byte calibration record (a long write) became the record (`05FB1059`, the ID the app computes too), calibration mode and the point in Status, an unknown command ignored. Native tests 23 (7 new), app tests 33. **Found on the way:** after the update BlueZ kept the v2 GATT layout cached. The sensor's "services changed" (at boot, then on the live link, then directly on its handle: rc 0) didn't make it read again. Pairing again does; the app now waits 8 s for a new layout, then says so. NimBLE's GATT caching (a database hash) doesn't build in NimBLE-Arduino 2.3. The re-pair needed the sensor's PIN (123456, not the default) and pairing mode: the serial `pairing` command was added for that. |
 | 2026-11-22 | 4b | 4b-0 to 4b-8 again with the edge tie, bare NodeMCU, run by Claude over serial, logs `logs/device-monitor-261122-230319.log` (diagnostic) and `-230420.log` (the full test), upload `logs/upload-261122-230227.log` | **Passes.** The tie now comes from one 20 µs pulse on GPIO 12 seen by both the I2S and capture channel 2 (the user chose this over a fixed correction). First try (`-203458.log`): 10.58 ms off and every dip unclaimed, because `gpio_reset_pin` briefly pulled GPIO 12 up and that rise opened the tie's event 10 ms before the real pulse. Fixed: the pin is set up as a quiet low output before it is routed, the tie waits out the dead time, and it checks the two agree within 50 µs (else a warning, and the catch stays). Both boots: `the start's catch was -4100 ns off` and `-4175 ns off`, so the edge corrected the bad case. The firmware's dip time against the hardware truth: mean −122 to −146 ns per run, rms 126–150 ns, worst 224 ns (200 shots of `sim random 200`), the same over both boots. All runs PASS; 4b-1 to 4b-6 as in the row below. Replay: 340 events, 0 verdicts differ, 20 `dip` lines; positions 0.013 mm rms against the truth. Native tests: 16 pass. Still in the code: the simulator's diagnostics (`steps late`, `tick 0 vs the sync edge`). |
 | 2026-11-22 | 4b | 4b-0 to 4b-8, bare NodeMCU, run by Claude over serial (scripted; the user's OK for this step), logs `logs/device-monitor-261122-195051.log` (first run) to `-201814.log`, uploads `logs/upload-261122-*.log` | **Not passed yet: an open problem in the clock tie.** Boot: no `curtain:` error, so the capture unit and the pulse generator share MCPWM group 0. **Bugs found and fixed on the way:** (1) firmware: when the capture interrupt runs late, the driver hands over a dip's fall before its rise, and the fall was dropped (`len=-`); the ring now keeps a fall until its rise. (2) replay: a `rec` line ending in `ir=-` with its line end did not parse (0 events); fixed, native test added. (3) this bench test: 4b-4 never set the dip back to 30 µs (it ran 4b-3's 120 µs); `sim dip 30` added. (4) simulator: its truth came from CPU cycle counts, and one shot of 200 was off by 1 µs from that; it now comes from the capture unit itself (channel 2 latches the sync edge during a run). Edges closer than 60 µs stay in one masked stretch. **What passed** (`-200234.log`, all runs PASS): the firmware's dip time against the hardware truth was +83 to +124 ns mean per run, rms about 95 ns, worst 196 ns. 4b-1: 20 `[curtain]`. 4b-2: 20 + 200 `[ok]`, position 0.012 mm rms. 4b-3: 40 `[curtain]` with the dip at +30 and +120 µs. 4b-5: `[lost]` and `[outside]` kept with a dip in the window (acoustic reject with a dip: 40). 4b-6: 20 `dip` lines, 0 events. Replay: 340 events, 0 verdicts differ; `--curtain off` 80 differ. **The open problem:** register writes to the MCPWM unit can stall for several µs. At boot the tie's catch took 3866 cycles (16 µs), the I2S start right after it 42 cycles. Where in that stall the catch lands decides the tie: in 3 boots the dip time was +0.1 µs from the truth, in 3 others +4.1 µs, steady within a boot. On a real curtain that is a dip-time offset of up to about 4 µs, different each boot. The simulator's own dips also come 3–12 µs late when a dip edge is the run's first step (the GPIO write stalls too); that doesn't affect its check, since the truth is latched in hardware. Still in the code: the diagnostics (`steps late`, `tick 0 vs the sync edge`, `curtain: tie:` at boot). |
 | 2026-11-22 | 4a | 4a-8, bare NodeMCU, serial console (user report, pasted) | **PASS; step 4a passes.** `valid area 110`: `area +-110 mm`, the hint "`mic` runs the blast check for the new area", `area=110` in the `cfg` line. After the EN reset the boot `cfg` line and `valid` still read 110 (stored in NVS). `valid default`: back to `lost 1, area +-105 mm, together 20.0 us, pulse 10.0 us`, `cfg` id 5C14D0AC again (the same settings give the same id). `valid foo`: the usage line. `mic default`: the blast check 0 of 624 everywhere, `area=105`. At boot, with nothing on J5, the Arduino I2C driver logs four lines `i2cWriteReadNonStop ... ESP_ERR_INVALID_STATE` (error 259): the BME280 probe got no acknowledge. They were already in the logs of 3b-3e; harmless, the `air:` line reports no sensor. All of 4a-0 to 4a-8 pass. |

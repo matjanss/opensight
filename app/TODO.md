@@ -1,7 +1,19 @@
 # App: to do
 
 Wishes and known gaps in the desktop app, not yet planned into a release. The bigger app
-work (raw events, the calibration wizard, protocol v3) is in `../PLAN.md` phase 3.
+work (the calibration wizard, step 5d) is in `../PLAN.md` phase 3; protocol v3's raw events,
+status and settings are in (step 5c).
+
+## Protocol v3 (step 5c leftovers)
+
+- **Unscored hits: resolve them.** A hole or a missed shot is listed as "not scored". The
+  shooter (or range officer) should be able to place it on the card by hand after checking
+  the paper, or mark it a miss, so the total is complete.
+- **Settings editor.** The sensor's settings (span, dead time, validity limits, the curtain's
+  window) are shown read-only; the protocol can write them (Settings). Comes with the
+  calibration wizard (5d).
+- **An events list** at the range: the recent events with time, verdict, position and
+  residual, beside the counters (chosen against for 5c: counters only).
 
 ## The card
 
