@@ -7,6 +7,8 @@
 //! - [`card`]: the printed features of the card (the rings, the black disc's edge).
 //! - [`detect`]: the coarse find (the black disc), the ring edges, the card's outline.
 //! - [`register`]: the fit, and rectified images.
+//! - [`holes`]: the holes, and their match to the shots.
+//! - [`meta`]: metadata (EXIF, GPS) out of an uploaded photo, the image untouched.
 //! - [`synth`]: synthetic photos with a known truth (the tests, and the app's demo).
 //!
 //! Coordinates: **card** mm from the card's centre, x right, y up, as printed (the numbers
@@ -15,6 +17,7 @@
 pub mod card;
 pub mod detect;
 pub mod holes;
+pub mod meta;
 pub mod register;
 pub mod synth;
 

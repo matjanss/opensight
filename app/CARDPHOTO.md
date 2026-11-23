@@ -13,7 +13,7 @@ and reviews the results.
 |---|---|---|
 | C1 | Registration from the rings (`app/cardphoto/`) | synthetic tests pass (2026-11-23); real photos in C5 |
 | C2 | The holes: finding them, matching them to the shots | synthetic tests pass (2026-11-23); real holes in C5 |
-| C3 | The upload: QR code, the phone page, storage | planned |
+| C3 | The upload: QR code, the phone page, storage | tests over HTTP pass (2026-11-23); the phone: the user, once |
 | C4 | In the app: the photo under the shots, the ground-truth panel | planned |
 | C5 | Real photos: registration (no holes), then holes | waiting for the photos |
 | C6 | The serial number from the photo | later |
@@ -111,20 +111,63 @@ holes in the black disc.
 
 ## C3. The upload
 
-Builds (in the app):
+Builds (in the app, `src/upload.rs`; the stripping in `cardphoto`, `src/meta.rs`):
 
-- A small HTTP server (`tiny_http`) on the local network while the dialog is open; the QR
-  code (`qrcode`) holds `http://<this computer>:<port>/<token>`; the token is random, single
-  use, and names the series.
-- The page: one "Take photo" button (`<input type="file" accept="image/*"
-  capture="environment">`), the upload, a confirmation.
-- Storage next to the event logs: the original (JPEG metadata such as GPS stripped from the
-  file's segments, the image itself untouched), named by the series; the results files.
-  Originals older than 30 days are removed (unless marked for evaluation).
+- **The server** (`tiny_http`), while the dialog is open: on every interface, port 8710 (so a
+  firewall rule can name it; any free port if 8710 is taken). The link is
+  `http://<this computer's address>:<port>/p/<token>`, the token 128 random bits (hex). It
+  names the series and works once; a new link ends the old one; anything else gets a 404.
+  The address is the one the default route leads to (the range's Wi-Fi): the phone must be on
+  the same network.
+- **The QR code** (`qrcode`): the modules, for the app to paint.
+- **The page:** a few lines on how to take the photo (flat on a grey or coloured surface,
+  phone straight above, the whole card, no shadow), "Take photo" (`capture=environment`, the
+  camera at once) and "Choose a photo", a progress bar, the answer. The photo is sent as it
+  is (the body of a POST): no resizing on the phone.
+- **The checks:** at most 40 MB (refused by its length before reading, or while reading);
+  JPEG or PNG only (an iPhone set to HEIC: its file input sends JPEG anyway; if not, the
+  answer says how to switch); a refused upload leaves the link working.
+- **The metadata out** (`cardphoto::meta::strip`), without re-encoding: JPEG keeps its
+  image segments, JFIF, an ICC profile and Adobe's segment; it drops APP1 (EXIF with GPS,
+  the make, the time; XMP), the other APPn (MPF, maker data), comments, and what follows the
+  end of the image (phones append depth maps and second images). PNG drops eXIf, tEXt,
+  zTXt, iTXt and tIME. The EXIF orientation is read first and kept in the JSON.
+- **Storage:** `photos/` next to `logs/` in the app's data folder,
+  `YYYY-MM-DD_HHMMSS_<series>.jpg` (UTC) and a JSON beside it: series, time, file, format,
+  sizes sent and stored, orientation, what was dropped, `keep`, `removed`.
+- **Clean-up** (`clean_up`, run by the app at start and when the dialog opens, C4): an
+  original more than 30 days old and not marked to keep is removed; its JSON stays (marked
+  `removed`), and so do results files.
 
-**Tests:** an upload by HTTP from this computer (a real JPEG with GPS metadata: stored, the
-metadata gone, the pixels identical); a wrong or used token refused; a too-large file
-refused; the clean-up of old originals. The phone itself: by the user, once.
+**Tests (automated, `cargo test` in `app/`; HTTP over TCP from this computer, as a browser
+sends it):**
+
+1. A phone-like JPEG (EXIF with orientation 6, the make and a GPS IFD; XMP with a GPS
+   position; MPF; a comment; 400 bytes after the end) uploaded: 200, stored; "Exif", "GPS",
+   the make and the XMP gone from the file; the decoded pixels identical to the original's;
+   orientation 6 in the JSON; the JSON on disk equal to what the app got; the page served
+   with the camera button and the series' name.
+2. The same link again: 404 for the page and the upload (used).
+3. An old link (replaced), a made-up token, `/p/`, `/`, `/favicon.ico`: 404, nothing stored.
+4. Too large: by its stated length (413, refused before reading) and chunked without a
+   length (413 after the limit); not a photo (415, the answer names JPEG); nothing stored,
+   and the link still works afterwards.
+5. The clean-up: of three photos 31, 40 (marked to keep) and 29 days old, only the first's
+   image goes; its JSON stays, marked `removed`; a results file stays; a second run removes
+   nothing.
+6. Two photos of one series in the same second get different names; the UTC time is right.
+7. The QR code of a link: the right size, the finder patterns there; tokens random.
+8. In `cardphoto`: the stripping as in 1, stripping twice changes nothing, PNG text chunks
+   dropped (the rest byte for byte), other formats and cut-short files refused.
+9. Over this computer's network address (`cargo test lan -- --ignored`): the page and an
+   upload, as a phone would reach them.
+
+**The phone (the user, once):** in `app/`, `PHONE_WAIT=120 cargo test lan -- --ignored
+--nocapture` prints a QR code and the link and waits 2 minutes. Scan it with the phone (on
+the same Wi-Fi), take a photo. Expected: the page opens (it shows the tips and two buttons),
+"Take photo" opens the camera, the upload shows progress and "Received", and the test prints
+the stored file's JSON (orientation, what was dropped) and the folder. Worth trying both an
+Android phone and an iPhone if at hand. A firewall may block port 8710 (Windows asks once).
 
 ## C4. In the app
 
@@ -160,5 +203,6 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-23 | C3 | `cargo test` in `app/` (HTTP over TCP to 127.0.0.1, and once over the LAN address 192.168.2.201:8710), run by Claude | **Pass**, tests 1–9. The phone-like JPEG: 5 segments dropped (APP1 Exif, APP1 XMP, APP2 MPF, COM, 400 trailing bytes), pixels identical, orientation 6 kept. **Found on the way:** the size limit's message said "0 MB" for limits under 1 MB (now rounded up). The phone itself not yet tried (the user). |
 | 2026-11-23 | C2 | Synthetic photos in colour (`tests/holes.rs`), as C1, 9 holes (two in the black near the centre, one across ring 6's line, one across the disc's edge, two in the white, three overlapping), run by Claude | **Pass**, 6 tests, 28 s. Hole centres within 0.019 mm (all four quarter turns, blue table), 0.022 mm (grey table), 0.026 mm (with a false shot and an extra hole: both flagged); the quarter turn right every time; the placement's angle 0.40–0.49° against 0.4°, its rms at the shots 0.05–0.07 mm (the shots' noise); clean card: no holes; unguided: 9 of 9, within 0.022 mm. Dark table (0.1 against the ink's 0.07): 5 of 9 not found (those in the black), none misplaced. **Found and changed on the way:** (1) an expected card per 5° sector failed: out to 52 mm a hole covers a sector's whole width; now the light as smooth surfaces and the print as one profile over the full circle. (2) A hole with one contrast inside was biased 0.06 mm across the disc's edge (a blue table differs more from paper than from ink); the model is now the table's colour inside and the expected card outside: 0.001 mm. (3) The matched filter missed overlapping holes in the unguided search (their neighbours are in its ring); it now starts from blobs and their area. |
 | 2026-11-23 | C1 | Synthetic photos (`tests/register.rs`), 2400 × 1800 px, the card at 9 px/mm, 3 × 3 samples per pixel, blur σ 1 px, run by Claude | **Pass**, 7 tests, 12 s. Worst error over the scoring area (r ≤ 78 mm): easy (10° turn, tilts 5°/3°, light ±20 %) 0.014 mm; hard (137°, tilts 12°/−9°, off-centre, near camera, k1 0.08, k2 −0.02, 9 holes, three overlapping, light ±30 %, noise 3 %) 0.016 mm, k1 found 0.0797; light table (0.72 against the paper's 0.93) 0.014 mm; barrel k1 −0.12 with 15°/10° tilt 0.013 mm, k1 −0.1213. The edge points' rms 0.006–0.010 mm; 92–96 % of them kept. The outline fixed the rotation in every case. A card bent 2 mm at its edges: rms 0.019 mm against 0.006 flat (so a bend shows), and up to 0.24 mm wrong: flatness matters. No card in view, and a card at 3 px/mm: an error each. |

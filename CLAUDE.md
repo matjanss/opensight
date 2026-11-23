@@ -82,7 +82,7 @@ firmware/                     PlatformIO, Arduino-ESP32 3.x on pioarduino (IDF 5
   tools/layout_study.py       mic layout study behind PLAN D1/D2 (numpy)
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs, eventlog.rs,
-                              calwizard.rs
+                              calwizard.rs, upload.rs (card photos from the phone)
   cardphoto/                  card photos (workspace member): registration from the rings,
                               the holes, synthetic photos (CARDPHOTO.md)
   calib/                      the calibration crate (workspace member): the target's solver
@@ -337,6 +337,11 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   `eventlog.rs` writes them as the firmware's log lines (`cfg`, `rec`, `dip`, `MISSED`; C's
   `%.9g` and CRC-32, so the IDs match) to `logs/YYYY-MM-DD.log` in the app's data folder (a
   setting, on by default). The sensor settings show them read-only ("Measurement").
+- **Card photos (PLAN D13, `CARDPHOTO.md`):** `upload.rs` runs a `tiny_http` server while
+  the dialog is open (port 8710, a single-use token per link, shown as a QR code); the phone's
+  page sends the photo as it is; `cardphoto::meta` drops EXIF/GPS/XMP from the file without
+  re-encoding; stored in `photos/` next to `logs/` with a JSON beside it; originals removed
+  after 30 days unless marked to keep. The registration and the holes are in `cardphoto/`.
 - **Calibration (step 5d):** `calwizard.rs` holds the wizard and the field check as state
   machines (events, Status and Calibration in; actions out: calibration mode, the template
   point, the record), run by the calibration window (`CalTask`) or the probe. The fit is

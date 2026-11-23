@@ -7,6 +7,7 @@ mod calwizard;
 mod card;
 mod eventlog;
 mod protocol;
+mod upload;
 
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
