@@ -1,0 +1,13 @@
+[package]
+name = "cardphoto"
+version = "0.1.0"
+edition = "2024"
+description = "OpenSights card photos: registration from the printed rings, the holes (PLAN D13)"
+publish = false
+
+[dependencies]
+nalgebra = "0.33"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+[dev-dependencies]
+resvg = { version = "0.45", default-features = false, features = ["text"] }

@@ -379,6 +379,46 @@ All of this is needed before the range tests (phase 2).
 - **Replay:** the firmware prints every event as an `evt` line; a PC program feeds such
   logs through the same core.
 
+
+### D13 Card photos: ground truth and the shooter's view (2026-11-23)
+
+A phone photo of the shot card, matched to the measured shots: first to measure the
+system's accuracy on real shots (D11), later to show the shooter the real card under the
+app's shots. Steps, tests and results: `app/CARDPHOTO.md`.
+
+- **The photo:** taken with the shooter's own phone, card flat on a table. The app shows a
+  QR code with a one-time token and the series; the phone's browser opens a page the app
+  serves on the local network, takes the photo and uploads it. Nothing to install on the
+  phone, no camera on the target. It needs the phone and the computer on one network: the
+  range Wi-Fi, best a separate target-system SSID without client isolation. Later the range
+  server serves the same page (FUTURE_ARCHITECTURE).
+- **Registration from the printed rings only** (no extra marks: placing marks to < 0.1 mm
+  isn't repeatable): the rings are concentric circles of known diameter (genuine ISSF cards,
+  Krüger), seen as near-ellipses. One fit over their edge points gives the perspective,
+  the lens distortion (radial terms) and the print's scale, robust to holes and print. The
+  fit's residual says whether the photo is good enough.
+- **Rotation:** circles say nothing about the card's rotation in its plane, and the card may
+  be turned by 90°, 180° or 270°, plus a small angle in its holder. The card's square outline
+  gives the rotation modulo 90°; the quarter turn and the small angle come from matching the
+  holes to the measured shots (all four tried). Without shots, the printed text and serial
+  break the symmetry.
+- **The holes:** searched near each measured shot, a 4.5 mm circle fitted to each edge,
+  overlapping holes together. The shift and rotation between shots and holes are fitted per
+  card: what remains per shot is the sensor's error; the shift and rotation themselves are
+  the card's placement in its holder (it slides in; meant to be tight).
+- **The serial number** (6 digits on each card) identifies the card: typed in at first,
+  read from the photo later.
+- **Storage** (a photo is 3–5 MB): kept with the series are the results (registration,
+  hole centres with uncertainties, per-shot errors, the card's shift and rotation, the
+  serial; a few KB), a small patch per hole (about 15 KB each: a dispute, a later re-fit) and
+  a low-resolution rectified card (about 80 KB: the shooter's view). The original photo is
+  kept 30 days, or longer when marked for evaluation. About 4 GB a year for a busy range
+  instead of 90 GB. Photo metadata (GPS) is stripped on upload.
+- **Risks:** the print's own accuracy and the paper's humidity (0.1–0.3 %; the fit has a
+  scale term; measure a few cards once against a reference), flatness (a slight warp shows
+  in the fit's residual), and the photo method's own precision (tested: the same holes from
+  several photos must agree).
+
 ## Open questions for you
 
 - **Q1 Which card first?** The 10 m air pistol card (10-ring 11.5 mm) or the air rifle

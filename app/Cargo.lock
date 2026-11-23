@@ -645,6 +645,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cardphoto"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "nalgebra",
+ "resvg",
+]
+
+[[package]]
 name = "cc"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1785,6 +1794,8 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2626,6 +2637,7 @@ version = "0.1.2"
 dependencies = [
  "btleplug",
  "calib",
+ "cardphoto",
  "dbus",
  "dbus-tokio",
  "eframe",

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 calib = { path = "calib" }
+cardphoto = { path = "cardphoto" }
 btleplug = "0.13.5"
 eframe = { version = "0.37", features = ["persistence"] }
 # Monochrome emoji (the replay speed animals, ⚠) compiled in, instead of the system's
@@ -32,5 +33,14 @@ winresource = "0.1"
 # The calibration crate (calib/: the solver and the fit, PLAN D5) is built and tested with the
 # app: `cargo test` runs both.
 [workspace]
-members = ["calib"]
-default-members = [".", "calib"]
+members = ["calib", "cardphoto"]
+default-members = [".", "calib", "cardphoto"]
+
+# Image processing on whole photos: optimised in test and debug builds too (the dependencies
+# and the image crates), or the tests take minutes.
+[profile.dev.package."*"]
+opt-level = 2
+[profile.dev.package.cardphoto]
+opt-level = 3
+[profile.dev.package.calib]
+opt-level = 3

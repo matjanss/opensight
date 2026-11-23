@@ -32,6 +32,7 @@ The web/wasm viewer is parked.
 | Project summary (claude.ai doc, below) | The hardware design: approaches considered, signal chain and BOM, threshold levels, initial calibration per board, error budget, error sources, valid-shot detection, IR curtain design, host board requirements, its open questions | Hardware or measurement design questions |
 | `README.md` | User-facing: what it does, getting started, downloads, notes per platform | Changing user-visible behaviour |
 | `app/TODO.md` | The app's to-do list: wishes and known gaps not yet in a release | App work; add new app wishes there |
+| `app/CARDPHOTO.md` | Card photos (PLAN D13): the steps C1–C6, their tests and results | Card-photo work; update it in the same commit as the code |
 | `app/assets/icon/README.md` | The app icon and where it is used | Icon work |
 
 **The project summary** is a Claude Docs document: "Electronic shooting target – project
@@ -82,6 +83,8 @@ firmware/                     PlatformIO, Arduino-ESP32 3.x on pioarduino (IDF 5
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs, eventlog.rs,
                               calwizard.rs
+  cardphoto/                  card photos (workspace member): registration from the rings,
+                              the holes, synthetic photos (CARDPHOTO.md)
   calib/                      the calibration crate (workspace member): the target's solver
                               (Rust port), the calibration fit (calibrate.py's), log-line text
   examples/probe.rs           a protocol v3 test client without the UI (bench tests over BLE)
