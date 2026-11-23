@@ -394,9 +394,13 @@ app's shots. Steps, tests and results: `app/CARDPHOTO.md`.
   server serves the same page (FUTURE_ARCHITECTURE).
 - **Registration from the printed rings only** (no extra marks: placing marks to < 0.1 mm
   isn't repeatable): the rings are concentric circles of known diameter (genuine ISSF cards,
-  Krüger), seen as near-ellipses. One fit over their edge points gives the perspective,
-  the lens distortion (radial terms) and the print's scale, robust to holes and print. The
-  fit's residual says whether the photo is good enough.
+  Krüger), seen as near-ellipses. One fit over their edge points gives the perspective and
+  the lens distortion (radial terms), robust to holes and print. The fit's residual says
+  whether the photo is good enough. The print's scale can't be seen in a photo (it trades
+  with the camera's distance): the rings are taken at their ISSF size, and the match to the
+  shots fits a scale between the two when there are enough shots (C1, C2).
+- **The surface under the card:** a hole shows it. Mid-grey or coloured, not black (a black
+  table hides the holes in the black) and not white (C2).
 - **Rotation:** circles say nothing about the card's rotation in its plane, and the card may
   be turned by 90°, 180° or 270°, plus a small angle in its holder. The card's square outline
   gives the rotation modulo 90°; the quarter turn and the small angle come from matching the

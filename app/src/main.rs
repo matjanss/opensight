@@ -6,6 +6,7 @@ mod ble;
 mod calwizard;
 mod card;
 mod eventlog;
+mod photo;
 mod protocol;
 mod upload;
 
@@ -673,6 +674,15 @@ struct SensorApp {
     cal: Option<CalTask>,
     /// Where the last calibration report was saved, or why it wasn't.
     cal_report: Option<String>,
+    /// The card photo window (`CARDPHOTO.md` C3/C4), while open: the link for the phone.
+    photo_task: Option<PhotoTask>,
+    /// A photo being processed, and the series' length it was taken with.
+    photo_job: Option<(mpsc::Receiver<Result<photo::Processed, String>>, usize)>,
+    /// The processed photo of the current series: under the shots, and its ground truth.
+    card_photo: Option<CardPhoto>,
+    photo_error: Option<String>,
+    /// The card view: 0 the printed card, 1 the photo.
+    photo_fade: f32,
     /// (boot, seq) of the shot whose info popup is open on the card.
     selected_shot: Option<(u32, u32)>,
     view: CardView,
@@ -736,6 +746,11 @@ impl SensorApp {
             log_error: None,
             cal: None,
             cal_report: None,
+            photo_task: None,
+            photo_job: None,
+            card_photo: None,
+            photo_error: None,
+            photo_fade: 0.0,
             selected_shot: None,
             view: CardView::default(),
             replay: Replay {
@@ -814,6 +829,7 @@ impl SensorApp {
                     if self.series_sensor.as_deref() != Some(id.as_str()) {
                         self.series.clear();
                         self.unscored.clear();
+                        self.card_photo = None;
                         self.series_sensor = Some(id.clone());
                     }
                     self.event_counts = EventCounts::default();
@@ -1061,6 +1077,34 @@ impl eframe::App for SensorApp {
             self.run_cal_actions();
         }
 
+        self.poll_photo(&ctx);
+        if self.photo_task.is_some() {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("photo"),
+                with_app_icon(
+                    egui::ViewportBuilder::default()
+                        .with_title("OpenSights · Card photo")
+                        .with_inner_size([520.0, 780.0])
+                        .with_min_inner_size([380.0, 480.0]),
+                ),
+                |ui, _| {
+                    let close = ui.input(|i| i.viewport().close_requested());
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            centered_column(ui, |ui| {
+                                ui.add_space(20.0);
+                                self.photo_body(ui);
+                                ui.add_space(16.0);
+                            });
+                        });
+                    });
+                    if close {
+                        self.photo_task = None; // stops the server
+                    }
+                },
+            );
+        }
+
         if self.dark_mode != was_dark {
             ctx.set_theme(theme_pref(self.dark_mode));
         }
@@ -1233,7 +1277,28 @@ impl SensorApp {
             }
         }
 
+        // The card photo under the shots (C4), faded in over the printed card, and the holes
+        // found in it as rings, also with the photo faded out.
         let radius = self.card.pellet_diameter_mm / 2.0 * scale;
+        let fade = self.photo_fade;
+        if let Some(cp) = &mut self.card_photo {
+            if fade > 0.0
+                && let Some(tex) = cp.texture(ui.ctx())
+            {
+                painter.image(
+                    tex.id(),
+                    egui::Rect::from_min_size(origin, card_mm * scale),
+                    uv,
+                    Color32::WHITE.gamma_multiply(fade),
+                );
+            }
+            for h in cp.holes() {
+                let c = to_screen(self.card.to_card(h.0 as f32, h.1 as f32));
+                painter.circle_stroke(c, radius, Stroke::new(3.0, Color32::from_black_alpha(150)));
+                painter.circle_stroke(c, radius, Stroke::new(1.2, Color32::WHITE));
+            }
+        }
+
         // Replay: only the first `visible` shots are on the card.
         let now = Instant::now();
         let len = self.series.len();
@@ -1312,6 +1377,19 @@ impl SensorApp {
                 ui.ctx().request_repaint();
             }
             replay_speed_label(ui, &painter, bar, self.replay.delay_s);
+        }
+
+        // The photo's fade, top right, while there is one.
+        if self.card_photo.is_some() {
+            let w = 210.0;
+            let bar = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - margin - w, rect.top() + margin),
+                egui::vec2(w, height),
+            );
+            if let Some(f) = fade_control(ui, &painter, bar, self.photo_fade) {
+                self.photo_fade = f;
+                ui.ctx().request_repaint();
+            }
         }
 
         // Every shot of the series that nearly scored higher, worth a look at the real card.
@@ -1463,6 +1541,7 @@ impl SensorApp {
             ui.available_height()
         };
         let mut clear = false;
+        let mut photo = false;
         let width = ui.available_width();
         ui.allocate_ui(egui::vec2(width, series_h), |ui| {
             ui.set_height(series_h);
@@ -1490,16 +1569,20 @@ impl SensorApp {
                     ui.label(RichText::new(detail).weak());
                 });
                 if self.series.is_empty() && self.unscored.is_empty() {
+                    photo = photo_button(ui);
                     ui.allocate_space(ui.available_size()); // fill the column anyway
                     return;
                 }
                 ui.separator();
                 // "Clear series" at the bottom, the list scrolling in the height between.
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                    clear = ui
-                        .add(egui::Button::new("Clear series").frame(false))
-                        .on_hover_text("Start a new series. Also clears the sensor's stored shots.")
-                        .clicked();
+                    ui.horizontal(|ui| {
+                        clear = ui
+                            .add(egui::Button::new("Clear series").frame(false))
+                            .on_hover_text("Start a new series. Also clears the sensor's stored shots.")
+                            .clicked();
+                        photo = photo_button(ui);
+                    });
                     ui.separator();
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                         egui::ScrollArea::vertical()
@@ -1550,6 +1633,10 @@ impl SensorApp {
             self.send(Command::ClearShots);
             self.series.clear();
             self.unscored.clear();
+            self.card_photo = None;
+        }
+        if photo {
+            self.open_photo(ui.ctx());
         }
     }
 
@@ -3000,6 +3087,502 @@ fn air_text(st: &protocol::Status) -> String {
         "Air {:.1} °C, {:.0} % RH, {:.0} hPa ({how}) · speed of sound {:.2} m/s",
         st.t_c, st.rh, st.hpa, st.c
     )
+}
+
+/// The card photo window's link for the phone (`CARDPHOTO.md` C3).
+struct PhotoTask {
+    server: Result<upload::UploadServer, String>,
+    url: Option<String>,
+    qr: Option<(usize, Vec<bool>)>,
+    status: String,
+    /// The QR code shows: before the first photo, and after "Take another photo".
+    show_link: bool,
+}
+
+impl PhotoTask {
+    /// A new link (the old one stops working).
+    fn new_link(&mut self, series: &str) {
+        if let Ok(s) = &self.server {
+            let url = s.offer(series);
+            self.qr = upload::qr(&url).ok();
+            self.url = Some(url);
+            self.status = "Waiting for the phone…".into();
+        }
+    }
+}
+
+/// What a processing thread starts from.
+enum PhotoJob {
+    /// Uploaded and stored already.
+    Stored(upload::Photo),
+    /// A file dropped on the window: stored first.
+    Bytes(Vec<u8>),
+    /// A synthetic photo of the series (`OPENSIGHTS_DEMO_PHOTO` set).
+    Demo,
+}
+
+/// A processed card photo of the current series (C4).
+struct CardPhoto {
+    p: photo::Processed,
+    texture: Option<egui::TextureHandle>,
+    /// The series' length when it was processed.
+    series_len: usize,
+}
+
+impl CardPhoto {
+    fn texture(&mut self, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
+        if self.texture.is_none()
+            && let Some(img) = self.p.image.take()
+        {
+            self.texture = Some(ctx.load_texture("card-photo", img, egui::TextureOptions::LINEAR));
+        }
+        self.texture.as_ref()
+    }
+
+    /// Every hole found (frame mm): the shots' and the others.
+    fn holes(&self) -> Vec<(f64, f64)> {
+        self.p
+            .shots
+            .iter()
+            .filter_map(|s| s.hole)
+            .chain(self.p.holes.iter().copied())
+            .collect()
+    }
+}
+
+impl SensorApp {
+    fn photos_dir() -> Option<std::path::PathBuf> {
+        eframe::storage_dir(APP_ID).map(|d| d.join("photos"))
+    }
+
+    fn series_label(&self) -> String {
+        if self.sensor_name.is_empty() {
+            "series".into()
+        } else {
+            self.sensor_name.clone()
+        }
+    }
+
+    /// Opens the card photo window (or brings it to the front): old originals cleaned up,
+    /// the server started, a link made.
+    fn open_photo(&mut self, ctx: &egui::Context) {
+        if self.photo_task.is_some() {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::from_hash_of("photo"),
+                egui::ViewportCommand::Focus,
+            );
+            return;
+        }
+        let Some(dir) = Self::photos_dir() else {
+            self.message = Some("No folder for the photos on this system.".into());
+            return;
+        };
+        let cleaned = match upload::clean_up(&dir, upload::now_unix()) {
+            Ok(r) if !r.is_empty() => format!(
+                " ({} photo{} older than {} days removed.)",
+                r.len(),
+                if r.len() == 1 { "" } else { "s" },
+                upload::KEEP_DAYS
+            ),
+            _ => String::new(),
+        };
+        let c = ctx.clone();
+        let mut task = PhotoTask {
+            server: upload::UploadServer::start_lan(dir, move || c.request_repaint()),
+            url: None,
+            qr: None,
+            status: String::new(),
+            show_link: self.card_photo.is_none(),
+        };
+        task.new_link(&self.series_label());
+        task.status.push_str(&cleaned);
+        self.photo_task = Some(task);
+    }
+
+    /// The server's news and the processing's result.
+    fn poll_photo(&mut self, ctx: &egui::Context) {
+        let mut received = Vec::new();
+        if let Some(t) = &mut self.photo_task
+            && let Ok(s) = &t.server
+        {
+            while let Some(e) = s.try_recv() {
+                match e {
+                    upload::UploadEvent::Opened { series } => {
+                        t.status = format!("The phone opened the page ({series}).")
+                    }
+                    upload::UploadEvent::Refused { series, reason } => {
+                        t.status = format!("Refused ({series}): {reason}")
+                    }
+                    upload::UploadEvent::Received(p) => {
+                        t.status = format!("Received ({:.1} MB).", p.meta.bytes as f64 / 1e6);
+                        t.show_link = false;
+                        received.push(p);
+                    }
+                }
+            }
+        }
+        for p in received {
+            self.process_photo(PhotoJob::Stored(p), ctx);
+        }
+        if let Some((rx, len)) = &self.photo_job {
+            let len = *len;
+            match rx.try_recv() {
+                Ok(Ok(p)) => {
+                    self.card_photo = Some(CardPhoto {
+                        p,
+                        texture: None,
+                        series_len: len,
+                    });
+                    if self.photo_fade == 0.0 {
+                        self.photo_fade = 0.6;
+                    }
+                    self.photo_job = None;
+                }
+                Ok(Err(e)) => {
+                    self.photo_error = Some(format!("The photo could not be used: {e}."));
+                    self.photo_job = None;
+                    if let Some(t) = &mut self.photo_task {
+                        t.show_link = true;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.photo_error = Some("The processing stopped unexpectedly.".into());
+                    self.photo_job = None;
+                }
+            }
+        }
+    }
+
+    /// Processes a photo on a thread of its own, against the series' shots as they are now.
+    fn process_photo(&mut self, job: PhotoJob, ctx: &egui::Context) {
+        let Some(dir) = Self::photos_dir() else {
+            return;
+        };
+        let shots: Vec<(f64, f64)> = self
+            .series
+            .iter()
+            .map(|(s, _)| (f64::from(s.x_mm()), f64::from(s.y_mm())))
+            .collect();
+        let series = self.series_label();
+        let (tx, rx) = mpsc::channel();
+        let c = ctx.clone();
+        std::thread::spawn(move || {
+            let card = card::air_pistol();
+            let run = || -> Result<photo::Processed, String> {
+                let now = upload::now_unix();
+                let photo = match job {
+                    PhotoJob::Stored(p) => p,
+                    PhotoJob::Bytes(b) => upload::store(&dir, &series, &b, now)?,
+                    PhotoJob::Demo => {
+                        let b = photo::demo_photo(&card, &shots, 0.1, now)?;
+                        upload::store(&dir, &format!("{series}-demo"), &b, now)?
+                    }
+                };
+                photo::process(photo, &card, &shots)
+            };
+            let _ = tx.send(run());
+            c.request_repaint();
+        });
+        self.photo_job = Some((rx, self.series.len()));
+        self.photo_error = None;
+    }
+
+    fn photo_body(&mut self, ui: &mut Ui) {
+        title(
+            ui,
+            "Card photo",
+            "The shot card as the ground truth for the sensor",
+        );
+        ui.add_space(14.0);
+        let dropped: Vec<Vec<u8>> = ui.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.bytes().ok())
+                .collect()
+        });
+        if let Some(b) = dropped.into_iter().next() {
+            self.process_photo(PhotoJob::Bytes(b), ui.ctx());
+        }
+        if let Some(e) = self.photo_error.clone()
+            && notice(ui, &e)
+        {
+            self.photo_error = None;
+        }
+        let (mut new_link, mut demo) = (false, false);
+        let no_photo = self.card_photo.is_none() && self.photo_job.is_none();
+        if let Some(t) = &self.photo_task
+            && (t.show_link || no_photo)
+        {
+            card(ui, "From the phone", |ui| {
+                match &t.server {
+                    Err(e) => {
+                        ui.label(format!("No link for the phone: {e}."));
+                    }
+                    Ok(_) => {
+                        ui.add(
+                            egui::Label::new(
+                                "Scan the code with the phone's camera and take the photo. The phone \
+                                 must be on the same Wi-Fi as this computer.",
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(8.0);
+                        if let Some((w, m)) = &t.qr {
+                            qr_code(ui, *w, m, 230.0);
+                        }
+                        if let Some(u) = &t.url {
+                            ui.label(RichText::new(u).small().weak());
+                        }
+                        ui.add_space(4.0);
+                        ui.add(egui::Label::new(RichText::new(&t.status).strong()).wrap());
+                        new_link = ui
+                            .add(egui::Button::new("New link").frame(false))
+                            .on_hover_text("The old link stops working.")
+                            .clicked();
+                    }
+                }
+                ui.add_space(4.0);
+                ui.label(RichText::new("Or drop a photo file on this window.").weak());
+                if std::env::var_os("OPENSIGHTS_DEMO_PHOTO").is_some() {
+                    demo = ui.button("Demo: a synthetic photo of this series").clicked();
+                }
+            });
+        }
+        if self.photo_job.is_some() {
+            card(ui, "Processing", |ui| {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Finding the rings and the holes (a few seconds)…");
+                });
+            });
+        }
+        if self.card_photo.is_some() {
+            self.ground_truth_card(ui);
+        }
+        if new_link {
+            let label = self.series_label();
+            if let Some(t) = &mut self.photo_task {
+                t.new_link(&label);
+            }
+        }
+        if demo {
+            self.process_photo(PhotoJob::Demo, ui.ctx());
+        }
+    }
+
+    fn ground_truth_card(&mut self, ui: &mut Ui) {
+        let series_len = self.series.len();
+        let Some(cp) = &mut self.card_photo else {
+            return;
+        };
+        let (mut another, mut forget, mut keep) = (false, false, cp.p.photo.meta.keep);
+        let p = &cp.p;
+        card(ui, "Ground truth", |ui| {
+            if let Some(rms) = p.rms_mm {
+                let found = p.shots.iter().filter(|s| s.diff.is_some()).count();
+                ui.label(RichText::new(format!("{rms:.3} mm rms")).size(28.0).strong());
+                let mut line = format!("the sensor against the holes, {found} of {} shots", p.shots.len());
+                if let Some((i, d)) = p.worst() {
+                    line.push_str(&format!(" · worst {d:.3} mm (shot {})", i + 1));
+                }
+                ui.add(egui::Label::new(RichText::new(line).weak()).wrap());
+            } else {
+                let n = p.holes.len();
+                ui.label(format!(
+                    "No shots in the series: {n} hole{} found.",
+                    if n == 1 { "" } else { "s" }
+                ));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Without shots the card's quarter turn is unknown: it may show turned.",
+                        )
+                        .weak(),
+                    )
+                    .wrap(),
+                );
+            }
+            if cp.series_len != series_len {
+                ui.add(
+                    egui::Label::new(format!(
+                        "⚠ Processed with {} shots; the series has {series_len} now. Take another photo.",
+                        cp.series_len
+                    ))
+                    .wrap(),
+                );
+            }
+            for w in p.warnings() {
+                ui.add(egui::Label::new(format!("⚠ {w}")).wrap());
+            }
+            if !p.shots.is_empty() {
+                ui.separator();
+                egui::Grid::new("ground_truth_shots")
+                    .striped(true)
+                    .num_columns(4)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        for h in ["#", "Shot x, y (mm)", "Hole − shot (mm)", "Off (mm)"] {
+                            ui.label(RichText::new(h).small().weak());
+                        }
+                        ui.end_row();
+                        for (i, s) in p.shots.iter().enumerate() {
+                            ui.label(RichText::new(format!("{}", i + 1)).weak());
+                            ui.label(format!("{:+.2}, {:+.2}", s.shot.0, s.shot.1));
+                            match s.diff {
+                                Some(d) => {
+                                    ui.label(format!("{:+.3}, {:+.3}", d.0, d.1));
+                                    ui.label(RichText::new(format!("{:.3}", d.0.hypot(d.1))).strong());
+                                }
+                                None => {
+                                    ui.label(RichText::new("no hole found").weak().italics());
+                                    ui.label("");
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+            }
+            ui.separator();
+            let mut details = format!(
+                "The photo: {:.1} px per mm; the rings fit to {:.3} mm rms ({} of {} edge points); lens k1 {:+.3}.",
+                p.px_per_mm, p.reg_rms_mm, p.reg_points.0, p.reg_points.1, p.k1
+            );
+            if let Some(pl) = &p.placement {
+                let c = pl.to_frame((0.0, 0.0));
+                details.push_str(&format!(
+                    " The card in the holder: its centre at {:+.2}, {:+.2} mm, turned {:+.2}°{}.",
+                    c.0,
+                    c.1,
+                    -pl.tilt_deg(),
+                    if p.scaled {
+                        format!(", printed at {:.4} of the sensor's scale", 1.0 / pl.scale)
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+            details.push_str(&format!(" Processed in {:.1} s.", p.seconds));
+            ui.add(egui::Label::new(RichText::new(details).small().weak()).wrap());
+            ui.checkbox(
+                &mut keep,
+                "Keep the photo for evaluation (else removed after 30 days)",
+            );
+            ui.horizontal_wrapped(|ui| {
+                another = ui.button("Take another photo").clicked();
+                if ui.button("Open the folder").clicked()
+                    && let Some(dir) = p.photo.image.parent()
+                {
+                    open_folder(dir);
+                }
+                forget = ui
+                    .add(egui::Button::new("Remove from the card").frame(false))
+                    .clicked();
+            });
+        });
+        if keep != cp.p.photo.meta.keep {
+            match upload::set_keep(&cp.p.photo.meta_file, keep) {
+                Ok(()) => cp.p.photo.meta.keep = keep,
+                Err(e) => self.photo_error = Some(format!("Could not mark the photo: {e}")),
+            }
+        }
+        if forget {
+            self.card_photo = None;
+        }
+        if another {
+            let label = self.series_label();
+            if let Some(t) = &mut self.photo_task {
+                t.new_link(&label);
+                t.show_link = true;
+            }
+        }
+    }
+}
+
+/// "Card photo", under the series.
+fn photo_button(ui: &mut Ui) -> bool {
+    ui.add(egui::Button::new("Card photo").frame(false))
+        .on_hover_text("A photo of the shot card from the phone: the holes against the shots.")
+        .clicked()
+}
+
+/// A QR code, `size` points wide with its quiet zone, black on white in either theme.
+fn qr_code(ui: &mut Ui, w: usize, dark: &[bool], size: f32) {
+    let n = w + 8; // 4 modules of quiet zone each side
+    let ppp = ui.ctx().pixels_per_point();
+    // Whole pixels per module, so the modules don't blur into each other.
+    let cell = ((size * ppp / n as f32).floor().max(1.0)) / ppp;
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(cell * n as f32), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0.0, Color32::WHITE);
+    for y in 0..w {
+        let mut x = 0;
+        while x < w {
+            if !dark[y * w + x] {
+                x += 1;
+                continue;
+            }
+            let start = x;
+            while x < w && dark[y * w + x] {
+                x += 1;
+            }
+            let min = rect.min + Vec2::new((start + 4) as f32, (y + 4) as f32) * cell;
+            let run = egui::Rect::from_min_size(min, Vec2::new((x - start) as f32 * cell, cell));
+            painter.rect_filled(run, 0.0, Color32::BLACK);
+        }
+    }
+}
+
+/// Card · track · Photo: how much of the photo shows over the printed card. Returns the new
+/// value when it was changed.
+fn fade_control(ui: &Ui, painter: &egui::Painter, bar: egui::Rect, fade: f32) -> Option<f32> {
+    control_bar(ui, painter, bar, "fade_bar");
+    let label_w = 48.0;
+    let font = TextStyle::Small.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let left = bar_slot(bar, 0.0, label_w);
+    let right = bar_slot(bar, bar.width() - 2.0 * BAR_PAD - label_w, label_w);
+    painter.text(
+        left.center(),
+        egui::Align2::CENTER_CENTER,
+        "Card",
+        font.clone(),
+        color,
+    );
+    painter.text(right.center(), egui::Align2::CENTER_CENTER, "Photo", font, color);
+    let track = egui::Rect::from_min_max(
+        egui::pos2(left.right() + 6.0, left.top()),
+        egui::pos2(right.left() - 6.0, left.bottom()),
+    );
+    let response = ui
+        .interact(
+            track,
+            ui.scope_id().with("fade_track"),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_text("The photo over the printed card");
+    let mut new = None;
+    if (response.dragged() || response.clicked())
+        && let Some(p) = response.interact_pointer_pos()
+    {
+        new = Some(((p.x - track.left()) / track.width()).clamp(0.0, 1.0));
+    }
+    let t = new.unwrap_or(fade);
+    let y = track.center().y;
+    let v = ui.visuals();
+    painter.line_segment(
+        [egui::pos2(track.left(), y), egui::pos2(track.right(), y)],
+        Stroke::new(3.0, v.widgets.inactive.bg_fill),
+    );
+    let x = egui::lerp(track.left()..=track.right(), t);
+    painter.circle(
+        egui::pos2(x, y),
+        7.0,
+        v.widgets.style(&response).fg_stroke.color,
+        Stroke::NONE,
+    );
+    new.filter(|n| *n != fade)
 }
 
 /// Opens a folder in the system's file manager.

@@ -14,7 +14,7 @@ and reviews the results.
 | C1 | Registration from the rings (`app/cardphoto/`) | synthetic tests pass (2026-11-23); real photos in C5 |
 | C2 | The holes: finding them, matching them to the shots | synthetic tests pass (2026-11-23); real holes in C5 |
 | C3 | The upload: QR code, the phone page, storage | tests over HTTP pass (2026-11-23); the phone: the user, once |
-| C4 | In the app: the photo under the shots, the ground-truth panel | planned |
+| C4 | In the app: the photo under the shots, the ground-truth panel | the processing passes through the app's path (2026-11-23); the UI: a look by the user |
 | C5 | Real photos: registration (no holes), then holes | waiting for the photos |
 | C6 | The serial number from the photo | later |
 
@@ -171,13 +171,53 @@ Android phone and an iPhone if at hand. A firewall may block port 8710 (Windows 
 
 ## C4. In the app
 
-Builds: "Card photo" on the series card, the QR dialog, the processing in the background,
-the photo under the shots on the card view (a fade slider), and a ground-truth panel (the
-fit's quality, the per-shot differences, the placement). Until real shots exist, a
-synthetic photo and dummy shots exercise it.
+Builds (`src/photo.rs`, the window in `main.rs`):
 
-**Tests:** the processing on the synthetic photos from C1/C2 through the app's code path;
-the UI by a look (the user, when convenient).
+- **"Card photo"** under the series (next to "Clear series"; also with no shots yet, for a
+  test card) opens the photo window: the old originals cleaned up, the server started, the
+  QR code, the link, the server's news ("waiting", "the phone opened the page",
+  "received", a refusal's reason), "New link". A photo file dropped on the window goes the
+  same way (stored, then processed). With `OPENSIGHTS_DEMO_PHOTO=1` set, a button makes a
+  synthetic photo of the series (holes 0.1 mm off the shots at random, the card turned
+  90.5° in the holder and shifted 0.8 mm) to try it all without a real card.
+- **The processing** on a thread of its own, against the series' shots as they are when
+  the photo arrives: the registration (C1), the holes and the placement (C2), or without
+  shots every hole (C2 unguided); the photo resampled onto the card's own grid (10 px per mm,
+  through the placement, so it lies under the shots as drawn); the results in
+  `<photo>.result.json` beside the photo (the registration, the placement, per shot the
+  hole, the difference and its uncertainty, the holes no shot explains). The clean-up
+  leaves results files alone.
+- **On the card view:** the photo over the printed card, faded by a Card–Photo bar at the
+  top right (0.6 when the photo arrives); the holes found as thin rings, also with the photo
+  faded out, so the sensor's markers and the real holes can be compared at any zoom.
+  Cleared with the series, or by "Remove from the card".
+- **The ground-truth panel** in the photo window: the rms of the sensor against the holes,
+  the worst shot; warnings (the card small in the photo, the rings fitting badly, shots with
+  no hole, holes no shot explains, the series grown since the photo); per shot the shot,
+  hole − shot (the sensor's axes), the distance; the photo's resolution, the rings' rms,
+  the lens; the card's centre and turn in the holder (and the print's scale when fitted);
+  "Keep the photo for evaluation"; "Take another photo", "Open the folder".
+- Without shots the card's quarter turn is unknown (C2): the photo may show turned by a
+  multiple of 90° until C6 reads the print.
+
+**Tests:**
+
+1. Automated (`cargo test`, `photo::tests`): the demo photo (3000 × 2250 px, 11 px/mm, a
+   blue table, 8 shots, holes 0.1 mm off at random) stored as an upload and processed:
+   every hole found; the card's turn within 0.2° and its shift within 0.15 mm of the truth;
+   the rms between 0.04 and 0.2 mm (the holes' 0.1 mm per axis, less what the placement takes
+   up); no warnings; on the card's grid the table shows through at every shot (the photo
+   lies under the shots), paper away from them; the results file there and the clean-up
+   leaving it.
+2. The same photo without shots: all 8 holes found.
+3. A photo with no card: refused, "no card found".
+4. The UI by a look (the user, when convenient): `OPENSIGHTS_DEMO_PHOTO=1 cargo run` in
+   `app/`, connect, make a few shots (BOOT, or `sim` on the serial console), "Card photo",
+   then "Demo: a synthetic photo of this series". Expected: the spinner for a few seconds; the
+   ground-truth panel with about 0.1 mm rms and a row per shot; on the card the photo under
+   the shots, a ring around each marker, the Card–Photo bar fading between them. Then the
+   QR code with the phone (as C3's phone test, but into the app): the photo processed the
+   same way (with no holes in it: every shot "no hole found").
 
 ## C5. Real photos
 
@@ -203,6 +243,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-23 | C4 | `cargo test` in `app/` (`photo::tests`), run by Claude; the UI not looked at (no screen capture or input on this Wayland desktop) | **Pass**, tests 1–3. The demo photo: 3.0 s (dev build), the rings 0.008 mm rms over 7509 of 7621 points, 11.0 px/mm, the card's turn 0.44° (true 0.5°), its shift 0.85 mm (true 0.81 mm), the sensor against the holes 0.086 mm rms, the worst 0.14 mm. **Found on the way:** the placement's quarter turn is relative to the registration's own axes (the outline fixes those only modulo 90°), not to the print: the test compared it with the print's and failed; the photo on the grid was right all along (it goes through the same placement). |
 | 2026-11-23 | C3 | `cargo test` in `app/` (HTTP over TCP to 127.0.0.1, and once over the LAN address 192.168.2.201:8710), run by Claude | **Pass**, tests 1–9. The phone-like JPEG: 5 segments dropped (APP1 Exif, APP1 XMP, APP2 MPF, COM, 400 trailing bytes), pixels identical, orientation 6 kept. **Found on the way:** the size limit's message said "0 MB" for limits under 1 MB (now rounded up). The phone itself not yet tried (the user). |
 | 2026-11-23 | C2 | Synthetic photos in colour (`tests/holes.rs`), as C1, 9 holes (two in the black near the centre, one across ring 6's line, one across the disc's edge, two in the white, three overlapping), run by Claude | **Pass**, 6 tests, 28 s. Hole centres within 0.019 mm (all four quarter turns, blue table), 0.022 mm (grey table), 0.026 mm (with a false shot and an extra hole: both flagged); the quarter turn right every time; the placement's angle 0.40–0.49° against 0.4°, its rms at the shots 0.05–0.07 mm (the shots' noise); clean card: no holes; unguided: 9 of 9, within 0.022 mm. Dark table (0.1 against the ink's 0.07): 5 of 9 not found (those in the black), none misplaced. **Found and changed on the way:** (1) an expected card per 5° sector failed: out to 52 mm a hole covers a sector's whole width; now the light as smooth surfaces and the print as one profile over the full circle. (2) A hole with one contrast inside was biased 0.06 mm across the disc's edge (a blue table differs more from paper than from ink); the model is now the table's colour inside and the expected card outside: 0.001 mm. (3) The matched filter missed overlapping holes in the unguided search (their neighbours are in its ring); it now starts from blobs and their area. |
 | 2026-11-23 | C1 | Synthetic photos (`tests/register.rs`), 2400 × 1800 px, the card at 9 px/mm, 3 × 3 samples per pixel, blur σ 1 px, run by Claude | **Pass**, 7 tests, 12 s. Worst error over the scoring area (r ≤ 78 mm): easy (10° turn, tilts 5°/3°, light ±20 %) 0.014 mm; hard (137°, tilts 12°/−9°, off-centre, near camera, k1 0.08, k2 −0.02, 9 holes, three overlapping, light ±30 %, noise 3 %) 0.016 mm, k1 found 0.0797; light table (0.72 against the paper's 0.93) 0.014 mm; barrel k1 −0.12 with 15°/10° tilt 0.013 mm, k1 −0.1213. The edge points' rms 0.006–0.010 mm; 92–96 % of them kept. The outline fixed the rotation in every case. A card bent 2 mm at its edges: rms 0.019 mm against 0.006 flat (so a bend shows), and up to 0.24 mm wrong: flatness matters. No card in view, and a card at 3 px/mm: an error each. |

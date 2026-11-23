@@ -6,9 +6,6 @@
 //! beside it. Originals older than 30 days are removed unless marked to keep; the JSON
 //! stays.
 
-// The app's dialog (C4) uses the rest.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, UdpSocket};

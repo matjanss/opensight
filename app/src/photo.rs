@@ -1,0 +1,432 @@
+//! A card photo in the app (`CARDPHOTO.md` C4): the stored photo registered from its rings,
+//! its holes matched to the series' shots (`cardphoto`), and the photo resampled onto the
+//! card's own grid so the app paints it under the shots. Runs on a thread of its own (a
+//! phone's photo takes seconds). The results go into a JSON beside the photo.
+
+use std::path::PathBuf;
+use std::time::Instant;
+
+use cardphoto::card::issf_air_pistol;
+use cardphoto::holes::{GroundTruth, HoleFit, Placement, all_holes, ground_truth};
+use cardphoto::register::{Registration, register};
+use cardphoto::{Gray, Rgb};
+use eframe::egui::{Color32, ColorImage};
+
+use crate::card::Card;
+use crate::upload::{Photo, now_unix};
+
+/// The photo on the card's grid: at most this many pixels per mm, and per side.
+const GRID_PX_PER_MM: f32 = 10.0;
+const GRID_MAX_PX: f32 = 2048.0;
+
+/// One shot against its hole, in the sensor's frame (mm, x right, y up).
+#[derive(Clone, Debug)]
+pub struct ShotCheck {
+    pub shot: (f64, f64),
+    /// The hole's centre, if one was found where the shot says.
+    pub hole: Option<(f64, f64)>,
+    /// The hole minus the shot: the sensor's error.
+    pub diff: Option<(f64, f64)>,
+    /// The hole centre's uncertainty from the photo (1σ, a lower bound), and its diameter.
+    pub sd_mm: f64,
+    pub hole_d_mm: f64,
+}
+
+/// What came out of one photo.
+pub struct Processed {
+    pub photo: Photo,
+    pub result_file: PathBuf,
+    pub seconds: f64,
+    /// The registration: rms of the ring edge points (mm), points kept of found, the lens's
+    /// k1, pixels per mm at the card, and whether the outline fixed the rotation.
+    pub reg_rms_mm: f64,
+    pub reg_points: (usize, usize),
+    pub k1: f64,
+    pub px_per_mm: f64,
+    /// With shots: the card's placement in the frame, each shot against its hole, the rms,
+    /// the holes no shot explains (frame mm). Without: `placement` None, `holes` every hole
+    /// found, in the registration's coordinates (the quarter turn unknown).
+    pub placement: Option<Placement>,
+    pub scaled: bool,
+    pub shots: Vec<ShotCheck>,
+    pub rms_mm: Option<f64>,
+    pub holes: Vec<(f64, f64)>,
+    /// The photo on the card's grid (as `Card::render`: the card's size, top left first).
+    pub image: Option<ColorImage>,
+}
+
+impl Processed {
+    /// Warnings for the user: what makes this photo's truth weaker.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut w = Vec::new();
+        if self.px_per_mm < 8.0 {
+            w.push(format!(
+                "The card is small in the photo ({:.1} px per mm): hold the phone closer.",
+                self.px_per_mm
+            ));
+        }
+        if self.reg_rms_mm > 0.03 {
+            w.push(format!(
+                "The rings fit with {:.3} mm rms: the card may not lie flat, or the photo is blurred.",
+                self.reg_rms_mm
+            ));
+        }
+        let missing = self.shots.iter().filter(|s| s.hole.is_none()).count();
+        if missing > 0 {
+            w.push(format!(
+                "{missing} shot{} with no hole where the sensor put {}.",
+                if missing == 1 { "" } else { "s" },
+                if missing == 1 { "it" } else { "them" }
+            ));
+        }
+        if self.placement.is_some() && !self.holes.is_empty() {
+            w.push(format!(
+                "{} hole{} no shot explains.",
+                self.holes.len(),
+                if self.holes.len() == 1 { "" } else { "s" }
+            ));
+        }
+        w
+    }
+
+    /// The worst shot: its index and its distance from its hole.
+    pub fn worst(&self) -> Option<(usize, f64)> {
+        self.shots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.diff.map(|d| (i, d.0.hypot(d.1))))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    }
+}
+
+/// Registers the stored photo and matches its holes to `shots` (frame mm), then puts it on
+/// `card`'s grid. Writes `<photo>.result.json`.
+pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Processed, String> {
+    let t0 = Instant::now();
+    let bytes = std::fs::read(&photo.image).map_err(|e| format!("could not read the photo: {e}"))?;
+    let rgb = Rgb::decode(&bytes)?;
+    let reg = register(&rgb.to_gray(), &issf_air_pistol())?;
+    let (placement, scaled, checks, rms, holes) = if shots.is_empty() {
+        let holes = all_holes(&rgb, &reg).iter().map(|h| h.center).collect();
+        (None, false, Vec::new(), None, holes)
+    } else {
+        let gt = ground_truth(&rgb, &reg, shots)?;
+        let checks = shot_checks(&gt, shots);
+        let extra = gt.extra.iter().map(|h| gt.placement.to_frame(h.center)).collect();
+        let rms = rms_of(&checks);
+        (Some(gt.placement), gt.scaled, checks, Some(rms), extra)
+    };
+    let image = on_grid(&rgb, &reg, placement.as_ref(), card);
+    let result_file = photo.image.with_extension("result.json");
+    let mut p = Processed {
+        photo,
+        result_file,
+        seconds: 0.0,
+        reg_rms_mm: reg.rms_mm,
+        reg_points: (reg.kept, reg.points),
+        k1: reg.map.lens.k1,
+        px_per_mm: px_per_mm(&reg),
+        placement,
+        scaled,
+        shots: checks,
+        rms_mm: rms,
+        holes,
+        image: Some(image),
+    };
+    p.seconds = t0.elapsed().as_secs_f64();
+    std::fs::write(&p.result_file, result_json(&p))
+        .map_err(|e| format!("could not save the results: {e}"))?;
+    Ok(p)
+}
+
+/// The shots against their holes, in the frame. The difference in the frame's axes (the
+/// sensor's), not the card's.
+fn shot_checks(gt: &GroundTruth, shots: &[(f64, f64)]) -> Vec<ShotCheck> {
+    shots
+        .iter()
+        .zip(&gt.shots)
+        .map(|(s, r)| {
+            let hole = r.hole.as_ref().map(|h: &HoleFit| gt.placement.to_frame(h.center));
+            ShotCheck {
+                shot: *s,
+                hole,
+                diff: hole.map(|h| (h.0 - s.0, h.1 - s.1)),
+                sd_mm: r.hole.as_ref().map_or(0.0, |h| h.sd_mm / gt.placement.scale),
+                hole_d_mm: r.hole.as_ref().map_or(0.0, |h| 2.0 * h.radius_mm),
+            }
+        })
+        .collect()
+}
+
+fn rms_of(checks: &[ShotCheck]) -> f64 {
+    let d: Vec<f64> = checks
+        .iter()
+        .filter_map(|c| c.diff.map(|d| d.0 * d.0 + d.1 * d.1))
+        .collect();
+    (d.iter().sum::<f64>() / d.len().max(1) as f64).sqrt()
+}
+
+fn px_per_mm(reg: &Registration) -> f64 {
+    let a = reg.map.to_image((0.0, 0.0));
+    let b = reg.map.to_image((1.0, 0.0));
+    (b.0 - a.0).hypot(b.1 - a.1)
+}
+
+/// The photo resampled onto the card's grid: each pixel is a card point (mm from the top
+/// left, y down), a frame point, the card point the placement makes of it, a photo pixel.
+/// Outside the photo: transparent.
+fn on_grid(rgb: &Rgb, reg: &Registration, placement: Option<&Placement>, card: &Card) -> ColorImage {
+    let size = card.size_mm();
+    let ppm = GRID_PX_PER_MM.min(GRID_MAX_PX / size.x.max(size.y));
+    let (w, h) = ((size.x * ppm).round() as usize, (size.y * ppm).round() as usize);
+    let centre = card.to_card(0.0, 0.0);
+    let mut px = vec![Color32::TRANSPARENT; w * h];
+    for j in 0..h {
+        let y = f64::from(centre.y) - (j as f64 + 0.5) / f64::from(ppm);
+        for i in 0..w {
+            let x = (i as f64 + 0.5) / f64::from(ppm) - f64::from(centre.x);
+            let q = placement.map_or((x, y), |p| p.apply((x, y)));
+            if let Some(c) = rgb.sample_at(&reg.map, q) {
+                let u = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                px[j * w + i] = Color32::from_rgb(u(c[0]), u(c[1]), u(c[2]));
+            }
+        }
+    }
+    ColorImage::new([w, h], px)
+}
+
+fn result_json(p: &Processed) -> String {
+    let pair = |v: (f64, f64)| serde_json::json!([round(v.0), round(v.1)]);
+    let shots: Vec<_> = p
+        .shots
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            serde_json::json!({
+                "n": i + 1,
+                "shot_mm": pair(s.shot),
+                "hole_mm": s.hole.map(pair),
+                "diff_mm": s.diff.map(pair),
+                "hole_sd_mm": s.hole.map(|_| round(s.sd_mm)),
+                "hole_d_mm": s.hole.map(|_| round(s.hole_d_mm)),
+            })
+        })
+        .collect();
+    let v = serde_json::json!({
+        "photo": p.photo.meta.image,
+        "series": p.photo.meta.series,
+        "processed_unix": now_unix(),
+        "seconds": (p.seconds * 10.0).round() / 10.0,
+        "registration": {
+            "rms_mm": round(p.reg_rms_mm),
+            "points_kept": p.reg_points.0,
+            "points": p.reg_points.1,
+            "k1": round(p.k1),
+            "px_per_mm": (p.px_per_mm * 100.0).round() / 100.0,
+        },
+        "placement": p.placement.as_ref().map(|pl| serde_json::json!({
+            "quarter_turns": pl.quarter,
+            "tilt_deg": round(pl.tilt_deg()),
+            "shift_mm": pair(pl.shift),
+            "scale": (pl.scale * 1e6).round() / 1e6,
+            "scale_fitted": p.scaled,
+        })),
+        "rms_mm": p.rms_mm.map(round),
+        "shots": shots,
+        "holes_mm": p.holes.iter().map(|h| pair(*h)).collect::<Vec<_>>(),
+        "holes_are": if p.placement.is_some() { "unexplained, frame mm" } else { "all found, card mm (quarter turn unknown)" },
+    });
+    serde_json::to_string_pretty(&v).unwrap_or_default()
+}
+
+fn round(v: f64) -> f64 {
+    (v * 1e4).round() / 1e4
+}
+
+/// The card as a texture for synthetic photos (`cardphoto::synth`), `px_per_mm` sharp.
+pub fn synth_texture(card: &Card, px_per_mm: f32) -> Option<cardphoto::synth::CardTexture> {
+    let size = card.size_mm();
+    let img = card.render((size.x * px_per_mm).round() as u32)?;
+    let lum: Vec<u8> = img
+        .pixels
+        .iter()
+        .map(|c| (0.299 * f32::from(c.r()) + 0.587 * f32::from(c.g()) + 0.114 * f32::from(c.b())) as u8)
+        .collect();
+    Some(cardphoto::synth::CardTexture {
+        img: Gray::from_luma8(img.size[0], img.size[1], &lum),
+        px_per_mm: f64::from(px_per_mm),
+        size_mm: f64::from(size.x),
+    })
+}
+
+/// A synthetic phone photo (JPEG) of the card with holes where `shots` (frame mm) went,
+/// placed as a card in a holder would be (turned a quarter and a little, shifted), each hole
+/// `error_mm` off at random (the sensor's error): for trying the app without real photos.
+pub fn demo_photo(card: &Card, shots: &[(f64, f64)], error_mm: f64, seed: u64) -> Result<Vec<u8>, String> {
+    use cardphoto::synth::{Params, Rng, photo_rgb};
+    let tex = synth_texture(card, 12.0).ok_or("could not render the card")?;
+    let placement = Placement {
+        angle: (90.0f64 + 0.5).to_radians(),
+        quarter: 1,
+        shift: (0.7, -0.4),
+        scale: 1.0,
+    };
+    let mut rng = Rng::new(seed);
+    let holes = shots
+        .iter()
+        .map(|s| {
+            let c = placement.apply(*s);
+            (c.0 + error_mm * rng.gauss(), c.1 + error_mm * rng.gauss())
+        })
+        .collect();
+    let p = Params {
+        w: 3000,
+        h: 2250,
+        px_per_mm: 11.0,
+        rotation_deg: 8.0 + 40.0 * rng.uniform(),
+        tilt_x_deg: 4.0,
+        tilt_y_deg: -3.0,
+        k1: 0.03,
+        holes,
+        table: 0.3,
+        table_rgb: Some([0.15, 0.3, 0.62]),
+        light: 0.2,
+        blur_px: 1.0,
+        noise: 0.015,
+        seed,
+        ..Params::default()
+    };
+    let (rgb, _) = photo_rgb(&tex, &p);
+    let raw: Vec<u8> = rgb
+        .px
+        .iter()
+        .flat_map(|c| c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
+        .collect();
+    let img = image::RgbImage::from_raw(rgb.w as u32, rgb.h as u32, raw).ok_or("bad image size")?;
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92)
+        .encode_image(&img)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::upload::store;
+
+    fn shots() -> Vec<(f64, f64)> {
+        vec![
+            (1.0, -2.0),
+            (-11.0, 7.0),
+            (8.0, 12.0),
+            (24.0, -18.0),
+            (-35.0, -25.0),
+            (40.0, 30.0),
+            (-3.0, 33.0),
+            (15.0, -40.0),
+        ]
+    }
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("opensights-photo-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Through the app's path: a synthetic JPEG with holes 0.1 mm off the shots, stored as an
+    /// upload, processed with the shots; the quarter turn, the differences, the photo on the
+    /// card's grid (a hole shows the table under the shot), the results file.
+    #[test]
+    fn synthetic_photo_with_shots() {
+        let card = crate::card::air_pistol();
+        let shots = shots();
+        let jpeg = demo_photo(&card, &shots, 0.1, 5).unwrap();
+        let d = dir("shots");
+        let photo = store(&d, "demo", &jpeg, now_unix()).unwrap();
+        let p = process(photo, &card, &shots).unwrap();
+        let pl = p.placement.as_ref().unwrap();
+        println!(
+            "{:.1} s, reg rms {:.4} mm, {} of {} points, {:.1} px/mm, quarter {} tilt {:+.3}° shift ({:+.3}, {:+.3}) scale {:.5}, rms {:.4} mm, worst {:?}, warnings {:?}",
+            p.seconds,
+            p.reg_rms_mm,
+            p.reg_points.0,
+            p.reg_points.1,
+            p.px_per_mm,
+            pl.quarter,
+            pl.tilt_deg(),
+            pl.shift.0,
+            pl.shift.1,
+            pl.scale,
+            p.rms_mm.unwrap(),
+            p.worst(),
+            p.warnings()
+        );
+        // The quarter turn is relative to the registration's axes (the outline fixes them only
+        // modulo 90°), so only the shift's length and the tilt compare with the truth.
+        assert!(
+            (pl.shift.0.hypot(pl.shift.1) - 0.7f64.hypot(0.4)).abs() < 0.15,
+            "{:?}",
+            pl.shift
+        );
+        assert!((pl.tilt_deg() - 0.5).abs() < 0.2, "{}", pl.tilt_deg());
+        assert!(p.shots.iter().all(|s| s.hole.is_some()));
+        // The holes are 0.1 mm (per axis) off the shots; the placement takes up some of it.
+        let rms = p.rms_mm.unwrap();
+        assert!((0.04..0.2).contains(&rms), "{rms}");
+        assert!(p.holes.is_empty());
+        assert!(p.warnings().is_empty(), "{:?}", p.warnings());
+        // On the grid, at each shot: the table (blue) shows through the hole.
+        let img = p.image.as_ref().unwrap();
+        let ppm = img.size[0] as f32 / card.size_mm().x;
+        for s in &shots {
+            let at = card.to_card(s.0 as f32, s.1 as f32) * ppm;
+            let c = img.pixels[at.y as usize * img.size[0] + at.x as usize];
+            assert!(i32::from(c.b()) > i32::from(c.r()) + 40, "shot {s:?}: {c:?}");
+        }
+        // Away from the holes: the card (paper is not blue).
+        let at = card.to_card(-60.0, 60.0) * ppm;
+        let c = img.pixels[at.y as usize * img.size[0] + at.x as usize];
+        assert!(c.r() > 150 && i32::from(c.b()) < i32::from(c.r()) + 20, "{c:?}");
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&p.result_file).unwrap()).unwrap();
+        assert_eq!(json["shots"].as_array().unwrap().len(), shots.len());
+        assert_eq!(json["placement"]["quarter_turns"], pl.quarter);
+        // The clean-up leaves the results alone.
+        assert!(crate::upload::clean_up(&d, now_unix()).unwrap().is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// No shots: every hole found, in the registration's coordinates.
+    #[test]
+    fn synthetic_photo_without_shots() {
+        let card = crate::card::air_pistol();
+        let jpeg = demo_photo(&card, &shots(), 0.0, 9).unwrap();
+        let d = dir("noshots");
+        let photo = store(&d, "demo", &jpeg, now_unix()).unwrap();
+        let p = process(photo, &card, &[]).unwrap();
+        println!("{} holes found: {:?}", p.holes.len(), p.holes);
+        assert_eq!(p.holes.len(), shots().len());
+        assert!(p.placement.is_none() && p.shots.is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn not_a_card() {
+        let card = crate::card::air_pistol();
+        let img = image::RgbImage::from_fn(800, 600, |x, y| {
+            image::Rgb([(x % 200) as u8, (y % 150) as u8, 90])
+        });
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&img)
+            .unwrap();
+        let d = dir("nocard");
+        let photo = store(&d, "demo", &jpeg, now_unix()).unwrap();
+        let e = process(photo, &card, &shots()).err();
+        println!("{e:?}");
+        assert!(e.is_some());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+}

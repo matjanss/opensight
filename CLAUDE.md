@@ -57,7 +57,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Host board (`hardware/host-board/`) | v0.3 designed and routed, not yet on the bench; firmware already on its pin map | Order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner moved out along the diagonal (d about 15–25 mm, PLAN D1's update; principle in `hardware/frame/top-right-holder.svg`), plus bottom-middle and right-middle mics; the user designs and prints the holders. The firmware defaults still use the old slid position (65, 105) until d is fixed |
 | IR curtain | Designed (receiver on the host board, emitter board); firmware built and passing simulated (step 4b, on GPIO 13) | Its bench test (summary, PLAN phase 1.6), then the real gate |
-| App (`app/`) | v0.1.2, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay; protocol v3 (step 5c, merged to `main`): unscored holes and missed shots, the event log, a read-only Measurement section; the calibration wizard and the field check with the Rust fit (step 5d, merged to `main`) | A settings editor; the shot store in flash (PLAN D6) |
+| App (`app/`) | v0.1.2, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay; protocol v3 (step 5c, merged to `main`): unscored holes and missed shots, the event log, a read-only Measurement section; the calibration wizard and the field check with the Rust fit (step 5d, merged to `main`); card photos C1–C4 (PLAN D13, branch `card-photo`): registration, holes, the upload from the phone, the photo under the shots and the ground-truth panel, passing their synthetic and HTTP tests | Card photos C5: the user's real photos (a clean card, then one with holes), the phone test, a look at the UI; a settings editor; the shot store in flash (PLAN D6) |
 | Range server, MQTT, management, wasm viewer | Not started (wasm parked) | FUTURE_ARCHITECTURE step 2, PLAN phase 4 |
 
 ## Repository
@@ -342,6 +342,12 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   page sends the photo as it is; `cardphoto::meta` drops EXIF/GPS/XMP from the file without
   re-encoding; stored in `photos/` next to `logs/` with a JSON beside it; originals removed
   after 30 days unless marked to keep. The registration and the holes are in `cardphoto/`.
+  `photo.rs` processes a photo on a thread (registration, holes against the series' shots,
+  the photo resampled onto the card's grid through the placement, `<photo>.result.json`).
+  `main.rs`: "Card photo" under the series opens the photo window (QR, status, drop a file,
+  the ground-truth panel); the card view shows the photo under the shots (a Card–Photo fade
+  bar, top right) and the holes as rings. `OPENSIGHTS_DEMO_PHOTO=1` adds a synthetic photo
+  of the series (`photo::demo_photo`).
 - **Calibration (step 5d):** `calwizard.rs` holds the wizard and the field check as state
   machines (events, Status and Calibration in; actions out: calibration mode, the template
   point, the record), run by the calibration window (`CalTask`) or the probe. The fit is

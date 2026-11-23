@@ -30,6 +30,12 @@ rust-analyzer picks up `app/`.
   points of the calibration template (16 points, 10 sparks each), fits the microphones'
   positions and timing, shows the result, and writes it to the sensor. **Field check…** makes
   a few sparks at the template's centre and tells you whether the calibration still holds.
+- **Card photo** (under the series): a photo of the shot card, taken with a phone, shows
+  under the shots, and the app compares each shot with its hole (the sensor's accuracy).
+  Scan the QR code with the phone (on the same Wi-Fi), take the photo with the card flat on a
+  grey or coloured surface. The photo's metadata (location and the like) is removed;
+  photos are kept 30 days unless marked to keep. Work in progress, see
+  [app/CARDPHOTO.md](app/CARDPHOTO.md).
 - Settings also show the heartbeat (the sensor's `millis()`, every 2 s). The blue LED
   only shows the sensor's status: pairing mode, a PIN reset, a shot.
 - The sensor has a name (`OpenSights-xyz` at first) that you can change from the app.
@@ -92,6 +98,8 @@ To make a release: `git tag v0.1.0 && git push origin v0.1.0`.
   so no desktop Bluetooth settings are needed.
 - **macOS:** a Bluetooth app must be a `.app` bundle with a Bluetooth usage description,
   or macOS refuses access. Running from a terminal uses the terminal's permission.
+- **Card photos:** the phone reaches the app on port 8710 of this computer. A firewall may
+  have to let it in (Windows asks the first time).
 - **Windows:** if no PIN prompt appears, pair the sensor in Settings → Bluetooth while it
   is in pairing mode, then press Connect in the app.
 

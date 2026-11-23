@@ -182,7 +182,7 @@ impl Card {
     }
 
     /// Renders the card `width` pixels wide.
-    fn render(&self, width: u32) -> Option<ColorImage> {
+    pub fn render(&self, width: u32) -> Option<ColorImage> {
         let size = self.size_mm();
         let height = (size.y * width as f32 / size.x).ceil() as u32;
         let all = egui::Rect::from_min_size(egui::Pos2::ZERO, size);

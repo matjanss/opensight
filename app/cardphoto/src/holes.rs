@@ -485,6 +485,16 @@ impl Placement {
         )
     }
 
+    /// The inverse: a card point (the registration's mm) in the frame (the sensor's mm).
+    pub fn to_frame(&self, c: (f64, f64)) -> (f64, f64) {
+        let (sn, cs) = self.angle.sin_cos();
+        let (x, y) = (
+            (c.0 - self.shift.0) / self.scale,
+            (c.1 - self.shift.1) / self.scale,
+        );
+        (cs * x + sn * y, -sn * x + cs * y)
+    }
+
     /// The small angle beyond the quarter turn, degrees.
     pub fn tilt_deg(&self) -> f64 {
         let d = self.angle - f64::from(self.quarter) * std::f64::consts::FRAC_PI_2;
