@@ -5,8 +5,11 @@ Changes to make in the design before the v0.3 board is ordered. The details are 
 
 ## Before ordering
 
-- [ ] **A BME280 on J5:** J5 becomes a 4-pin JST XH (SDA GPIO 14, SCL GPIO 15), plus R45
-  (4.7 k SCL pull-up). See [A BME280 on J5](README.md#1-a-bme280-on-j5).
+- [x] **A BME280 on J5, in the schematic** (2026-11-23): J5 a 4-pin JST XH (GND, SDA/DQ on
+  GPIO 14, VDD, SCL on GPIO 15), plus R45 (4.7 k SCL pull-up). See
+  [A BME280 on J5](README.md#1-a-bme280-on-j5).
+- [ ] **J5 and R45 on the board:** J5's 4-pin footprint, R45 next to R43, the SCL track to
+  GPIO 15; silkscreen "BME280 / DS18B20" with GND, SDA, 3V3, SCL.
 - [x] **The curtain comparator's supply jumper, in the schematic** (2026-11-23): JP1 (1x3
   header and shunt) feeds U4 pin 8 (net VU4, with C17) from VA_IR (3.3 V, for a TLC372CP)
   or a new net `VCMP` (5V_F through R46 10 Ω, with C18 10 µF; for an LM393). The LM393's

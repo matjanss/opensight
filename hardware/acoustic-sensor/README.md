@@ -24,7 +24,35 @@ GTA2718B-3 bottom-port MEMS mic → TLV9062 two-stage preamp (×6.3–17.7, ×12
 - DRC (KiCad 7 engine, JLC-friendly rules: 0.2 mm clearance, 0.25/0.4 mm tracks, 0.6/0.3 mm vias): 0 errors, 0 unconnected; the only warnings are "library not in this configuration" from the generating machine.
 
 ## Check before ordering
-1. **Mic footprint**: the land pattern is interpreted from the GTA2718B-3HA datasheet text (GND ring Ø1.45/0.95 mm around the port, pads 1 = VDD and 2 = OUTPUT 1.6 mm from the port centre, 1.205 mm apart). Compare pad 1/2 positions with the -3 drawing.
+1. **Mic footprint: wrong, to fix before ordering** (checked 2026-11-23 against the
+   GTA2718B-3 datasheet from LCSC, C50275772: Fig. 11 and "Recommended PCB and Stencil Design
+   Pattern", p. 6 and 11). The GND ring (Ø0.95/1.45 mm) and the 0.5 mm hole are right
+   (0.5–0.7 mm recommended). The signal pads are not:
+   - **Pads 1 and 2 are mirrored, so VDD and OUTPUT are swapped.** The datasheet draws the
+     pads in its bottom view (pin 1 left, pin 2 right, the port below); seen from the top, as
+     a footprint is drawn, pin 1 is on the right, where the top view's polarity dot is. With
+     the pads at +x of the port, as in this footprint, pin 1 belongs at **+y**; the footprint
+     has pad 1 at −y. Check it in JLC's assembly preview too (item 2): MK1's pin-1 mark must
+     sit on the VDD pad (the one to R1 and C1).
+   - **Position and size:** the datasheet's pads are 0.65 × 0.545 mm (across × along the
+     part), 0.95 mm apart (centres), their inner edge 1.205 mm from the port centre, so
+     their centres at x = 1.4775, y = ±0.475 mm. The footprint has 0.65 × 0.65 mm pads at x
+     = 1.6, y = ±0.6025 (1.205 mm apart): 0.12–0.13 mm out in each direction, about 70 % of
+     each part pad on its land. The old note above read "1.6" (the pads' total span) and
+     "1.205" (the port to the pads' edge) as other dimensions.
+   - **Fixed 2026-11-23** in the footprint (`mic_board.pretty`) and its copy on the board:
+     pad 1 at (1.4775, +0.475), pad 2 at (1.4775, −0.475), both 0.545 × 0.65 mm; the
+     silkscreen dot at (2.25, +0.475), beside pad 1. The 3D model
+     (`mic_board.3dshapes`) had the same pads and a GND ring of r 0.53–0.67 mm: now the
+     datasheet's pads and r 0.475–0.725 mm. Its pin-1 dot (a recess in the lid) was at the
+     old pad 1's corner (KiCad's 3D y points up, the footprint's down): moved to pad 1's,
+     checked in KiCad's 3D render.
+   - **Still to do: re-route VDD and OUT at MK1.** The old tracks now end on the wrong pads:
+     the DRC shows 3 shorts and 2 unconnected pads there, and nothing else new.
 2. **JLC preview**: confirm the rotation of U1, U2 (pin 1 dot) and MK1 (pads towards U1, port towards J1). The CPL gives MK1 at its package centre (0.5 mm from the port).
 3. **Routing**: a scripted first pass. Worth a look in KiCad, mainly around the mic/input (C2, R2, U1 pin 3) and the comparator outputs.
-4. After opening in KiCad 10: run ERC/DRC and "Update PCB from schematic" once to confirm the link.
+4. **ERC/DRC in KiCad 10** (2026-11-23, KiCad 10.0.8, `kicad-cli`): ERC 0 violations;
+   schematic parity 0 issues. DRC: 2 clearance errors between the U1A + input track and the
+   GND zone, which go away when the zones are refilled (a stale fill), and 8 silkscreen
+   warnings. **Refill the zones (B) and save before making the Gerbers:** they carry the
+   fill as saved.

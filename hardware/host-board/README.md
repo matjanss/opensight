@@ -2,12 +2,12 @@
 
 The host board for the acoustic target: a NodeMCU-32S, 8 sensor connectors, the IR curtain emitter and receiver, a DS18B20, and the panel LED and button. Every part is through-hole and hand-soldered. The board is 76 × 118 mm (the long side runs north–south), 2 layers, 1.6 mm thick, with an M3 mounting hole in each corner.
 
-The files are in KiCad 10 format; open them with KiCad 10 or newer. "Update PCB from Schematic" should report no changes, except for the supply jumper (JP1, R46, C18; see the to-do below), which is in the schematic but not yet on the board.
+The files are in KiCad 10 format; open them with KiCad 10 or newer. "Update PCB from Schematic" should report no changes, except for the two changes in the to-do below (J5 4-pin and R45; JP1, R46, C18), which are in the schematic but not yet on the board.
 
 **Not ordered yet. Two changes to make first** (also listed in [TODO.md](TODO.md)):
 
-1. J5 takes a BME280 as well as the DS18B20. See [A BME280 on J5](#1-a-bme280-on-j5).
-2. The curtain comparator U4 gets a supply jumper: 3.3 V for a TLC372, 5 V for an LM393, with its own decoupling. See [The curtain comparator's supply](#2-the-curtain-comparators-supply-33-v-or-5-v-by-a-jumper).
+1. J5 takes a BME280 as well as the DS18B20 (done in the schematic). See [A BME280 on J5](#1-a-bme280-on-j5).
+2. The curtain comparator U4 gets a supply jumper: 3.3 V for a TLC372, 5 V for an LM393, with its own decoupling (done in the schematic). See [The curtain comparator's supply](#2-the-curtain-comparators-supply-33-v-or-5-v-by-a-jumper).
 
 ## To do before ordering
 
@@ -35,7 +35,11 @@ The DS18B20 can't see humidity. A BME280 (temperature, humidity and pressure, ov
 2. **R45, new:** 4.7 k from +3V3 to GPIO 15, the SCL pull-up, next to R43. R43 (4.7 k, +3V3 to GPIO 14) stays: it is the SDA pull-up, and the DS18B20's pull-up.
 3. **GPIO 12 stays unconnected, with no pull-up.** The firmware moves the pulse generator's sync loopback from GPIO 15 to GPIO 12. GPIO 12 is the flash-voltage strapping pin: anything holding it high at boot stops the module from starting.
 4. **Silkscreen:** J5 "BME280 / DS18B20", with pin labels GND, SDA, 3V3, SCL.
-5. **Afterwards:** update the parts list (J5, R45), the GPIO map below, and this section.
+5. **Status (2026-11-23):** done in the schematic and the parts list. J5 has its own symbol,
+   `CONN4_AIR` (pins GND, SDA/DQ, VDD, SCL), in `host_board.kicad_sym`; the net DQ is now
+   `SDA_DQ`, and GPIO 15 is on the new net `SCL`. R45 has R43's footprint (horizontal,
+   7.62 mm). ERC: 0 violations. **Still to do:** the board layout (J5's 4-pin footprint, R45,
+   the SCL track), the silkscreen above, and the PDFs.
 
 **The sensor and its cable:**
 
@@ -45,13 +49,10 @@ The DS18B20 can't see humidity. A BME280 (temperature, humidity and pressure, ov
 - Keep the cable short, up to about 50 cm (I2C at 100 kHz). Many breakouts have their own 10 k pull-ups; with R43 and R45 in parallel that's about 3.2 k, which is fine.
 - Mount the sensor in the air between the mics, away from the host board and the IR LEDs, which warm it.
 
-**Firmware:** not changed yet (planned for measurement step 3):
-
-- the sync loopback moves to GPIO 12 (`SYNC_PIN` in `config.h`);
-- `airtemp.cpp` detects which sensor is on J5;
-- the speed of sound gets the humidity term.
-
-Until then a BME280 on J5 is harmless but unread: today's firmware talks 1-Wire on GPIO 14 and reports 18 °C "assumed".
+**Firmware:** done in measurement step 3a. The sync loopback is on GPIO 12 (`SYNC_PIN` in
+`config.h`); `airtemp.cpp` looks for a BME280 or BMP280 on I2C (SDA 14, SCL 15), else a
+DS18B20 on GPIO 14; the speed of sound has the humidity term. Its bench tests with the real
+sensors (MEASUREMENT 3a-3, 3a-4) wait for the parts.
 
 ### 2. The curtain comparator's supply: 3.3 V or 5 V, by a jumper
 
@@ -258,21 +259,28 @@ The TLC372's figures are from TI's datasheet (SLCS114F, 2025). Tinytronics has n
 | CH8 L/H | 4 / 16 |
 | IR_IN | 13 |
 | IR_EN | 27 |
-| DQ (DS18B20); SDA with the BME280 change | 14 |
-| Spare now; SCL with the BME280 change | 15 |
+| SDA_DQ: the BME280's SDA, or the DS18B20's DQ (J5 pin 2) | 14 |
+| SCL: the BME280's SCL (J5 pin 4) | 15 |
 | STAT (blue LED + panel LED) | 2 |
 | BOOT (button) | 0 |
 | Spare, left open | 5, 12 |
 
-The firmware's `config.h` has this map (`CAPTURE_LINE_PINS`, L then H per channel). It also uses three of the open pins inside the chip, with nothing wired to them on the board:
+The firmware's `config.h` has this map (`CAPTURE_LINE_PINS`, L then H per channel). It also uses two of the open pins inside the chip, with nothing wired to them on the board:
 
 - GPIO 5: the capture clock loopback;
-- GPIO 15: the pulse generator's sync loopback (GPIO 12 after the BME280 change);
-- GPIO 12: nothing yet.
+- GPIO 12: the pulse generator's sync loopback (it was GPIO 15 before step 3a; GPIO 15 is
+  the BME280's SCL now).
 
 ## Checks done
 
 - **Netlist:** the schematic netlist matches the design list: 71 nets, 119 parts.
+- **KiCad 10 check (2026-11-23, KiCad 10.0.8, `kicad-cli`):** ERC 0 violations (86 nets, 123
+  parts, with the J5 and U4-supply changes). DRC with zones refilled: 1 clearance error (a
+  +3V3 track 0.18 mm from U2 pad 2, which has no net, against the 0.2 mm rule; JLC makes 0.1
+  mm) and 50 silkscreen warnings. Schematic parity: 278 issues, of which 271 were there
+  before the changes and are naming only (pad nets `5V_F` against the schematic's `/5V_F`;
+  the `Note` field missing on footprints): "Update PCB from Schematic" clears them. The
+  other 7 are the to-do above (J5, R45, JP1, R46, C18, U4's value).
 - **Design-rule check (DRC):** 0 copper errors and 0 unconnected pads. GND and AGND connectivity was checked separately. What remains are silkscreen overlap warnings and library-path notes from the build environment.
 - **Routing rules:** signal tracks 0.3 mm, power tracks 0.4–0.6 mm, 0.25 mm clearance, vias 0.7/0.35 mm. All of these are well inside JLCPCB's standard limits.
 - **Routing method:** the board was routed with my own autorouter, not by hand, so some tracks take long ways round. It's electrically fine, but tidy it in KiCad if you like.

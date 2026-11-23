@@ -5349,7 +5349,7 @@
 		(layer "F.Cu")
 		(uuid "93275790-f60e-4df8-baca-d82b1826254c")
 		(at 125 121.5)
-		(descr "Gettop GTA2718B-3 / -3HA analog bottom-port MEMS mic, 2.75x1.85x1.0 mm. Origin = acoustic port centre. Land pattern interpreted from datasheet Fig. 11/Application Design Suggestions: GND ring OD 1.45 / ID 0.95 around port, pads 1 (VDD) and 2 (OUTPUT) 1.6 mm from port centre, 1.205 mm apart. VERIFY pad 1/2 positions against the -3 drawing.")
+		(descr "Gettop GTA2718B-3 / -3HA analog bottom-port MEMS mic, 2.75x1.85x1.0 mm. Origin = acoustic port centre. Land pattern from the GTA2718B-3 datasheet (LCSC C50275772), Fig. 11 and Recommended PCB Design Pattern: GND ring OD 1.45 / ID 0.95 around the port, NPTH 0.5 (0.5-0.7 recommended); pads 0.545 x 0.65 mm, 0.95 mm apart, inner edge 1.205 mm from the port centre. Seen from the top (the datasheet draws the bottom), pin 1 (VDD) is at +y with the pads at +x; the silkscreen dot and the lid marking are at that corner. Checked 2026-11-23.")
 		(tags "MEMS microphone bottom port")
 		(property "Reference" "MK1"
 			(at -2.4 0 0)
@@ -5475,8 +5475,8 @@
 			(uuid "107099e0-53cd-479c-8e58-dcd840986330")
 		)
 		(fp_circle
-			(center 2.25 -0.6)
-			(end 2.35 -0.6)
+			(center 2.25 0.475)
+			(end 2.35 0.475)
 			(stroke
 				(width 0.2)
 				(type default)
@@ -5537,8 +5537,8 @@
 			(uuid "4ac4b2d5-cd2d-4224-af27-c1fc1f435a3c")
 		)
 		(pad "1" smd rect
-			(at 1.6 -0.6025)
-			(size 0.65 0.65)
+			(at 1.4775 0.475)
+			(size 0.545 0.65)
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(net "Net-(MK1-VDD)")
 			(pinfunction "VDD_1")
@@ -5546,8 +5546,8 @@
 			(uuid "65257b9d-73c9-4633-9eea-c45b6587e7bd")
 		)
 		(pad "2" smd rect
-			(at 1.6 0.6025)
-			(size 0.65 0.65)
+			(at 1.4775 -0.475)
+			(size 0.545 0.65)
 			(layers "F.Cu" "F.Mask" "F.Paste")
 			(net "Net-(MK1-OUT)")
 			(pinfunction "OUT_2")
