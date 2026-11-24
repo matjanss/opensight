@@ -11,6 +11,15 @@ status and settings are in (step 5c).
   the paper, or mark it a miss, so the total is complete.
 - **Settings editor.** The sensor's settings (span, dead time, validity limits, the curtain's
   window) are shown read-only; the protocol can write them (Settings).
+- **The IR curtain on or off, in the settings.** A switch for whether a shot needs the
+  curtain's confirmation (PLAN D9, step 4b). The first tests run without the curtain, to
+  find out whether the acoustic checks alone tell real shots from other sounds. The firmware
+  already supports it over BLE, with no change needed: Settings with the curtain's window at
+  0, 0 switch the gate off (and the emitter, IR_EN), a window (45–100 µs by default) switches
+  it on, and the setting is kept in NVS. The gate is off by default. The app writes Settings
+  whole, so the switch keeps the other values as read, and remembers the last window to turn
+  it back on. Do this first, ahead of the rest of the settings editor. (Asked for
+  2026-11-24.)
 - **Calibration templates.** The wizard has the 4 × 4 grid built in
   (`assets/templates/grid-4x4.json`); choosing another template file, and the sparks per
   point, in the window.
