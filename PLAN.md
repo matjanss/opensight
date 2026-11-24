@@ -43,7 +43,7 @@ within 80 mm of the centre (the air pistol card's scoring rings are 155.5 mm acr
   | The analog side (edge shape, walk, k) | unknown until the boards; the summary expects it to dominate |
 
 - **Correction to the summary's error budget.** It counts "mic out of the paper plane by
-  1 mm" as negligible (0.005 mm). But the sensor board puts the mic port 10.5 mm behind
+  1 mm" as negligible (0.005 mm). But the mic port sits about 10.5 mm behind
   the paper (21.5 mm flipped), and the error grows with the square of that height. In the
   scoring area's corners, a few mm from a mic, it reaches 3–4 mm. The model has to include
   the height (D3). Once it does, the height costs nothing.
@@ -157,9 +157,12 @@ channel. It is, and with one condition: the four corners must already be off one
 ### D3 The propagation model, written down once
 
 - **Subsonic projectiles and air guns:** the crack starts at the hole, in the paper plane.
-  Each mic sits at a height h behind that plane (10.5 mm, or 21.5 mm with the board
-  flipped), so the distance is √(ρ² + h²). The first try leaves h out; that is the first
-  fix.
+  Each mic sits at a height h behind that plane, so the distance is √(ρ² + h²). The
+  first try leaves h out; that is the first fix.
+- **Where h comes from** (2026-11-24): the port is 5.5 mm from the board's paper edge
+  (21.5 mm flipped; the board is 44 × 27 mm). The holder adds the gap between that edge
+  and the paper. The defaults' 10.5 mm assume a gap of about 5 mm; the real h follows
+  from the holder's drawing.
 - **h is a setting per mic, not fitted** (2026-11-21). The board is made to be flipped,
   to find which height works best, so h can differ per mic. It is set with a calliper
   value: by serial `mic` in step 3, from the app once protocol v3 carries the calibration

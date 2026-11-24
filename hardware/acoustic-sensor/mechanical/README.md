@@ -36,6 +36,6 @@ any change to the board.
 
 - The outline's north edge is 0.1 mm out of square: it runs from y = 27.0 at the west end
   to y = 26.9 at the east end (page coordinates (103, 100) to (147, 100.1)).
-- The board README still gives 50 × 32 mm, 7.5 mm clamp strips and the port 10.5 mm from
-  the paper. The board itself is 44 × 27 mm, with the port 5.5 mm from its south edge.
-  The holder sets the real mic height (PLAN D3).
+- The mic height h (PLAN D3) is the port's 5.5 mm from the south edge plus the holder's
+  gap between that edge and the paper. The firmware's default of 10.5 mm assumes a gap of
+  about 5 mm.

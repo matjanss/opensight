@@ -176,8 +176,10 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   µs later).
   - Trimpots: RV1 gain, RV2 low threshold, RV3 high threshold. Start at VTH_L = VMID +
     100 mV and VTH_H = VMID + 400 mV.
-  - 50 × 32 mm. The board stands on its long edge, mic port 10.5 mm from the paper
-    (21.5 mm flipped).
+  - 44 × 27 × 1.0 mm, clamped (no holes). The board stands on its long edge, the mic
+    port 5.5 mm from the paper edge (21.5 mm flipped); the holder adds its own gap, so h
+    is set per mic (the defaults' 10.5 mm assume a holder about 5 mm off the paper). 3D
+    files: `hardware/*/mechanical/` (`hardware/export_mechanical.py`).
   - J1 is JST XH 5-pin: VA, GND, OUT_L, GND, OUT_H. JLC assembles the SMD parts, 5 boards
     per order.
 - **Host board v0.3:** 76 × 132 mm, through-hole, hand-soldered.

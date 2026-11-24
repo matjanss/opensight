@@ -11,9 +11,10 @@ GTA2718B-3 bottom-port MEMS mic → TLV9062 two-stage preamp (×6.3–17.7, ×12
 - `production/`: the JLCPCB files from the Fabrication Toolkit plugin (options in `fabrication-toolkit-options.json`): `mic_board.zip` (gerbers + drill files), `bom.csv`, `positions.csv`, `designators.csv`, `netlist.ipc`. The BOM and positions also list the hand-fitted parts (J1, RV1–RV3, test points): leave those out of the JLC assembly order.
 
 ## Board
-- 50 × 32 mm, 2 layers, **1.0 mm** FR-4 (set this when ordering), bottom layer = GND plane, top has a GND pour.
-- 7.5 mm clamp strips at both short ends: no parts, no tracks.
-- The board stands on its long edge. Bottom edge = paper side: mic port 10.5 mm from it. Flipped over: 21.5 mm. The port is centred on the length (x = 25 mm), so it stays at the same place along the frame when the board is flipped.
+- 44 × 27 mm, 2 layers, **1.0 mm** FR-4 (set this when ordering), bottom layer = GND plane, top has a GND pour. No mounting holes: the board is clamped.
+- No parts on top in the end strips (5.3 mm at the west end, 6.1 mm at the east end): room for the clamps.
+- The board stands on its long edge. Bottom edge = paper side: mic port 5.5 mm from it. Flipped over: 21.5 mm. The mic height h (PLAN D3) is that plus however far the holder keeps the board's edge from the paper. The port is centred on the length (x = 22 mm), so it stays at the same place along the frame when the board is flipped.
+- The 3D files and the sizes for the holders are in [mechanical/](mechanical/README.md).
 - Sound enters through a 0.5 mm non-plated hole under the mic (bottom side, marked "MIC PORT"); the bottom plane and all signal tracks stay clear of it.
 - J1: JST XH 5-pin vertical, **2.50 mm pitch**: 1 VA, 2 GND, 3 OUT_L, 4 GND, 5 OUT_H (labels on the bottom silkscreen).
 - Test loops: SIG, VMID, GND (Keystone 5000-series, hand-fit). Test pads: VTH_L next to C5, VTH_H next to C6.
