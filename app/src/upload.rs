@@ -233,6 +233,17 @@ fn respond(req: Request, code: u16, kind: &str, body: impl Into<Vec<u8>>) {
 
 const TEXT: &str = "text/plain; charset=utf-8";
 
+/// How much of a refused upload is read and dropped before the answer goes out.
+const DRAIN_MAX: u64 = 64 << 20;
+
+/// Reads the rest of a refused upload, up to `DRAIN_MAX`, so the answer goes out on a
+/// connection with nothing left unread. Windows resets a socket that is closed with data
+/// still unread, and the reset throws away the answer before the phone reads it: the
+/// phone would see a broken connection instead of "too large".
+fn drain(req: &mut Request) {
+    let _ = std::io::copy(&mut req.as_reader().take(DRAIN_MAX), &mut std::io::sink());
+}
+
 fn handle(shared: &Shared, mut req: Request) {
     let url = req.url().to_string();
     let token = url.strip_prefix("/p/").unwrap_or("");
@@ -264,7 +275,10 @@ fn handle(shared: &Shared, mut req: Request) {
                 "The photo is larger than {} MB. Take it again at a lower resolution.",
                 shared.max_bytes.div_ceil(1 << 20)
             );
-            if req.body_length().is_some_and(|n| n > shared.max_bytes) {
+            if let Some(n) = req.body_length().filter(|&n| n > shared.max_bytes) {
+                if n as u64 <= DRAIN_MAX {
+                    drain(&mut req);
+                }
                 return refuse(req, 413, too_large);
             }
             let mut body = Vec::new();
@@ -276,6 +290,7 @@ fn handle(shared: &Shared, mut req: Request) {
                 return refuse(req, 400, format!("The upload broke off ({e}). Try again."));
             }
             if body.len() > shared.max_bytes {
+                drain(&mut req);
                 return refuse(req, 413, too_large);
             }
             match store(&shared.dir, &series, &body, now_unix()) {
