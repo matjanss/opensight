@@ -43,6 +43,5 @@ underside until they are trimmed: allow for that under the board.
 
 - The outline's north edge is 0.1 mm out of square: it runs from y = 27.0 at the west end
   to y = 26.9 at the east end (page coordinates (103, 100) to (147, 100.1)).
-- The mic height h (PLAN D3) is the port's 5.5 mm from the south edge plus the holder's
-  gap between that edge and the paper. The firmware's default of 10.5 mm assumes a gap of
-  about 5 mm.
+- The mic height h (PLAN D3) is the port's 5.5 mm from the south edge: the holder puts
+  that edge on the paper plane. It is the firmware's default; a gap would add to it.

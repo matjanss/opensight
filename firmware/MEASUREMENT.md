@@ -91,6 +91,7 @@ so a problem shows up in the step that caused it.
 | 4 | Validity checks | 4a (the verdict) passes its simulated bench tests on a bare NodeMCU (2026-11-22). 4b (the curtain) passes its simulated bench tests on a bare NodeMCU (2026-11-22, run by Claude). 4c (loudness, sharpness) planned |
 | 5 | Protocol and app | 5a (protocol v3), 5b (firmware) and 5c (app) built; their bench test passes over BLE from the PC (2026-11-23, run by Claude, merged to `main`). 5d (the calibration wizard, the Rust fit, the field check) passes its bench test over BLE (2026-11-23, run by Claude, merged to `main`) |
 | 6 | Wi-Fi and MQTT | planned |
+| 7 | The real boards (PLAN phase 1) | tests written and the analysis tool (`tools/bench.py`) passing its self-test (2026-11-24); 7-0 (h 5.5 mm, simulated) passes; 7-1 to 7-7 wait for the boards |
 
 ### 1. Capture and raw dump
 
@@ -400,7 +401,7 @@ Build (done, on `step3-solver`):
   removed there. With nothing stored, the mics are `mic default`.
   - `mic` lists them and runs the **blast check** (below);
   - `mic <ch> <x> <y> [h]`, `mic h <mm>` (every mic), `mic h <ch> <mm>`;
-  - `mic default`: the D1/D2 layout on CH1-CH6, h 10.5 mm, no mic on CH7/CH8;
+  - `mic default`: the D1/D2 layout on CH1-CH6, h 10.5 mm (5.5 mm from 2026-11-24), no mic on CH7/CH8;
   - `mic sim`: the simulator's mics on CH5-CH8 and none elsewhere (to test it);
   - `mic clear <ch>`: no mic on that channel;
   - `k` lists k; `k <value>` sets every channel's, `k <ch> <value>` one; `offset` as before.
@@ -435,7 +436,7 @@ Build (done, on `step3-solver`):
   without it (on shots with a late channel).
 - `stat` shows the solver: events solved, converged and sent, the time per solve (mean
   and longest, µs), `reslimit`, test shots, the settings' id.
-- **The simulator** has a height per mic (`sim mic <ch> <x> <y> [h]`, default 10.5 mm), still
+- **The simulator** has a height per mic (`sim mic <ch> <x> <y> [h]`, default 10.5 mm; 5.5 mm from 2026-11-24), still
   4 channels on CH5-CH8, and checks the position against the point it sent. The check is
   part of PASS (every shot solved and converged, the worst error within 0.1 mm) only when
   the firmware solves the simulator's world: the same mics, heights and offsets, its own
@@ -1376,6 +1377,122 @@ in use`), the second check about 0.01 mm, `sim random 200` about 0.013–0.015 m
 
 FUTURE_ARCHITECTURE.md step 2. Check the GPIO 36/39 erratum here (see Risks).
 
+### 7. The real boards (PLAN phase 1)
+
+Written 2026-11-24, before the boards arrive, so the first bench days give numbers. The
+user runs the tests with the boards; Claude analyses the logs. Branch `phase1-prep` for the
+tools and this plan; the bench runs get their own branch when they start.
+
+**h is 5.5 mm** from 2026-11-24 (`MIC_H_DEFAULT_MM`, PLAN D3): the sensor board's paper
+edge on the paper, the port 5.5 mm from it (21.5 mm flipped). A holder that leaves a gap
+adds it: measure each mic's h with a calliper and set it (`mic h <ch> <mm>`).
+
+**What the goal allows.** With the six mics (D1/D2) and h 5.5 mm, a random timing error of
+1 µs per channel moves a shot by 0.21 mm (1σ, long axis) in the ring area, 0.35 mm near
+the corners. So 0.2 mm allows about 0.9 µs of random noise per channel, and 0.5 mm about
+2.3 µs. The 100 ns sampling alone gives about 0.03–0.06 µs. Random noise is unlikely to be
+the limit; the systematic errors (k, the rise's shape, the geometry, the air) are what 7-4
+to 7-6 measure.
+
+**The analysis tool:** `tools/bench.py` (numpy, scipy), on serial or app logs. `--n A-B`
+takes the events numbered A to B (one test's sparks), `--cal` only calibration mode's.
+
+- `bench.py repeat LOG`: sparks at one point. Each channel's own timing noise (1σ, from the
+  spread of every pair's t0 difference), the solved positions' scatter, and the scatter that
+  noise predicts. Lists outliers and half-cycle-late trips (a channel 10–40 µs late).
+- `bench.py kcheck LOG [--jitter NS]`: sparks at known points (`pt`). Per channel, the k and
+  offset that fit its t0 to the geometry, k's uncertainty, and whether a curve fits clearly
+  better than the straight line (a curved rise: the straight-line k is wrong). Then
+  whether the boards' k differ beyond their uncertainty. It corrects k for the edges'
+  sampling error (it is in t1 and in t2 − t1 alike, and pulls the slope low); `--jitter`
+  adds each edge's analog noise (from `repeat`). It gives no verdict on the boards when
+  t2 − t1 varies by under 1 µs (1σ): the comparison misfires there (the self-test).
+- `bench.py verify LOG... [--drop]`: sparks at known points. The position error against
+  the truth: bias, rms, 95 %, worst, 1σ per axis, per point; per log, so several logs
+  compare (7-5). `--drop`: each channel left out in turn (what the sixth adds, D2).
+- `bench.py swap LOG --ch N`: after channel N's board is replaced, sparks at known points
+  with the old calibration. Refits only that channel's k and offset, shows the error
+  before and after, and prints the serial lines.
+- `bench.py --selftest` (also in CI, about 25 s): synthetic logs with known noise, k,
+  curvature and a swapped board; every command must find them. On a short t2 − t1 range
+  (the simulator's 0.1–1.6 µs), equal boards must get no verdict.
+
+**The spark:** a piezo lighter's spark gap (or a snapped pencil lead), held in a fixed
+stand for 7-3, through the template's holes for 7-4 to 7-6 (`assets/templates/grid-4x4.json`,
+the calibration wizard, 5d). Keep the spark gap at the paper plane.
+
+Tests (each run's events numbered in the log: note the first and last `n`):
+
+- **7-0, h 5.5 mm (simulated, done 2026-11-24).** Bare NodeMCU: `mic default` and `mic sim`
+  list h 5.50 mm; `sim at 20 -30 100` and `sim random 160` PASS; `bench.py repeat`,
+  `verify --drop` and `kcheck` run on that log.
+- **7-1, each sensor board alone** (the summary's initial calibration; step 2's real tests 1–3).
+  Power it at 3.3 V on J1 (or plug it into the host board), scope on SIG, OUT_L, OUT_H.
+  - Scope ground on TP5 (GND). Measure the thresholds with the meter's black lead on VMID
+    (TP4), so it reads the offset directly.
+  - VMID about 1.64 V to GND (half the local supply), within ±30 mV: nothing to adjust.
+    SIG (the SIG loop) at rest within ±10 mV of VMID, a few mV peak to peak in a quiet room;
+    a large sine (oscillation) or 50 Hz (hum) needs fixing first.
+  - RV1 to one end (over 25 turns), then back 12–13 turns: mid-travel, about ×12. RV2 for
+    VTH_L = VMID + 100 mV (pad TP2), RV3 for VTH_H = VMID + 400 mV (TP3).
+  - A spark 50–100 mm from the mic: OUT_L and OUT_H (J1 pins 3 and 5) low at rest, pulsing
+    on the spark, OUT_L first; SIG first goes **up** (polarity); t2 − t1 from about 0.3 µs
+    (loud) to a few µs; no second trip from ringing.
+  - Once mounted, match the gains: a spark at the frame's exact centre, RV1 set so the
+    first-lobe amplitudes agree within about 10 %, at 2–3 × VTH_H or more (clipping at the
+    peak is fine). Then leave RV1 alone: a gain change shifts the timing.
+  - Note per board (the summary's initial calibration, PLAN D5): its number, VMID, VTH_L,
+    VTH_H, RV1's position, and t2 − t1 at 50 and 100 mm. A board whose SIG first goes down is wired the wrong way: stop before more boards
+    are ordered.
+- **7-2, the host board's pins** (step 1 tests 3 and 14 on the v0.3 map): `selftest` PASS
+  as before; each channel's L and H on its own pin (a spark near each mic in turn, or a
+  jumper to 3V3 through 1 k on each J1x pin 3 and 5): the right channel and edge appear.
+- **7-3, repeatability (the noise floor; PLAN 1.2).** The frame with six mics, the spark at
+  one point (say the centre) in a fixed stand, 50 sparks, `mic` with the nominal layout
+  (no calibration needed). `bench.py repeat LOG --n A-B`.
+  - Expect: each channel's own noise from about 50 ns (the sampling alone) to a few
+    hundred ns; the position scatter close to the noise's prediction.
+  - Pass: the long axis ≤ 0.5 mm (1σ), the goal's best ≤ 0.2 mm; no outliers. A channel
+    with an outlier 10–40 µs late: polarity or the thresholds (7-1).
+  - Over 0.5 mm here, the goal can't be met by calibration: look at that channel's
+    thresholds and gain before going on.
+- **7-4, calibration and verification (PLAN 1.3).** The frame with the D1/D2 layout, each
+  mic's h measured, the template on the card holder.
+  1. The calibration wizard (app, 5d): the 4 × 4 grid, 10 sparks per point (160), the fit,
+     the record sent; its field check at the centre.
+  2. Verification: 10 sparks at each of 9 other points (a 3 × 3 grid at 0 and ±50 mm), in
+     calibration mode with `cal pt` for each point (so the `rec` lines carry `pt`).
+     `bench.py verify LOG --n A-B --drop`.
+  3. `bench.py kcheck LOG --n C-D` on the 160 calibration sparks (with the calibrated
+     cfg): is a straight-line k right per board, and do the boards' k differ?
+  - Pass: 1σ per axis ≤ 0.5 mm (the goal's best: ≤ 0.2 mm), no point's bias over 0.5 mm.
+    `--drop` shows what each channel adds; the middle mics matter most near the edges.
+  - A channel marked CURVED: its rise isn't straight over the range used. Note the rms the
+    straight line leaves; if it is over about 300 ns, a curved arrival model is the next
+    step (4c).
+- **7-5, temperature (PLAN 1.4).** Needs the air sensor on J5 (3a-3 or 3a-4 first). The
+  verification of 7-4 at room temperature, then the room at least 4 °C warmer or colder (a
+  heater, a window; wait 30 minutes for the frame), the same verification with the same
+  calibration. `bench.py verify A.log B.log`.
+  - Pass: the bias moves by ≤ 0.1 mm, the 1σ within 20 % of the first. For comparison, 1 °C
+    of error in the air costs about 0.15 mm rms (PLAN): a larger shift means the air isn't
+    measured right (the sensor reads the board, not the air: summary).
+- **7-6, a board swap (PLAN 1.5).** After 7-4, replace one sensor board (say CH4's) with a
+  spare set up as in 7-1. The verification of 7-4 again, with the old calibration. Then
+  `bench.py swap LOG --ch 4`.
+  - Expect: the error grows before the refit (a new board's k and offset); after it, back
+    within 20 % of 7-4's rms.
+  - Pass: then a board swap needs only that channel's k and offset (send `bench.py`'s two
+    lines; calibrate fully when convenient). If not, it needs a full calibration: note
+    what was left.
+- **7-7, the IR curtain on the bench (PLAN 1.6).** The host board's bench list
+  (`hardware/host-board/TODO.md`): RV1's threshold with pellets dropped through the beam,
+  U3 compared (MCP6002 against MCP602), then the dip's delay against real shots, and
+  `curtain window` set from it (the receiver adds about 3–8 µs; the window is 45–100 µs).
+
+Done when: 7-1 to 7-4 pass on six boards, with 7-3's noise floor and 7-4's error written
+into Bench results. 7-5 to 7-7 follow as the parts allow.
+
 ## Risks
 
 - **I2S parallel capture on IDF 5:** register-level, untested here; settled by the step 1
@@ -1398,6 +1515,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-24 | 7-0 | Bare NodeMCU, h 5.5 mm (the new default), run by Claude over serial: `mic default`, `mic sim`, `sim at 20 -30 100`, `sim random 160`; log `logs/device-monitor-261124-124225-h55.log`, upload `logs/upload-261124-*.log` (the first try: "Failed to start stub flasher", the second flashed); then `tools/bench.py` on that log, and `bench.py --selftest` | **PASS.** Every mic at h 5.50 mm after `mic default` and `mic sim`. `sim at`: 100 of 100 ok; `sim random 160`: 160 of 160 ok, error 0.0130 mm rms, worst 0.0276, none dropped. `bench.py verify --drop`: 0.013 mm rms, worst 0.028 (the simulator's own figures); without CH7 or CH8 (the middle mics) 0.014, without a corner 0.016–0.020. `bench.py repeat` (the 100 `sim at` shots): runs, but its predicted scatter is half the measured (0.007 against 0.014 mm): at one fixed point the simulator's only error is the sampling, nearly the same every shot (some channels' t0 differences vary by 3 ns), not the independent noise the method assumes; real analog noise is. `bench.py kcheck` on the simulator: k 0.305–0.361 (true 1/3 on all) with t2 − t1 spanning only 0.1–1.6 µs. This found two faults in the tool, both fixed: (1) the edges' sampling error is in t1 and in t2 − t1 alike and pulls the slope low (by σq²(2k + 1)/var(t2 − t1)): now corrected, the mean k 0.334; (2) over so short a range the boards' comparison misfires (a synthetic check: χ² up to 31 for equal boards, on the 25 ns grid or not; 4–7 over 1–10 µs): now no verdict under 1 µs (1σ). Self-test: 7 checks PASS (noise per channel within 6 %, a 24 µs late trip found, k within 0.0024, a curved channel found, equal boards agreeing in 5 of 5, no verdict on a short range in 5 of 5, the swap's k and offset recovered and its error 0.170 → 0.015 mm). |
 | 2026-11-23 | 5d | Bare NodeMCU, BLE from the PC (the probe in `drive` mode, `target/release/examples/probe`), the simulator on serial, run by Claude; serial `logs/device-monitor-261123-074754-5d.log`, probe `logs/probe-261123-074754-5d.out`, app log `logs/app-events-261123-074754-5d.log` | **Passes.** Field check before: 5 sparks at (0, 0), 0.436 mm (within the 0.5 mm limit: at the centre `sim cal truth` is least off). The wizard took the 160 sparks of `sim cal 10` (0 ignored), fitted: residual 38.5 ns, the error over the 16 points 0.814 → 0.013 mm rms (every point's worst under 0.035 mm); wrote record `E2BA6297`, which the sensor confirmed in Status and serial (`in use`). Field check after: 0.010 mm. `sim random 200` afterwards: 0.0145 mm rms, worst 0.061 mm (3e-3 with calibrate.py: 0.0140). `calibrate.py` on the same 160 sparks: mics within 0.0004 mm, k within 0.0001, offsets within 1.3 ns (±50 ns), the same 38.5 ns and 0.814 → 0.013 mm. On the PC: the solver meets the firmware's vector tolerances (worst position 0.000055 mm); the fit against calibrate.py's self-test within 0.1 sd. **Found:** scipy's defaults (1e-8) stop a few ns short of the minimum along the flat k–offset valley (objective 629 427 against the Rust fit's 629 420): `calibrate.py`'s final fit now uses tolerances of 1e-14 and central differences (629 420.24; offsets within 0.25 ns of the Rust fit). The last printed digits can still differ, so the two records' IDs aren't compared. |
 | 2026-11-23 | 5a–5c | Bare NodeMCU, the PC's Bluetooth (BlueZ 5.85) with the probe (`app/examples/probe.rs`), run by Claude; serial `logs/device-monitor-261123-071418-5b.log`, probe `logs/probe-261123-071418.out`, app log `logs/app-events-261123-071418.log` | **Passes.** All 6 `sim` runs PASS. Over BLE: 50 events (38 acoustic, 5 holes, 7 missed), 0 gaps; 40 hits (28 shots, 5 holes, 7 missed), all 40 linked to a received event marked sent; 28 Status notifications. The app log's 38 `rec` lines and 3 `cfg` lines are identical to the serial log's (IDs included); `tools/replay` on the app log: ok 28, lost 5, outside 5 (the board's), 5 `dip` lines, the shots 0.0084 mm rms from the true points. Writes: settings unchanged accepted, span 10 mm rejected, the 213-byte calibration record (a long write) became the record (`05FB1059`, the ID the app computes too), calibration mode and the point in Status, an unknown command ignored. Native tests 23 (7 new), app tests 33. **Found on the way:** after the update BlueZ kept the v2 GATT layout cached. The sensor's "services changed" (at boot, then on the live link, then directly on its handle: rc 0) didn't make it read again. Pairing again does; the app now waits 8 s for a new layout, then says so. NimBLE's GATT caching (a database hash) doesn't build in NimBLE-Arduino 2.3. The re-pair needed the sensor's PIN (123456, not the default) and pairing mode: the serial `pairing` command was added for that. |
 | 2026-11-22 | 4b | 4b-0 to 4b-8 again with the edge tie, bare NodeMCU, run by Claude over serial, logs `logs/device-monitor-261122-230319.log` (diagnostic) and `-230420.log` (the full test), upload `logs/upload-261122-230227.log` | **Passes.** The tie now comes from one 20 µs pulse on GPIO 12 seen by both the I2S and capture channel 2 (the user chose this over a fixed correction). First try (`-203458.log`): 10.58 ms off and every dip unclaimed, because `gpio_reset_pin` briefly pulled GPIO 12 up and that rise opened the tie's event 10 ms before the real pulse. Fixed: the pin is set up as a quiet low output before it is routed, the tie waits out the dead time, and it checks the two agree within 50 µs (else a warning, and the catch stays). Both boots: `the start's catch was -4100 ns off` and `-4175 ns off`, so the edge corrected the bad case. The firmware's dip time against the hardware truth: mean −122 to −146 ns per run, rms 126–150 ns, worst 224 ns (200 shots of `sim random 200`), the same over both boots. All runs PASS; 4b-1 to 4b-6 as in the row below. Replay: 340 events, 0 verdicts differ, 20 `dip` lines; positions 0.013 mm rms against the truth. Native tests: 16 pass. Still in the code: the simulator's diagnostics (`steps late`, `tick 0 vs the sync edge`). |

@@ -13,7 +13,8 @@ namespace measure {
 static const int MAX_MICS = 8;
 
 // One mic: its position in the paper plane and its height behind the paper (the mic port's
-// distance from the paper plane: 10.5 mm, 21.5 mm with the sensor board flipped).
+// distance from the paper plane: 5.5 mm with the sensor board's edge on the paper, 21.5 mm
+// flipped).
 struct Mic {
   float x, y, h;   // mm
 };

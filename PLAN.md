@@ -36,17 +36,18 @@ within 80 mm of the centre (the air pistol card's scoring rings are 155.5 mm acr
 
   | Source | Cost in the ring area |
   |---|---|
-  | Mic height above the paper (10.5 mm) left out of the model | 0.15 mm mean, up to 0.8 *(study)* |
+  | Mic height above the paper (10.5 mm) left out of the model | 0.15 mm mean, up to 0.8 *(study)*; at 5.5 mm (2026-11-24) about a quarter of that (it grows with h²) |
   | Air temperature 1 °C off | 0.15 mm rms, 0.24 worst |
   | Mic positions ~1 mm off (no calibration) | 0.3 mm rms, 0.7 worst |
   | A channel's own delay of 500 ns | 0.09 mm rms, 0.12 worst |
   | The analog side (edge shape, walk, k) | unknown until the boards; the summary expects it to dominate |
 
 - **Correction to the summary's error budget.** It counts "mic out of the paper plane by
-  1 mm" as negligible (0.005 mm). But the mic port sits about 10.5 mm behind
-  the paper (21.5 mm flipped), and the error grows with the square of that height. In the
-  scoring area's corners, a few mm from a mic, it reaches 3–4 mm. The model has to include
-  the height (D3). Once it does, the height costs nothing.
+  1 mm" as negligible (0.005 mm). But the mic port sits 5.5 mm behind the paper (the
+  sensor board's edge on it; 21.5 mm flipped; 10.5 mm was planned before 2026-11-24), and
+  the error grows with the square of that height. Over the 200 × 200 mm area it reaches
+  1.4 mm at 5.5 mm (0.15 mm mean; 3.9 mm at 10.5 mm), the worst in the corners, close to a
+  mic. The model has to include the height (D3). Once it does, the height costs nothing.
 - **The scoring area's corners are close to the mics.** Mics at ±105 mm sit 5–7 mm from
   the corners at ±100 mm, so every error grows there (GDOP up to 3.6, against about 1 in
   the ring area). It matters little for scoring, since those corners are outside the rings,
@@ -102,8 +103,8 @@ fit a point in the 200 × 200 mm scoring area.
   - The worst GDOP over the scoring area drops from 2.79 to 1.15.
   - The distance (about 15–25 mm) is decided with the holder. Calibration fits the mic's
     x and y anyway.
-  - The holder's principle: `hardware/frame/top-right-holder.svg`. The board is 50 mm
-    wide and stands across the diagonal, so beyond d ≈ 7 mm the holder overhangs the
+  - The holder's principle: `hardware/frame/top-right-holder.svg`. The board is 44 mm
+    wide (50 mm was planned before 2026-11-24) and stands across the diagonal, so beyond d ≈ 7 mm the holder overhangs the
     frame corner.
   - **Not yet changed:** `mic default`, the simulator, `tools/model.py`, the test vectors
     and `tools/layout_study.py` still use (65, 105). They change once d is fixed, with
@@ -160,9 +161,9 @@ channel. It is, and with one condition: the four corners must already be off one
   Each mic sits at a height h behind that plane, so the distance is √(ρ² + h²). The
   first try leaves h out; that is the first fix.
 - **Where h comes from** (2026-11-24): the port is 5.5 mm from the board's paper edge
-  (21.5 mm flipped; the board is 44 × 27 mm). The holder adds the gap between that edge
-  and the paper. The defaults' 10.5 mm assume a gap of about 5 mm; the real h follows
-  from the holder's drawing.
+  (21.5 mm flipped; the board is 44 × 27 mm). The holders put that edge on the paper
+  plane, so **h = 5.5 mm**, the default from 2026-11-24 (`MIC_H_DEFAULT_MM`; 10.5 mm
+  before). A holder that leaves a gap adds it to h: measure it with a calliper.
 - **h is a setting per mic, not fitted** (2026-11-21). The board is made to be flipped,
   to find which height works best, so h can differ per mic. It is set with a calliper
   value: by serial `mic` in step 3, from the app once protocol v3 carries the calibration
@@ -428,16 +429,17 @@ app's shots. Steps, tests and results: `app/CARDPHOTO.md`.
 
 ## Open questions for you
 
-- **Q1 Which card first?** The 10 m air pistol card (10-ring 11.5 mm) or the air rifle
-  card (10-ring 0.5 mm, a much harder target for 0.2–0.5 mm)? On the 25 m range, which
-  disciplines are shot on this lane?
+- **Q1 Which card first?** Answered 2026-11-24: the 10 m air pistol card (10-ring
+  11.5 mm), the app's card already. Get it working first, optimise later; the air rifle card
+  (10-ring 0.5 mm, the harder target for 0.2–0.5 mm) comes after.
 - **Q2 The mic holders:** answered 2026-11-21: yes, the user designs and prints them
   (PETG) for the slid corner and both middle mics (D2). Still open: could the mics move
   out to ±115 mm (D1's corner remark)? 2026-11-22: the top-right mic moves out along the
   diagonal, its distance decided with its holder (D1's update).
-- **Q3 The summary doc:** should D1 and D2 go into it as the answer to its open question
-  on breaking the corner symmetry, and the mic-height correction into its error budget? I
-  have only read it; nothing in it is changed.
+- **Q3 The summary doc:** answered 2026-11-24: yes. Laid as suggestions in the doc
+  (2026-11-24), for the user to accept: six mics in the intro and the layout bullet (D1/D2),
+  the open question on the corner symmetry answered, the sensor board 44 × 27 mm with the
+  port 5.5 mm from the paper edge, and the error budget's mic-height row (D3).
 
 ## Plan
 

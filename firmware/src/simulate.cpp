@@ -1053,7 +1053,7 @@ void simHelp() {
                  "  sim cal truth|reset  the simulator's mics, delays and k set off from the\n"
                  "                       nominal (as before a calibration) | back to nominal\n"
                  "  sim cal <n>          n sparks at each of 16 grid points (`cal on` first)\n"
-                 "  sim mic <ch> <x> <y> [h]  the simulated mics (default D1/D2, h 10.5 mm); `sim`\n"
+                 "  sim mic <ch> <x> <y> [h]  the simulated mics (default D1/D2, h 5.5 mm); `sim`\n"
                  "                       shows them; `mic sim` gives the firmware the same; sim stop");
 }
 

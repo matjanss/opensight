@@ -82,7 +82,7 @@ const float    ARRIVAL_K_DEFAULT    = 1.0f / 3;
 // --- Step 3c: the solver on the board ---
 // The calibration (NVS "cal", calib.cpp): per channel its mic (x, y, h), k, offset and
 // sigma. Defaults: the D1/D2 layout on CH1-CH6 (`mic default`).
-const float    MIC_H_DEFAULT_MM     = 10.5f;   // mic port behind the paper (21.5 flipped)
+const float    MIC_H_DEFAULT_MM     = 5.5f;    // mic port behind the paper: the board's edge on it (21.5 flipped)
 // The D1/D2 layout (PLAN.md), mm: bottom left, bottom right, top right slid 40 mm along the
 // top edge, top left, bottom middle, right middle.
 const float    MIC_LAYOUT_D2[6][2]  = {{-105, -105}, {105, -105}, {65, 105}, {-105, 105}, {0, -105}, {105, 0}};

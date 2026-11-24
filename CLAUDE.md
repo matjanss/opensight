@@ -43,9 +43,12 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
   that ID) for its tab, then `read` the tab's content node. The tab is about 130 KB of
   XML, so it comes back as a file: strip the tags to text before reading.
 - **Editing it:** it's the user's doc. Change it only when asked, as suggestions.
-- **Where it is out of date** (PLAN.md has the corrections):
-  - its error budget counts the mic height as 1 mm, but it is 10.5 mm (PLAN D3);
+- **Where it is out of date** (PLAN.md has the corrections; the first three laid in the doc
+  as suggestions on 2026-11-24, PLAN Q3, waiting for the user):
+  - its error budget counts the mic height as 1 mm, but it is 5.5 mm (PLAN D3);
   - its open question on breaking the corner symmetry is answered by PLAN D1/D2;
+  - it gives the sensor board as 50 × 32 mm with the port 10.5 mm from the paper edge: it
+    is 44 × 27 mm, 5.5 mm;
   - its host board is 76 × 118 mm with a 3-pin DS18B20 connector; the board is 76 × 132 mm
     now, with J5 4-pin (BME280 or DS18B20) beside J6/J7 and U4's supply jumper (host board
     README).
@@ -55,7 +58,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Part | Where it stands | Next (see) |
 |---|---|---|
 | Firmware: BLE, pairing, uplink | Protocol v3 (step 5b): `uplink.cpp` with the hit and event rings, Status, Control, Calibration and Settings; bench test passes over BLE (2026-11-23, merged to `main`) | Flash shot store (PLAN D6), MQTT (phase 4) |
-| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration, PLAN phase 0) passes all its simulated tests on a bare NodeMCU (2026-11-22, merged to `main`): the solver on the board, drop-one, the blast check, calibration mode and `tools/calibrate.py`. The DS18B20 and BME280 tests (3a-3, 3a-4) wait for the parts. Step 4a (the verdict) passes its simulated bench tests (2026-11-22, merged to `main`). Step 4b (the curtain) passes its simulated bench tests (2026-11-22, run by Claude, merged to `main`) | The boards' arrival (PLAN phase 1); 3a-3/3a-4 when the parts are there |
+| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration, PLAN phase 0) passes all its simulated tests on a bare NodeMCU (2026-11-22, merged to `main`): the solver on the board, drop-one, the blast check, calibration mode and `tools/calibrate.py`. The DS18B20 and BME280 tests (3a-3, 3a-4) wait for the parts. Step 4a (the verdict) passes its simulated bench tests (2026-11-22, merged to `main`). Step 4b (the curtain) passes its simulated bench tests (2026-11-22, run by Claude, merged to `main`) Step 7 (the real boards, PLAN phase 1): the tests written and `tools/bench.py` passing its self-test; 7-0 (h 5.5 mm, simulated) passes (2026-11-24, branch `phase1-prep`) | The boards' arrival (PLAN phase 1, MEASUREMENT 7); 3a-3/3a-4 when the parts are there |
 | Sensor board (`hardware/acoustic-sensor/`) | v0.3 designed (KiCad 10), not yet on the bench | Its "check before ordering" list; then the summary's initial calibration, polarity, PLAN phase 1 |
 | Host board (`hardware/host-board/`) | v0.3 ready to order: the J5 (BME280) and U4-supply changes on the board, the south half laid out again and the board routed again (2026-11-24, 76 × 132 mm, 0.4/0.6/0.8 mm tracks, DRC and ERC clean); firmware already on its pin map | The user's look in KiCad, then order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner moved out along the diagonal (d about 15–25 mm, PLAN D1's update; principle in `hardware/frame/top-right-holder.svg`), plus bottom-middle and right-middle mics; the user designs and prints the holders. The firmware defaults still use the old slid position (65, 105) until d is fixed |
@@ -82,6 +85,7 @@ firmware/                     PlatformIO, pinned: pioarduino 55.03.312-1 (Arduin
   tools/model.py              the model's reference implementation (numpy)
   tools/replay.cpp            replays a serial log's events through lib/measure (g++)
   tools/calibrate.py          the calibration fit (numpy, scipy)
+  tools/bench.py              phase 1 bench analysis: repeat, kcheck, verify, swap (MEASUREMENT 7)
   tools/layout_study.py       mic layout study behind PLAN D1/D2 (numpy)
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs, eventlog.rs,
@@ -178,8 +182,8 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   - Trimpots: RV1 gain, RV2 low threshold, RV3 high threshold. Start at VTH_L = VMID +
     100 mV and VTH_H = VMID + 400 mV.
   - 44 × 27 × 1.0 mm, clamped (no holes). The board stands on its long edge, the mic
-    port 5.5 mm from the paper edge (21.5 mm flipped); the holder adds its own gap, so h
-    is set per mic (the defaults' 10.5 mm assume a holder about 5 mm off the paper). 3D
+    port 5.5 mm from the paper edge (21.5 mm flipped). The holders put that edge on the
+    paper: h = 5.5 mm, the firmware default (`MIC_H_DEFAULT_MM`), a setting per mic. 3D
     files, flat (the leads cut off): `hardware/*/mechanical/` (`hardware/export_mechanical.py`,
     with CadQuery).
   - J1 is JST XH 5-pin: VA, GND, OUT_L, GND, OUT_H. JLC assembles the SMD parts, 5 boards

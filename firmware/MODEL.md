@@ -30,12 +30,12 @@ Each mic i has:
 | Value | Meaning | Where it comes from |
 |---|---|---|
 | xᵢ, yᵢ | Its position in the paper plane, mm | The frame's nominal layout, then the calibration fit |
-| hᵢ | The mic port's height behind the paper plane, mm (10.5, or 21.5 with the sensor board flipped) | A setting per mic, measured with a calliper. Not fitted |
+| hᵢ | The mic port's height behind the paper plane, mm (5.5 with the sensor board's edge on the paper, 21.5 flipped; 10.5 before 2026-11-24) | A setting per mic, measured with a calliper. Not fitted |
 | kᵢ | The arrival-time factor of its comparator pair | The calibration fit (default 1/3) |
 | offsetᵢ | Its channel's own delay, ns | The calibration fit (default 0) |
 | σᵢ | Its timing error, 1σ, ns | The calibration's residuals (default 50 ns until then) |
 
-The default layout (PLAN D1/D2), h = 10.5 mm:
+The default layout (PLAN D1/D2), h = 5.5 mm (10.5 mm before 2026-11-24):
 
 | Channel | Mic | x, y (mm) |
 |---|---|---|
