@@ -3,8 +3,15 @@
 - `host_board.step`: the board with its parts and silkscreen, for CAD.
 - `host_board.stl`: the same as a binary mesh, for a quick look or a slicer.
 
-Made by `python3 hardware/export_mechanical.py` (kicad-cli, KiCad 10). Run it again after
-any change to the board.
+Both are flat (below).
+
+Made by `hardware/export_mechanical.py`: kicad-cli (KiCad 10) exports the board, then
+CadQuery cuts off everything below the board. Run it with a Python that has CadQuery 2.x
+(`pip install cadquery`, in a venv) after any change to the board.
+
+**Flat:** the soldered leads under the board are cut off, so the board lies flat on the
+table, its underside at z = 0 in the x/y plane. The real leads reach up to 4.4 mm below the
+underside until they are trimmed: allow for that under the board.
 
 ## Frame
 
@@ -19,7 +26,7 @@ any change to the board.
 |---|---|
 | M3 holes (3.2 mm) | (4, 4), (72, 4), (4, 128), (72, 128) |
 | Tallest part | the NodeMCU's ESP32 shield, 15.7 mm above the board's top (z 17.3) |
-| Under the board | soldered leads up to 4.4 mm below the underside (the socket pins, before trimming) |
+| Under the board | cut off in the files; the real leads reach up to 4.4 mm below the underside (the socket pins, before trimming) |
 | Parts above the board | x 1.4–75.0, y 1.1–130.2 |
 | NodeMCU USB socket | x 34.3–41.8, y 77.4–82.4, z 14.2–16.8; the plug goes in from the south (the area south of it is kept free) |
 | PWR IN (J1), SWITCH (J2) | JST XH 2-pin at the east edge: x 71.6, y 51.0 and y 42.0 |
