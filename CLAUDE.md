@@ -364,8 +364,8 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   page sends the photo as it is; `cardphoto::meta` drops EXIF/GPS/XMP from the file without
   re-encoding; stored in `photos/` next to `logs/` with a JSON beside it; originals removed
   after 30 days unless marked to keep. The registration and the holes are in `cardphoto/`: the hole fit with direct derivatives,
-  big groups and the groups themselves on the cores (`par_map`), doubtful groups fitted again,
-  holes not pinned down reported as not found (CARDPHOTO.md C2).
+  big groups and the groups themselves on the cores (`par_map`), holes not pinned down
+  reported as not found (CARDPHOTO.md C2).
   `photo.rs` processes a photo on a thread (registration, holes against the series' shots,
   the photo resampled onto the card's grid through the placement, `<photo>.result.json`).
   `main.rs`: "Card photo" under the series opens the photo window (QR, status, drop a file);

@@ -299,12 +299,10 @@ const EDGE_CUT: f64 = 36.0;
 /// normal equations.
 const GRAD_CUT: f64 = 1e-12;
 
-/// A group's pixels: those within `reach` of the starts the group was made from (fixed for
-/// every fit of the group, so the fits' costs compare).
+/// A group's pixels: those within `reach` of the starts the group was made from, each with
+/// its normalised colour and the card's expected one.
 struct GroupPixels {
     pts: Vec<Sample>,
-    /// Pixels per mm.
-    res: f64,
 }
 
 impl GroupPixels {
@@ -339,52 +337,37 @@ impl GroupPixels {
                 }
             }
         }
-        GroupPixels { pts, res }
+        GroupPixels { pts }
     }
 }
 
 /// A group with more pixels than this has its sums worked out in chunks of this size on the
 /// machine's cores (a big cluster of holes is otherwise one core's work).
-const CHUNK: usize = 4096;
+const CHUNK: usize = 8192;
 /// How far a centre may move in one step of the fit, mm: a circle hidden by its neighbours
 /// has no say in any pixel, and the damping alone would let it run off (and drag the shared
 /// radius with it).
 const STEP_MAX_MM: f64 = 1.0;
-/// Levenberg–Marquardt steps per round (of three) for a first fit, and for a fit again
-/// (`refit`: tries, compared by their residual on the same pixels).
-const FIT_ITER: usize = 60;
-const REFIT_ITER: usize = 20;
 /// How far from its shot a centre may go, mm (a hole beyond `SEARCH_MM` does not count).
 const ANCHOR_MM: f64 = SEARCH_MM + 0.5;
 
 /// The model of a group: n circles with a soft edge over the expected card, inside them the
 /// table's colour. Parameters: the centres (2n), the radius (one shared, or one per hole),
-/// the edge's width, the table's colour (3). `fixed` circles (centre, radius: neighbours
-/// fitted already) cover pixels too, with the same edge, but are not fitted.
+/// the edge's width, the table's colour (3).
 struct GroupModel<'a> {
     pts: &'a [Sample],
     n: usize,
-    per_radius: bool,
-    fixed: &'a [((f64, f64), f64)],
 }
 
-/// A circle near a pixel: its index (`usize::MAX`: fixed), sigma, u, d, dx, dy.
+/// A circle near a pixel: its index, sigma, u, d, dx, dy.
 type Near = (usize, f64, f64, f64, f64, f64);
 
 impl GroupModel<'_> {
     fn np(&self) -> usize {
-        if self.per_radius {
-            3 * self.n + 4
-        } else {
-            2 * self.n + 5
-        }
+        2 * self.n + 5
     }
-    fn ir(&self, k: usize) -> usize {
-        if self.per_radius {
-            2 * self.n + k
-        } else {
-            2 * self.n
-        }
+    fn ir(&self) -> usize {
+        2 * self.n
     }
     fn iw(&self) -> usize {
         self.np() - 4
@@ -413,11 +396,9 @@ impl GroupModel<'_> {
             }
             m += 1;
         };
-        let circles = (0..self.n)
-            .map(|k| (k, (q[2 * k], q[2 * k + 1]), q[self.ir(k)]))
-            .chain(self.fixed.iter().map(|(c, r)| (usize::MAX, *c, *r)));
-        for (k, c, r) in circles {
-            let (dx, dy) = (p.0 - c.0, p.1 - c.1);
+        let r = q[self.ir()];
+        for k in 0..self.n {
+            let (dx, dy) = (p.0 - q[2 * k], p.1 - q[2 * k + 1]);
             let d = dx.hypot(dy);
             let u = (r - d) / w;
             if u < -EDGE_CUT {
@@ -458,21 +439,14 @@ impl GroupModel<'_> {
                     continue;
                 }
                 gw += ds_du * (-u / w) * dw;
-                if k == usize::MAX {
-                    continue; // fixed: only its edge's width is shared
-                }
+                gr += ds_du / w;
                 if d > 1e-12 {
                     g.push((2 * k, ds_du * dx / (d * w)));
                     g.push((2 * k + 1, ds_du * dy / (d * w)));
                 }
-                if self.per_radius {
-                    g.push((self.ir(k), ds_du / w));
-                } else {
-                    gr += ds_du / w;
-                }
             }
-            if !self.per_radius && gr != 0.0 {
-                g.push((self.ir(0), gr));
+            if gr != 0.0 {
+                g.push((self.ir(), gr));
             }
             if gw != 0.0 {
                 g.push((self.iw(), gw));
@@ -590,28 +564,14 @@ impl GroupModel<'_> {
 /// them: inside a hole the table's colour (one unknown colour), outside the card as expected
 /// at each point, with a soft edge. That holds for any table, also for a hole across the
 /// black disc's edge (half on expected black, half on expected white). Parameters: the
-/// centres, the radius (shared by the group, or with `per_radius` one per hole, for torn
-/// edges), the edge's width, the table's colour (3). Each centre stays within `ANCHOR_MM` of
-/// its `anchor` (its shot), and moves at most `STEP_MAX_MM` a step. `fixed`: neighbours'
-/// circles, not fitted. `max_iter`: steps per round. Returns the holes and the fit's mean squared residual (to compare fits
-/// on the same pixels).
-fn fit_group(
-    px: &GroupPixels,
-    c0: &[(f64, f64)],
-    anchor: &[(f64, f64)],
-    r0: f64,
-    per_radius: bool,
-    fixed: &[((f64, f64), f64)],
-    max_iter: usize,
-) -> (Vec<HoleFit>, f64) {
+/// centres, the radius shared by the group, the edge's width, the table's colour (3). Each
+/// centre stays within `ANCHOR_MM` of its `anchor` (its shot), and moves at most
+/// `STEP_MAX_MM` a step. Returns the holes and the fit's mean squared residual (to compare
+/// counts of circles on the same pixels).
+fn fit_group(px: &GroupPixels, c0: &[(f64, f64)], anchor: &[(f64, f64)], r0: f64) -> (Vec<HoleFit>, f64) {
     let pts = &px.pts;
     let n = c0.len();
-    let model = GroupModel {
-        pts,
-        n,
-        per_radius,
-        fixed,
-    };
+    let model = GroupModel { pts, n };
     let np = model.np();
     let mut q: Vec<f64> = c0.iter().flat_map(|c| [c.0, c.1]).collect();
     // The table's colour at the start: the mean inside the starts.
@@ -622,8 +582,7 @@ fn fit_group(
         .collect();
     let t0: [f64; 3] =
         [0, 1, 2].map(|k| inside.iter().map(|c| f64::from(c[k])).sum::<f64>() / inside.len().max(1) as f64);
-    q.extend(std::iter::repeat_n(r0, if per_radius { n } else { 1 }));
-    q.extend([0.15, t0[0], t0[1], t0[2]]);
+    q.extend([r0, 0.15, t0[0], t0[1], t0[2]]);
     let limit = |q: &[f64], c: &mut [f64]| {
         for k in 0..n {
             let (mut x, mut y) = (c[2 * k], c[2 * k + 1]);
@@ -642,10 +601,8 @@ fn fit_group(
             c[2 * k] = x;
             c[2 * k + 1] = y;
         }
-        for k in 0..if per_radius { n } else { 1 } {
-            let i = model.ir(k);
-            c[i] = c[i].clamp(0.6 * r0, 1.3 * r0);
-        }
+        let i = model.ir();
+        c[i] = c[i].clamp(0.6 * r0, 1.3 * r0);
         let i = model.iw();
         c[i] = c[i].clamp(0.02, 0.8);
     };
@@ -653,7 +610,7 @@ fn fit_group(
     for round in 0..3 {
         let mut lambda = 1e-3;
         let mut cost = model.cost(&q, &w);
-        for _ in 0..max_iter {
+        for _ in 0..60 {
             let (a, gv) = model.normal(&q, &w);
             let mut improved = false;
             let mut done = false;
@@ -707,7 +664,7 @@ fn fit_group(
         .map(|k| {
             // How much the table differs from the card inside this hole (0 ink .. 1 paper units).
             let c = (q[2 * k], q[2 * k + 1]);
-            let r = q[model.ir(k)];
+            let r = q[model.ir()];
             let inner: Vec<f64> = pts
                 .iter()
                 .filter(|p| (p.0.0 - c.0).hypot(p.0.1 - c.1) < 0.7 * r)
@@ -845,8 +802,6 @@ pub struct GroundTruth {
     pub extra: Vec<HoleFit>,
     /// Whether the placement includes a fitted scale (5 or more shots spread out).
     pub scaled: bool,
-    /// How many groups of holes were fitted again (doubtful at first: `fit_at`).
-    pub refits: usize,
     /// Whether the quarter turn was judged on all the shots (not only on a part).
     pub quarter_all: bool,
 }
@@ -886,23 +841,6 @@ fn groups(points: &[(f64, f64)], gap: f64) -> Vec<Vec<usize>> {
     out
 }
 
-/// Two holes closer than this have settled on one hole (two circles on one hole lie on top of
-/// each other): fitted again from other starts.
-const MERGED_MM: f64 = 0.3;
-/// A group whose mean squared residual is this many times the photo's median (over its
-/// groups) is fitted again: a torn hole, or a start caught on the wrong hole.
-const HIGH_MSE: f64 = 3.0;
-/// A group of up to this many holes is fitted again whole; in a bigger one, each doubtful
-/// hole with the holes overlapping it, the rest held where they are.
-const LOCAL_MAX: usize = 8;
-/// At most this many doubtful holes of a big group are fitted again, and none overlapped by
-/// more than `LOCAL_MAX - 1` others: where a cluster is shot out that far, the paper shows no
-/// single holes (they stay not found).
-const REFIT_MAX: usize = 6;
-/// A fit again with as many holes that count wins only with a residual below this share of
-/// the one it would replace.
-const REFIT_GAIN: f64 = 0.98;
-
 /// A hole counts as ground truth only if its fit pins it down: its centre known to this,
 /// mm (deep in a shot-out cluster a circle can slide where the paper is gone), and its radius
 /// within `RADIUS_SPREAD_MM` of the photo's other holes (the median).
@@ -941,300 +879,24 @@ fn hole_ok(h: &HoleFit, start: (f64, f64), r0: f64) -> bool {
         && (h.center.0 - start.0).hypot(h.center.1 - start.1) < SEARCH_MM
 }
 
-/// Per hole, whether it counts and is on a hole of its own (no other of `fits`, nor of
-/// `others`, within `MERGED_MM`).
-fn counting(fits: &[HoleFit], starts: &[(f64, f64)], others: &[(f64, f64)], r0: f64) -> Vec<bool> {
-    let dist = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).hypot(a.1 - b.1);
-    fits.iter()
-        .enumerate()
-        .map(|(i, h)| {
-            hole_ok(h, starts[i], r0)
-                && fits
-                    .iter()
-                    .enumerate()
-                    .all(|(j, o)| j == i || dist(o.center, h.center) >= MERGED_MM)
-                && others.iter().all(|o| dist(*o, h.center) >= MERGED_MM)
-        })
-        .collect()
-}
-
-/// A fit of some holes, its residual, and how many of them count.
-struct Trial {
-    fits: Vec<HoleFit>,
-    mse: f64,
-    pass: usize,
-}
-
-impl Trial {
-    fn new((fits, mse): (Vec<HoleFit>, f64), starts: &[(f64, f64)], others: &[(f64, f64)], r0: f64) -> Trial {
-        let pass = counting(&fits, starts, others, r0).iter().filter(|c| **c).count();
-        Trial { fits, mse, pass }
-    }
-
-    /// More holes that count, or as many with a clearly smaller residual (on the same pixels):
-    /// not just smaller, since the circles are interchangeable (two holes swapped fit the same,
-    /// to the fit's last digits).
-    fn better_than(&self, o: &Trial) -> bool {
-        self.pass > o.pass || (self.pass == o.pass && self.mse < REFIT_GAIN * o.mse)
-    }
-}
-
-/// The centres of a fit with holes closer than a diameter pushed 0.5 mm further apart each
-/// (along the line between them, or between their starts if they coincide).
-fn pushed_apart(fits: &[HoleFit], starts: &[(f64, f64)], r0: f64) -> Vec<(f64, f64)> {
-    let mut c: Vec<(f64, f64)> = fits.iter().map(|h| h.center).collect();
-    for i in 0..fits.len() {
-        for j in i + 1..fits.len() {
-            let (a, b) = (fits[i].center, fits[j].center);
-            let d = (a.0 - b.0).hypot(a.1 - b.1);
-            if d >= 2.0 * r0 {
-                continue;
-            }
-            let (si, sj) = (starts[i], starts[j]);
-            let ds = (si.0 - sj.0).hypot(si.1 - sj.1);
-            let dir = if d > 0.05 {
-                ((a.0 - b.0) / d, (a.1 - b.1) / d)
-            } else if ds > 0.05 {
-                ((si.0 - sj.0) / ds, (si.1 - sj.1) / ds)
-            } else {
-                (1.0, 0.0)
-            };
-            c[i] = (c[i].0 + 0.5 * dir.0, c[i].1 + 0.5 * dir.1);
-            c[j] = (c[j].0 - 0.5 * dir.0, c[j].1 - 0.5 * dir.1);
-        }
-    }
-    c
-}
-
-/// Holes fitted again, on the same pixels: from the matched filter's peaks near each start,
-/// and from `first` with close holes pushed apart; if a hole still does not count, also
-/// with a radius per hole (a torn edge). The best wins (`better_than`), `first` included;
-/// the radius per hole only on more holes that count.
-#[allow(clippy::too_many_arguments)]
-fn refit(
-    rgb: &Rgb,
-    map: &Mapping,
-    exp: &Expected,
-    px: &GroupPixels,
-    starts: &[(f64, f64)],
-    r0: f64,
-    fixed: &[((f64, f64), f64)],
-    first: Trial,
-) -> Trial {
-    let others: Vec<(f64, f64)> = fixed.iter().map(|f| f.0).collect();
-    let peaks: Vec<(f64, f64)> = starts
-        .iter()
-        .map(|s| {
-            Field::new(rgb, map, exp, *s, 2.0 + 2.0 * r0 + 1.0, 5.0)
-                .best_near(*s, 2.0, r0)
-                .0
-        })
-        .collect();
-    let apart = pushed_apart(&first.fits, starts, r0);
-    let strict = crate::par_map(&[&peaks, &apart], |c| {
-        Trial::new(
-            fit_group(px, c, starts, r0, false, fixed, REFIT_ITER),
-            starts,
-            &others,
-            r0,
-        )
-    });
-    let mut best = first;
-    for t in strict {
-        if t.better_than(&best) {
-            best = t;
-        }
-    }
-    if best.pass < starts.len() {
-        let loose = crate::par_map(&[starts, &apart[..]], |c| {
-            Trial::new(
-                fit_group(px, c, starts, r0, true, fixed, REFIT_ITER),
-                starts,
-                &others,
-                r0,
-            )
-        });
-        for t in loose {
-            if t.pass > best.pass {
-                best = t;
-            }
-        }
-    }
-    best
-}
-
-/// A group fitted, and how it went.
-struct GroupFit {
-    fits: Vec<HoleFit>,
-    mse: f64,
-    pass: usize,
-    refit: bool,
-}
-
-/// A doubtful group fitted again: a small one whole (`refit`); in a big one, each doubtful
-/// hole (up to `REFIT_MAX`, not crowded) with the holes overlapping it, the others held as
-/// first fitted, kept where more of those holes count.
-fn refit_group(
-    rgb: &Rgb,
-    map: &Mapping,
-    exp: &Expected,
-    px: &GroupPixels,
-    cs: &[(f64, f64)],
-    r0: f64,
-    first: GroupFit,
-) -> GroupFit {
-    let n = cs.len();
-    if n <= LOCAL_MAX {
-        let t = refit(
-            rgb,
-            map,
-            exp,
-            px,
-            cs,
-            r0,
-            &[],
-            Trial {
-                fits: first.fits,
-                mse: first.mse,
-                pass: first.pass,
-            },
-        );
-        return GroupFit {
-            fits: t.fits,
-            mse: t.mse,
-            pass: t.pass,
-            refit: true,
-        };
-    }
-    let reach = r0 + 1.5;
-    let mut fits = first.fits;
-    let dist = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).hypot(a.1 - b.1);
-    // Each doubtful hole with those overlapping it (by shot or by fit), unless crowded.
-    let subs: Vec<Vec<usize>> = counting(&fits, cs, &[], r0)
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| !**c)
-        .map(|(i, _)| {
-            (0..n)
-                .filter(|&j| {
-                    dist(cs[j], cs[i]) < 2.0 * r0 + 1.0
-                        || dist(fits[j].center, fits[i].center) < 2.0 * r0 + 1.0
-                })
-                .collect::<Vec<usize>>()
-        })
-        .filter(|sub| sub.len() <= LOCAL_MAX)
-        .take(REFIT_MAX)
-        .collect();
-    // All from the first fit, on the cores; then kept in turn where more of their holes
-    // count, unless they share a hole with one kept already.
-    let tried: Vec<Option<Trial>> = crate::par_map(&subs, |sub| {
-        let starts: Vec<(f64, f64)> = sub.iter().map(|&j| cs[j]).collect();
-        let fixed: Vec<((f64, f64), f64)> = (0..n)
-            .filter(|j| !sub.contains(j))
-            .filter(|&j| {
-                starts
-                    .iter()
-                    .any(|s| dist(fits[j].center, *s) < reach + 2.0 * r0 + 2.0)
-            })
-            .map(|j| (fits[j].center, fits[j].radius_mm))
-            .collect();
-        let others: Vec<(f64, f64)> = fixed.iter().map(|f| f.0).collect();
-        let spx = GroupPixels::new(rgb, map, exp, &starts, reach, px.res);
-        let from: Vec<(f64, f64)> = sub.iter().map(|&j| fits[j].center).collect();
-        let base = Trial::new(
-            fit_group(&spx, &from, &starts, r0, false, &fixed, REFIT_ITER),
-            &starts,
-            &others,
-            r0,
-        );
-        let base_pass = base.pass;
-        let t = refit(rgb, map, exp, &spx, &starts, r0, &fixed, base);
-        (t.pass > base_pass).then_some(t)
-    });
-    let mut taken: Vec<usize> = Vec::new();
-    for (sub, t) in subs.iter().zip(tried) {
-        let Some(t) = t else { continue };
-        if sub.iter().any(|j| taken.contains(j)) {
-            continue;
-        }
-        for (k, &j) in sub.iter().enumerate() {
-            fits[j] = t.fits[k].clone();
-        }
-        taken.extend(sub);
-    }
-    let pass = counting(&fits, cs, &[], r0).iter().filter(|c| **c).count();
-    GroupFit {
-        fits,
-        mse: first.mse,
-        pass,
-        refit: true,
-    }
-}
-
 /// Fits the holes at card points `starts` (grouped when close; the groups on the machine's
-/// cores), and fits doubtful groups again (`refit_group`): a hole that does not count, two
-/// holes on one, a residual far above the photo's other groups. Returns the holes and how many
-/// groups were fitted again.
-fn fit_at(
-    rgb: &Rgb,
-    reg: &Registration,
-    exp: &Expected,
-    starts: &[(f64, f64)],
-    res: f64,
-) -> (Vec<HoleFit>, usize) {
+/// cores, the biggest first).
+fn fit_at(rgb: &Rgb, reg: &Registration, exp: &Expected, starts: &[(f64, f64)], res: f64) -> Vec<HoleFit> {
     let r0 = HOLE_D_MM / 2.0;
-    let reach = r0 + 1.5;
     let mut groups = groups(starts, 2.0 * r0 + 1.0);
-    // The biggest first, so no core is left with a big group at the end.
     groups.sort_by_key(|g| std::cmp::Reverse(g.len()));
-    let starts_of = |g: &[usize]| -> Vec<(f64, f64)> { g.iter().map(|&i| starts[i]).collect() };
-    let mut fitted: Vec<GroupFit> = crate::par_map(&groups, |g| {
-        let cs = starts_of(g);
-        let px = GroupPixels::new(rgb, &reg.map, exp, &cs, reach, res);
-        let t = Trial::new(fit_group(&px, &cs, &cs, r0, false, &[], FIT_ITER), &cs, &[], r0);
-        let first = GroupFit {
-            fits: t.fits,
-            mse: t.mse,
-            pass: t.pass,
-            refit: false,
-        };
-        if first.pass < cs.len() {
-            refit_group(rgb, &reg.map, exp, &px, &cs, r0, first)
-        } else {
-            first
-        }
+    let fitted: Vec<Vec<HoleFit>> = crate::par_map(&groups, |g| {
+        let cs: Vec<(f64, f64)> = g.iter().map(|&i| starts[i]).collect();
+        let px = GroupPixels::new(rgb, &reg.map, exp, &cs, r0 + 1.5, res);
+        fit_group(&px, &cs, &cs, r0).0
     });
-    if fitted.len() >= 3 {
-        let mut m: Vec<f64> = fitted.iter().map(|f| f.mse).collect();
-        m.sort_by(|a, b| a.total_cmp(b));
-        let limit = HIGH_MSE * m[m.len() / 2];
-        let again: Vec<usize> = (0..fitted.len())
-            .filter(|&i| !fitted[i].refit && fitted[i].mse > limit && groups[i].len() <= LOCAL_MAX)
-            .collect();
-        let refits: Vec<GroupFit> = crate::par_map(&again, |&i| {
-            let cs = starts_of(&groups[i]);
-            let px = GroupPixels::new(rgb, &reg.map, exp, &cs, reach, res);
-            let f = &fitted[i];
-            let first = GroupFit {
-                fits: f.fits.clone(),
-                mse: f.mse,
-                pass: f.pass,
-                refit: false,
-            };
-            refit_group(rgb, &reg.map, exp, &px, &cs, r0, first)
-        });
-        for (i, f) in again.into_iter().zip(refits) {
-            fitted[i] = f;
-        }
-    }
-    let refits = fitted.iter().filter(|f| f.refit).count();
     let mut out = vec![None; starts.len()];
-    for (g, f) in groups.iter().zip(fitted) {
-        for (k, h) in f.fits.into_iter().enumerate() {
+    for (g, fits) in groups.iter().zip(fitted) {
+        for (k, h) in fits.into_iter().enumerate() {
             out[g[k]] = Some(h);
         }
     }
-    (out.into_iter().map(|h| h.unwrap()).collect(), refits)
+    out.into_iter().map(|h| h.unwrap()).collect()
 }
 
 /// Every hole in the scoring area, without shots (the test cards): the filter's peaks over
@@ -1299,7 +961,7 @@ fn find_all(rgb: &Rgb, reg: &Registration, exp: &Expected, skip: &[(f64, f64)]) 
         for n in n0..=(n0 + 2).min(8) {
             let starts = farthest_points(pts, n);
             let px = GroupPixels::new(rgb, &reg.map, exp, &starts, r0 + 1.5, 10.0);
-            let (fits, mse) = fit_group(&px, &starts, &starts, r0, false, &[], FIT_ITER);
+            let (fits, mse) = fit_group(&px, &starts, &starts, r0);
             let apart = fits.iter().enumerate().all(|(i, a)| {
                 fits[i + 1..]
                     .iter()
@@ -1515,7 +1177,6 @@ struct Matched {
     scaled: bool,
     /// Pairs left out as far beyond the rest, in the last round.
     dropped: usize,
-    refits: usize,
 }
 
 fn match_from(
@@ -1558,12 +1219,9 @@ fn match_from(
     let with_scale = shots.len() >= 5 && spread > 20.0;
     let mut fits = Vec::new();
     let mut dropped = 0;
-    let mut refits = 0;
     for _ in 0..2 {
         let starts: Vec<(f64, f64)> = shots.iter().map(|s| placement.apply(*s)).collect();
-        let (f, n) = fit_at(rgb, reg, exp, &starts, 10.0);
-        fits = f;
-        refits += n;
+        fits = fit_at(rgb, reg, exp, &starts, 10.0);
         // A hole counts if it is clear, round, and near where its shot says.
         let good = pinned(&fits, &starts, r0);
         let mut pairs: Vec<Pair> = shots
@@ -1632,7 +1290,6 @@ fn match_from(
         rms_mm: rms,
         scaled: with_scale,
         dropped,
-        refits,
     })
 }
 
@@ -1684,7 +1341,6 @@ pub fn ground_truth(rgb: &Rgb, reg: &Registration, shots: &[(f64, f64)]) -> Resu
         rms_mm: m.rms_mm,
         extra,
         scaled: m.scaled,
-        refits: m.refits,
         quarter_all,
     })
 }
@@ -1712,22 +1368,12 @@ mod tests {
         pts
     }
 
-    fn check(per_radius: bool) {
+    #[test]
+    fn derivatives() {
         let pts = pixels();
-        let fixed = [((0.8, -1.5), 2.0), ((-2.5, 2.5), 2.3)];
-        let model = GroupModel {
-            pts: &pts,
-            n: 3,
-            per_radius,
-            fixed: &fixed,
-        };
+        let model = GroupModel { pts: &pts, n: 3 };
         let mut q = vec![-1.0, 0.2, 1.1, -0.3, 0.4, 1.6];
-        q.extend(if per_radius {
-            vec![2.1, 2.3, 2.0]
-        } else {
-            vec![2.2]
-        });
-        q.extend([0.17, 0.3, 0.5, 0.4]);
+        q.extend([2.2, 0.17, 0.3, 0.5, 0.4]);
         assert_eq!(q.len(), model.np());
         let w: Vec<f64> = (0..pts.len()).map(|i| 0.5 + (i % 7) as f64 / 7.0).collect();
         let resid = |q: &[f64]| -> Vec<f64> {
@@ -1767,16 +1413,6 @@ mod tests {
         );
         let cost: f64 = r0.iter().map(|x| x * x).sum();
         assert!((model.cost(&q, &w) - cost).abs() < 1e-9 * cost);
-    }
-
-    #[test]
-    fn derivatives_shared_radius() {
-        check(false);
-    }
-
-    #[test]
-    fn derivatives_radius_per_hole() {
-        check(true);
     }
 
     #[test]

@@ -413,7 +413,7 @@ fn run(case: &Case, tex: &CardTexture) -> Value {
     json!({
         "name": case.name, "reg_s": t_reg, "holes_s": secs, "shots_n": shots.len(),
         "quarter": gt.placement.quarter, "angle": gt.placement.angle, "shift": [gt.placement.shift.0, gt.placement.shift.1],
-        "scale": gt.placement.scale, "rms_mm": gt.rms_mm, "scaled": gt.scaled, "refits": gt.refits, "quarter_all": gt.quarter_all,
+        "scale": gt.placement.scale, "rms_mm": gt.rms_mm, "scaled": gt.scaled, "quarter_all": gt.quarter_all,
         "shots": per,
         "extra": gt.extra.iter().map(hole_json).collect::<Vec<_>>(),
         "truth": truth.as_ref().map(|_| json!({"should": should, "found": found, "wrong": wrong, "false_found": false_found, "rms": rms, "worst": worst})),

@@ -311,9 +311,8 @@ fn own_holes(name: &str, p: &Params, shots: &[(f64, f64)]) -> (usize, f64, f64) 
         }
     }
     println!(
-        "{name}: {found} of {} found, worst {worst:.3} mm, {secs:.1} s, {} groups fitted again",
-        shots.len(),
-        gt.refits
+        "{name}: {found} of {} found, worst {worst:.3} mm, {secs:.1} s",
+        shots.len()
     );
     (found, worst, secs)
 }
