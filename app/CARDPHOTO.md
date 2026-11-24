@@ -13,8 +13,8 @@ and reviews the results.
 |---|---|---|
 | C1 | Registration from the rings (`app/cardphoto/`) | synthetic tests pass (2026-11-23); real photos in C5 |
 | C2 | The holes: finding them, matching them to the shots | synthetic tests pass (2026-11-23); real holes in C5 |
-| C3 | The upload: QR code, the phone page, storage | tests over HTTP pass (2026-11-23); the phone: the user, once |
-| C4 | In the app: the photo under the shots, the ground-truth panel | the processing passes through the app's path (2026-11-23); the UI: a look by the user |
+| C3 | The upload: QR code, the phone page, storage | tests over HTTP pass (2026-11-23); the phone test passes (the user, 2026-11-24) |
+| C4 | In the app: the photo under the shots, the ground-truth panel | the processing passes through the app's path (2026-11-23); the UI looked at and accepted (the user, 2026-11-24) |
 | C5 | Real photos: registration (no holes), then holes | waiting for the photos |
 | C6 | The serial number from the photo | later |
 
@@ -273,6 +273,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-24 | C3, C4 | The user: the phone test (`PHONE_WAIT=120 cargo test lan -- --ignored`), and a look at the UI with `OPENSIGHTS_DEMO_PHOTO=1 cargo run` | **Pass**, both (the user's report). Merged to `main`. C5 waits for real photos. |
 | 2026-11-23 | C4 | The score on paper (the user's wish): the "Paper" column in the series list; `cargo test` run by Claude | **Pass**, tests 1–3 (2 extended): every shot's paper position within 0.1 mm of its punched hole, the same score as the punched point; 6 of the demo's 8 shots score differently in tenths on paper (the card 0.8 mm off in the holder). The UI: to be looked at (the user). |
 | 2026-11-23 | C4 | The view decided with the user: everything in the sensor's frame, the app's card drawn where the real card hung; the print's way up from the numbers; `cargo test` run by Claude | **Pass**, tests 1–3 (2 and 2a extended). The numbers found the quarter turn with a margin of 0.18 (with shots) and 0.18 (without), against 0.1 needed; with the app's own font (the demo's card is the app's SVG): a real card's font will match less well, C5 will tell. The printed card's pose −90.44° (true −90.5°), its centre (+0.406, +0.695) mm (true +0.406, +0.696). The UI: to be looked at again (the user). |
 | 2026-11-23 | C4 | The user's look at the demo: the photo's rings beside the printed card's, about 0.8 mm apart, its numbers turned 90°; then test 2 added, run by Claude | **The photo is placed right; the view mixes two frames.** The disc's centre: the printed card (+0.007, −0.011) mm (the measurement), the photo without the placement (−0.010, +0.015) (the registration), with it (+0.388, +0.707) against the demo's card centre (+0.406, +0.696). The demo puts the card 0.8 mm off the sensor's centre and turned 90.5° in the holder; the card view draws the printed card centred and upright in the sensor's frame, and the photo where the real card hung. So the rings can't coincide, and the numbers show turned. Test 1's check (the table under each shot) would have passed a 2 mm error: test 2 now measures the photo's place. Open: which frame the view should use (to decide with the user). |
