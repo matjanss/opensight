@@ -297,8 +297,10 @@ fn handle(shared: &Shared, mut req: Request) {
                 Ok(photo) => {
                     // Used: the link works once.
                     shared.offers.lock().unwrap().remove(token);
-                    respond(req, 200, TEXT, "Received. You can close this page.");
+                    // The app first, then the phone: whoever hears "received" can count on
+                    // the app having the photo (a test reads the event right after the answer).
                     shared.send(UploadEvent::Received(photo));
+                    respond(req, 200, TEXT, "Received. You can close this page.");
                 }
                 Err(e) => refuse(req, 415, e),
             }
