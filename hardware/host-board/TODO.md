@@ -24,6 +24,10 @@ ready to order.
 - [x] **Afterwards** (2026-11-24): the south half laid out again (76 × 132 mm), the board
   routed again with 0.4/0.6/0.8 mm tracks; the schematic PDF and the assembly PDF made again
   (the parts list had the new parts already). DRC and ERC clean.
+- [x] **The user's look and rework** (2026-11-24): the routing reworked in KiCad. DRC with
+  the zones refilled (`kicad-cli pcb drc --refill-zones`, on a copy): 0 errors, 0 unconnected
+  pads, 2 silkscreen warnings. The board is saved without its zone fill: **refill the zones
+  (B) and save before making the Gerbers**, or GND and AGND are left unconnected (79 pads).
 
 ## On the bench, once it's built
 
