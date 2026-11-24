@@ -3,7 +3,21 @@
 - `host_board.step`: the board with its parts and silkscreen, for CAD.
 - `host_board.stl`: the same as a binary mesh, for a quick look or a slicer.
 
-Both are flat (below).
+- `host_board_simplified.step` / `.stl`: only what the case has to fit around:
+  - the bare board as a solid 1.6 mm plate, with no holes or vias (not even the M3 holes:
+    their positions are below);
+  - the NodeMCU's two 1×19 sockets (not the module: it stands 15.7 mm above the board
+    when fitted);
+  - the DIP sockets (U3, U4), the trimpot (RV1), the electrolytic capacitors (C1, C3, C5,
+    C7, C8, C11, C18);
+  - the connectors without their pins: the JST XH housings (J1–J7, J11–J18) and the pin
+    headers' plastic (J21–J28, JP1). The pins are cut out as 0.75 mm squares, so each pin
+    leaves a small square hole in its housing.
+
+  Left out: the resistors, the disc capacitors, the TO-92 parts, the diode, the test
+  loops. The tallest part is C1, 11.0 mm above the board.
+
+All are flat (below).
 
 Made by `hardware/export_mechanical.py`: kicad-cli (KiCad 10) exports the board, then
 CadQuery cuts off everything below the board. Run it with a Python that has CadQuery 2.x
