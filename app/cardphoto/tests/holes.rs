@@ -8,7 +8,7 @@ use cardphoto::register::{Registration, register};
 use cardphoto::synth::{Params, Rng, photo_rgb};
 
 mod common;
-use common::texture;
+use common::{layouts, texture};
 
 /// In the black, in the white, on ring lines (ring 6 at 37.75, the disc's edge at 29.75, ring 2
 /// at 69.75), near the centre, and three overlapping.
@@ -291,4 +291,98 @@ fn dark_table_never_misplaces() {
     let missing = gt.shots.iter().filter(|r| r.hole.is_none()).count();
     println!("dark table: {missing} of {} holes not found", shots.len());
     assert!(c.worst_hole < 0.1, "a hole misplaced by {}", c.worst_hole);
+}
+
+/// Each shot's own hole (`p.holes[i]` for shot i): how many found, the worst error against
+/// the truth (mm), and how long the holes took.
+fn own_holes(name: &str, p: &Params, shots: &[(f64, f64)]) -> (usize, f64, f64) {
+    let (rgb, truth) = photo_rgb(texture(), p);
+    let reg = register(&rgb.to_gray(), &issf_air_pistol()).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let t = std::time::Instant::now();
+    let gt = ground_truth(&rgb, &reg, shots).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let secs = t.elapsed().as_secs_f64();
+    let mut worst = 0.0f64;
+    let mut found = 0;
+    for (r, want) in gt.shots.iter().zip(&p.holes) {
+        if let Some(h) = &r.hole {
+            let c = to_truth(&reg, &truth, h.center);
+            worst = worst.max((c.0 - want.0).hypot(c.1 - want.1));
+            found += 1;
+        }
+    }
+    println!(
+        "{name}: {found} of {} found, worst {worst:.3} mm, {secs:.1} s, {} groups fitted again",
+        shots.len(),
+        gt.refits
+    );
+    (found, worst, secs)
+}
+
+/// Pairs 0.5 to 4 mm apart (in the black, the white, across the disc's edge) and two
+/// triples 1.5 mm apart: every hole found, on its own shot's hole, with the shots' noise at
+/// 0.1 and at 0.3 mm (where a pair's two shots can swap places).
+#[test]
+fn overlapping_pairs() {
+    for (noise, seed) in [(0.1, 301), (0.3, 302)] {
+        let p = layouts::demo_params(layouts::pairs(), seed);
+        let shots = layouts::shots_for(&p.holes, 270.3f64.to_radians(), (0.4, 1.2), noise, seed + 1000);
+        let (found, worst, _) = own_holes(&format!("pairs, noise {noise} mm"), &p, &shots);
+        assert_eq!(found, shots.len(), "noise {noise}: a hole not found");
+        assert!(worst < 0.25, "noise {noise}: a hole {worst} mm off");
+    }
+}
+
+/// Torn edges (the radius varying round each hole by 0.1 and 0.25 mm rms): every hole found,
+/// the centre off by about the tear.
+#[test]
+fn ragged_holes() {
+    for (ragged, limit) in [(0.1, 0.12), (0.25, 0.35)] {
+        let p = Params {
+            rotation_deg: 33.0,
+            tilt_x_deg: 4.0,
+            holes: layouts::nine(),
+            hole_ragged_mm: ragged,
+            table: 0.3,
+            table_rgb: Some(BLUE),
+            light: 0.2,
+            blur_px: 1.0,
+            noise: 0.02,
+            seed: 81,
+            ..Params::default()
+        };
+        let shots = layouts::shots_for(&p.holes, 90.4f64.to_radians(), (0.2, -0.3), 0.1, 82);
+        let (found, worst, _) = own_holes(&format!("ragged {ragged} mm"), &p, &shots);
+        assert_eq!(found, shots.len(), "ragged {ragged}: a hole not found");
+        assert!(worst < limit, "ragged {ragged}: a hole {worst} mm off");
+    }
+}
+
+/// A tight group (20 shots, 6 mm sd): in its shot-out middle the paper shows no single holes.
+/// Those are not found; the holes found are on their own shots' holes.
+#[test]
+fn dense_group_never_misplaced() {
+    let p = layouts::demo_params(layouts::series(20, 6.0, (2.0, -3.0), 201), 201);
+    let shots = layouts::shots_for(&p.holes, 89.4f64.to_radians(), (-0.9, 0.5), 0.15, 1201);
+    let (found, worst, _) = own_holes("dense group", &p, &shots);
+    assert!(found >= 6, "only {found} found");
+    assert!(worst < 0.2, "a hole {worst} mm off");
+}
+
+/// The app's demo of 41 shots, which once took 85 s: every hole, and well within the time.
+#[test]
+fn demo_41_shots_in_time() {
+    let (angle, shift) = (90.5f64.to_radians(), (0.7, -0.4));
+    let mut rng = Rng::new(7);
+    let holes = layouts::SHOTS41
+        .iter()
+        .map(|s| {
+            let c = layouts::place(angle, shift, *s);
+            (c.0 + 0.1 * rng.gauss(), c.1 + 0.1 * rng.gauss())
+        })
+        .collect();
+    let p = layouts::demo_params(holes, 7);
+    let (found, worst, secs) = own_holes("demo, 41 shots", &p, &layouts::SHOTS41);
+    assert_eq!(found, 41);
+    assert!(worst < 0.06, "a hole {worst} mm off");
+    assert!(secs < 30.0, "{secs} s");
 }

@@ -23,6 +23,41 @@ pub mod synth;
 
 use nalgebra::{Matrix3, Vector3};
 
+/// `f` over `items` on the machine's cores, the results in the items' order. Each item is
+/// worked on alone, so the results are the same as one by one.
+pub(crate) fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(items.len());
+    if threads <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let parts: Vec<Vec<(usize, R)>> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= items.len() {
+                            break;
+                        }
+                        done.push((i, f(&items[i])));
+                    }
+                    done
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().unwrap()).collect()
+    });
+    let mut out: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
+    for (i, r) in parts.into_iter().flatten() {
+        out[i] = Some(r);
+    }
+    out.into_iter().map(Option::unwrap).collect()
+}
+
 /// A greyscale image, values 0 (black) to 1 (white), row by row.
 #[derive(Clone, Debug)]
 pub struct Gray {

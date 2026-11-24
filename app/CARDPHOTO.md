@@ -90,6 +90,30 @@ Builds (in `cardphoto`, `src/holes.rs`):
   from the placed shots, the placement again (twice, robustly). Per shot, the hole minus the
   placed shot is the sensor's error. A shot with no clear, round hole near it is reported as
   such (a false shot, or a hole not visible); holes no shot explains are found as below.
+- **The fit's arithmetic** (2026-11-24): the derivatives worked out directly, each pixel
+  with only the circles near it (beyond 36 edge widths a circle's share is below a double's
+  resolution), the normal equations built pixel by pixel; big groups in chunks on the cores,
+  the groups, the quarter turns and the blobs each on a core. The same cost, the same steps:
+  the same holes as before to 0.00001 mm, in a fraction of the time (a 41-shot card 85 s →
+  1.4 s). Each centre stays within 4.5 mm of its shot and moves at most 1 mm a step: deep in
+  a shot-out cluster a circle hidden by its neighbours has no say in any pixel, and used to
+  run off by metres, dragging the group's shared radius down to its limit.
+- **The quarter turn** is judged on 10 shots spread over the series (the outer ones), on
+  all of them when the runner-up scores 80 % of the best or more, or when a shot then finds
+  no hole or pairs are left out as outliers (the turn that matches more holes wins). Each
+  turn counts only the coarse holes that agree on one placement within 2 mm: turned 90°, a
+  tight group around the centre lands on itself and finds holes everywhere, but scattered.
+- **Doubtful groups fitted again:** a hole that does not count, two holes on one (centres
+  within 0.3 mm), or a residual over 3 times the photo's median group. A group of up to 8
+  holes whole; in a bigger one each doubtful hole with those overlapping it, the rest held
+  (at most 6, none overlapped by more than 7 others: there the paper shows no single
+  holes). Tried: from the matched filter's peaks, from the fit with close holes pushed
+  apart, and if a hole still does not count, with a radius per hole (a torn edge). A try
+  wins with more holes that count, or as many and a residual 2 % lower (not just lower:
+  two holes swapped fit the same to the last digits).
+- **A hole counts as ground truth** only when its fit pins it down: its centre known to
+  0.25 mm, its radius within 0.2 mm of the photo's median. Otherwise it is reported as not
+  found: a wrong hole is worse than a missing one.
 - **Unguided** (no shots: the test cards; and the holes no shot explains): blobs where the
   photo differs from the card, at least half a hole's area (the numbers' strokes are
   smaller); per blob, the count of holes from its area, then one or two more if they clearly
@@ -103,7 +127,17 @@ turn always right; the placement as good as the shots' noise allows (with 9 shot
 noise and 4 placement values about 0.07 mm rms at the shots); a false shot and an unmatched
 hole flagged; a clean card with no holes found (the printed numbers aren't holes); the
 unguided search finding every hole; on a table as dark as the ink, holes in the black not
-found, but none placed wrong.
+found, but none placed wrong. Added 2026-11-24: pairs 0.5–4 mm apart and triples 1.5 mm
+apart, with the shots' noise at 0.1 and 0.3 mm, every hole on its own shot's hole within
+**0.25 mm**; torn edges (0.1 and 0.25 mm rms) within 0.12 and 0.35 mm; a tight group (20
+shots, 6 mm sd) with no hole off by 0.2 mm or more (its shot-out middle not found); the
+41-shot demo within 0.06 mm and 30 s.
+
+**Comparing two versions:** `cargo run --release -p cardphoto --example holes_bench --
+[--jobs N] [--only a,b] [--photos <the app's photos/>] > out.jsonl` runs a fixed set of
+cases (the tests' cards, series of 20–60 shots, pairs, torn holes, and the stored photos
+with their shots), one JSON line each: the holes, the placement, the time, and for the
+synthetic ones each shot's error against its own hole.
 
 **For the photos (C5 and the shooter's guide):** put the card on a mid-grey or coloured
 surface (a coloured folder, a cutting mat), not black and not white: a black table hides the
@@ -273,6 +307,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-24 | C2 | The holes made faster (the user: "the analysis takes a long time"), old and new compared by `holes_bench` on 38 cases (24 synthetic, 14 stored demo photos), run by Claude | **Pass.** Before: 3–5 s a photo, 85 s for 41 shots (a group of 16 touching holes fitted together, the cost growing as n³ with a numerical Jacobian), minutes for denser series. Now: the stored photos 0.1–1.3 s, the 41-shot demo 1.4 s (115 s before), the pairs about 1 s (18–23 s). The same holes as before to 0.00001 mm on the tests' cards, the stored photos and the demo. **Found on the way:** (1) in shot-out clusters, circles hidden by their neighbours ran off by metres and pulled the shared radius to 1.35 mm, both versions: now held to their shots. (2) A refit that only lowered the residual could swap a pair's two holes (the same fit): 4 of 42 holes 0.5–1.5 mm off at 0.3 mm noise; now it needs 2 % less. (3) Tight central groups got the wrong quarter turn (rms 16–19 mm): now only holes agreeing on one placement count. (4) Holes in a shot-out middle were reported found but off by 1–4 mm: now those not pinned down (sd over 0.25 mm, radius off the median by 0.2 mm) are not found. Dense series (20–60 shots, 6–10 mm sd): about 10–40 s (the old code 4–56 minutes, or an error); 20 shots at 6 mm sd: 9 found, none off (before: 12, 3 of them up to 1.9 mm off); torn pairs: the same correct holes, fewer wrong (13 → 7, the worst 0.56 → 0.27 mm). One case worse: 20 shots at 6 mm sd with torn edges, the same count (13, 3 more than 0.2 mm off) but the worst 1.65 mm against 0.37. 4 new tests (`overlapping_pairs`, `ragged_holes`, `dense_group_never_misplaced`, `demo_41_shots_in_time`); `cargo test` passes (cardphoto 10 + 7 + 6). |
 | 2026-11-24 | C4 | The user's wishes: the photo window closes once the photo is processed (an error keeps it open); the results in the series panel as a table, columns #, OpenSights, Paper (both red where they differ), shot x, y, hole − shot, off, with the summary and warnings above and the photo's buttons below; a click on a series row opens the shot's popup on the card. `cargo test` run by Claude | **Built**, `cargo test` passes (68, 1 ignored: the phone); no warnings. The UI: to be looked at (the user), with `OPENSIGHTS_DEMO_PHOTO=1 cargo run` (the Card photo window's demo button). |
 | 2026-11-24 | C3 | CI on Windows (GitHub runner), `cargo test` | **Fail, then fixed.** `too_large_and_not_a_photo_refused`: the chunked upload's 413 came back empty. The server answered after 1 MB and closed with the rest unread; Windows then resets the connection and the answer is lost (a phone would see a broken upload, not "too large"). Now a refused upload is read and dropped (up to 64 MB) before the answer. Linux: the test 30 times in a row, and the whole `cargo test`, pass; Windows: the next CI run. |
 | 2026-11-24 | C3, C4 | The user: the phone test (`PHONE_WAIT=120 cargo test lan -- --ignored`), and a look at the UI with `OPENSIGHTS_DEMO_PHOTO=1 cargo run` | **Pass**, both (the user's report). Merged to `main`. C5 waits for real photos. |

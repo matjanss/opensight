@@ -39,6 +39,9 @@ pub struct Params {
     /// Holes: card mm (centre origin, y up) and diameter mm.
     pub holes: Vec<(f64, f64)>,
     pub hole_d_mm: f64,
+    /// A ragged edge (torn paper): each hole's radius varies around it by this much (rms, mm),
+    /// a random sum of harmonics 2 to 10 per hole. 0: round holes.
+    pub hole_ragged_mm: f64,
     /// The table's mean level (0..1) and its texture's strength.
     pub table: f32,
     /// The table's colour, if not grey (`table` is then its brightness for the texture).
@@ -67,6 +70,7 @@ impl Default for Params {
             bend_mm: 0.0,
             holes: vec![],
             hole_d_mm: 4.5,
+            hole_ragged_mm: 0.0,
             table: 0.2,
             table_rgb: None,
             table_texture: 0.06,
@@ -192,7 +196,49 @@ pub fn photo_rgb(tex: &CardTexture, p: &Params) -> (Rgb, Mapping) {
     let bend = |x: f64| p.bend_mm * (x / half) * (x / half);
     let mut out = Rgb::new(p.w, p.h);
     let table_rgb = p.table_rgb.unwrap_or([p.table; 3]);
-    let hole_r2 = (p.hole_d_mm / 2.0) * (p.hole_d_mm / 2.0);
+    let hole_r = p.hole_d_mm / 2.0;
+    let hole_r2 = hole_r * hole_r;
+    // Ragged edges: per hole, harmonics m = 2..10 (amplitude ~ 1/m, random phase), scaled to
+    // the rms asked for.
+    let ragged: Vec<Vec<(f64, f64)>> = (0..p.holes.len())
+        .map(|i| {
+            if p.hole_ragged_mm <= 0.0 {
+                return Vec::new();
+            }
+            let mut rng = Rng::new(p.seed ^ (0xA5A5 + i as u64));
+            let raw: Vec<(f64, f64)> = (2..=10)
+                .map(|m| {
+                    (
+                        (0.5 + rng.uniform()) / m as f64,
+                        std::f64::consts::TAU * rng.uniform(),
+                    )
+                })
+                .collect();
+            let rms = (raw.iter().map(|(a, _)| a * a / 2.0).sum::<f64>()).sqrt();
+            raw.into_iter()
+                .map(|(a, ph)| (a * p.hole_ragged_mm / rms, ph))
+                .collect()
+        })
+        .collect();
+    let reach2 = (hole_r + 4.0 * p.hole_ragged_mm).powi(2);
+    let in_hole = |q: (f64, f64)| -> bool {
+        p.holes.iter().zip(&ragged).any(|(h, rg)| {
+            let d2 = (q.0 - h.0).powi(2) + (q.1 - h.1).powi(2);
+            if rg.is_empty() {
+                return d2 < hole_r2;
+            }
+            if d2 >= reach2 {
+                return false;
+            }
+            let phi = (q.1 - h.1).atan2(q.0 - h.0);
+            let r = hole_r
+                + rg.iter()
+                    .enumerate()
+                    .map(|(k, (a, ph))| a * ((k + 2) as f64 * phi + ph).cos())
+                    .sum::<f64>();
+            d2 < r * r
+        })
+    };
     // Each pixel averages 3 x 3 points over its area, as a sensor's pixel does (no aliasing
     // of the thin ring lines).
     const SS: usize = 3;
@@ -217,11 +263,7 @@ pub fn photo_rgb(tex: &CardTexture, p: &Params) -> (Rgb, Mapping) {
                     }
                     let tn = 1.0 + p.table_texture * table_noise(px, py, p.seed) as f32 / p.table.max(0.05);
                     let table = table_rgb.map(|c| c * tn);
-                    let in_hole = p
-                        .holes
-                        .iter()
-                        .any(|h| (q.0 - h.0).powi(2) + (q.1 - h.1).powi(2) < hole_r2);
-                    let v = if q.0.abs() < half && q.1.abs() < half && !in_hole {
+                    let v = if q.0.abs() < half && q.1.abs() < half && !in_hole(q) {
                         let tx = (q.0 + half) * tex.px_per_mm - 0.5;
                         let ty = (half - q.1) * tex.px_per_mm - 0.5;
                         match tex.img.sample(tx, ty) {

@@ -1,5 +1,7 @@
 //! What the tests share: the app's card, rendered once.
 
+pub mod layouts;
+
 use std::sync::{Arc, OnceLock};
 
 use cardphoto::Gray;

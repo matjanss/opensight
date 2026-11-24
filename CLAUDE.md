@@ -119,6 +119,10 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   encoding against the examples in PROTOCOL.md, and the event log's lines against the
   firmware's. On Linux the app builds libdbus from source (`vendored`), so no
   `libdbus-1-dev` is needed.
+- **Card photos' holes, two versions compared:** `cargo run --release -p cardphoto --example
+  holes_bench -- [--jobs N] [--only a,b] [--photos <the app's photos/>] > out.jsonl` in `app/`
+  (CARDPHOTO.md C2): fixed synthetic cases with their truth, and stored photos; one JSON line
+  per case.
 - **The calibration crate:** `cargo test` in `app/` also runs `calib/` (the workspace's
   default members): the solver against `firmware/test/vectors`, the fit against
   `calibrate.py`'s self-test (`calib/tests/data`, made by `calibrate.py --selftest
@@ -359,7 +363,9 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   the dialog is open (port 8710, a single-use token per link, shown as a QR code); the phone's
   page sends the photo as it is; `cardphoto::meta` drops EXIF/GPS/XMP from the file without
   re-encoding; stored in `photos/` next to `logs/` with a JSON beside it; originals removed
-  after 30 days unless marked to keep. The registration and the holes are in `cardphoto/`.
+  after 30 days unless marked to keep. The registration and the holes are in `cardphoto/`: the hole fit with direct derivatives,
+  big groups and the groups themselves on the cores (`par_map`), doubtful groups fitted again,
+  holes not pinned down reported as not found (CARDPHOTO.md C2).
   `photo.rs` processes a photo on a thread (registration, holes against the series' shots,
   the photo resampled onto the card's grid through the placement, `<photo>.result.json`).
   `main.rs`: "Card photo" under the series opens the photo window (QR, status, drop a file);

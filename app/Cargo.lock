@@ -657,6 +657,7 @@ dependencies = [
  "image",
  "nalgebra",
  "resvg",
+ "serde_json",
 ]
 
 [[package]]
