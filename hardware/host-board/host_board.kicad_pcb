@@ -10649,6 +10649,17 @@
 			(uuid "89320da4-2261-4243-9849-27c3727fd2c3")
 		)
 		(embedded_fonts no)
+		(model "${KIPRJMOD}/host_board.3dshapes/NodeMCU-32S_on_sockets.step"
+			(offset
+				(xyz 0 0 0)
+			)
+			(scale
+				(xyz 1 1 1)
+			)
+			(rotate
+				(xyz 0 0 0)
+			)
+		)
 	)
 	(footprint "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P2.54mm_Vertical"
 		(layer "F.Cu")

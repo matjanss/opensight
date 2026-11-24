@@ -153,6 +153,8 @@ gate uses, is not affected.
 - Gerbers and drill files are not in the repo: plot them from the board in KiCad when ordering (they are made from it, and go stale with every change to it).
 - `host_board_parts_list.csv`: every part, with how many to fit for a 6-channel first build.
 - `host_board.pretty/`: the NodeMCU-32S footprint (two 1x19 sockets, rows 22.86 mm apart, from your 23.53 mm measurement over the outside of the pins).
+- `host_board.3dshapes/`: the NodeMCU-32S on its sockets as a 3D model (boxes, made by `make_nodemcu.py`), used by U2's footprint.
+- `mechanical/`: the board as STEP and STL for the enclosure, with the sizes that matter (see its README).
 
 ## Layout
 

@@ -6,6 +6,7 @@ GTA2718B-3 bottom-port MEMS mic → TLV9062 two-stage preamp (×6.3–17.7, ×12
 - `mic_board.kicad_pro / .kicad_sch / .kicad_pcb`: KiCad project, KiCad 10 format (open it with KiCad 10 or newer).
 - `mic_board.kicad_sym`, `mic_board.pretty/`: project-local symbols and the mic footprint (already in the project's sym-lib-table / fp-lib-table). All other footprints come from the standard KiCad libraries.
 - `mic_board_schematic.pdf`: schematic.
+- `mechanical/`: the board as STEP and STL for the holders, with the sizes that matter (see its README).
 - `mic_board_parts_list.csv`: all parts incl. hand-fitted ones, with quantities for 5 boards.
 - `production/`: the JLCPCB files from the Fabrication Toolkit plugin (options in `fabrication-toolkit-options.json`): `mic_board.zip` (gerbers + drill files), `bom.csv`, `positions.csv`, `designators.csv`, `netlist.ipc`. The BOM and positions also list the hand-fitted parts (J1, RV1–RV3, test points): leave those out of the JLC assembly order.
 
