@@ -52,4 +52,5 @@
  (pad "36" thru_hole oval (at 22.86 40.64) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask"))
  (pad "37" thru_hole oval (at 22.86 43.18) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask"))
  (pad "38" thru_hole oval (at 22.86 45.72) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask"))
+  (model "${KIPRJMOD}/host_board.3dshapes/NodeMCU-32S_on_sockets.step" (offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))
 )

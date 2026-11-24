@@ -1,15 +1,16 @@
 # Host board v0.3: schematic and board
 
-The host board for the acoustic target: a NodeMCU-32S, 8 sensor connectors, the IR curtain emitter and receiver, a DS18B20, and the panel LED and button. Every part is through-hole and hand-soldered. The board is 76 × 118 mm (the long side runs north–south), 2 layers, 1.6 mm thick, with an M3 mounting hole in each corner.
+The host board for the acoustic target: a NodeMCU-32S, 8 sensor connectors, the IR curtain emitter and receiver, an air sensor (BME280 or DS18B20), and the panel LED and button. Every part is through-hole and hand-soldered. The board is 76 × 132 mm (the long side runs north–south), 2 layers, 1.6 mm thick, with an M3 mounting hole in each corner.
 
-The files are in KiCad 10 format; open them with KiCad 10 or newer. "Update PCB from Schematic" should report no changes, except for the two changes in the to-do below (J5 4-pin and R45; JP1, R46, C18), which are in the schematic but not yet on the board.
+The files are in KiCad 10 format; open them with KiCad 10 or newer. "Update PCB from Schematic" reports no changes.
 
-**Not ordered yet. Two changes to make first** (also listed in [TODO.md](TODO.md)):
+**Not ordered yet; ready to order** (2026-11-24). The two changes below are on the board now,
+and the south half was laid out again with them (see [Layout](#layout)):
 
-1. J5 takes a BME280 as well as the DS18B20 (done in the schematic). See [A BME280 on J5](#1-a-bme280-on-j5).
-2. The curtain comparator U4 gets a supply jumper: 3.3 V for a TLC372, 5 V for an LM393, with its own decoupling (done in the schematic). See [The curtain comparator's supply](#2-the-curtain-comparators-supply-33-v-or-5-v-by-a-jumper).
+1. J5 takes a BME280 as well as the DS18B20. See [A BME280 on J5](#1-a-bme280-on-j5).
+2. The curtain comparator U4 has a supply jumper: 3.3 V for a TLC372, 5 V for an LM393, with its own decoupling. See [The curtain comparator's supply](#2-the-curtain-comparators-supply-33-v-or-5-v-by-a-jumper).
 
-## To do before ordering
+## Changes before ordering (done)
 
 ### 1. A BME280 on J5
 
@@ -38,8 +39,9 @@ The DS18B20 can't see humidity. A BME280 (temperature, humidity and pressure, ov
 5. **Status (2026-11-23):** done in the schematic and the parts list. J5 has its own symbol,
    `CONN4_AIR` (pins GND, SDA/DQ, VDD, SCL), in `host_board.kicad_sym`; the net DQ is now
    `SDA_DQ`, and GPIO 15 is on the new net `SCL`. R45 has R43's footprint (horizontal,
-   7.62 mm). ERC: 0 violations. **Still to do:** the board layout (J5's 4-pin footprint, R45,
-   the SCL track), the silkscreen above, and the PDFs.
+   7.62 mm). ERC: 0 violations. **On the board (2026-11-24):** J5's 4-pin footprint beside J6
+   and J7, turned so pin 1 (GND) is at its east end; R45 under the NodeMCU between R43 and
+   R44; the silkscreen; the PDFs.
 
 **The sensor and its cable:**
 
@@ -106,8 +108,9 @@ shows it running out of input range, plug in an LM393 and move the jumper to 5 V
    at 3.3 V, which isn't used.
 7. **Status (2026-11-23):** done in the schematic and the parts list. JP1 has its own symbol,
    `JMP1x3` (a 1x3 header with the pins named 3V3, U4, 5V), in `host_board.kicad_sym`. ERC: 0
-   violations. U4's value is now TLC372. **Still to do:** the board layout (place JP1, R46
-   and C18 near U4, and route VU4 and VCMP), the silkscreen above, and the PDFs.
+   violations. U4's value is now TLC372. **On the board (2026-11-24):** R46 beside NT1 where
+   the supplies cross into AGND, JP1 north of U4 with C18, C17 at U4's pin 8; the
+   silkscreen; the PDFs.
 
 **The ranges, per setting:**
 
@@ -150,25 +153,35 @@ gate uses, is not affected.
 - Gerbers and drill files are not in the repo: plot them from the board in KiCad when ordering (they are made from it, and go stale with every change to it).
 - `host_board_parts_list.csv`: every part, with how many to fit for a 6-channel first build.
 - `host_board.pretty/`: the NodeMCU-32S footprint (two 1x19 sockets, rows 22.86 mm apart, from your 23.53 mm measurement over the outside of the pins).
+- `host_board.3dshapes/`: the NodeMCU-32S on its sockets as a 3D model (boxes, made by `make_nodemcu.py`), used by U2's footprint.
+- `mechanical/`: the board as STEP and STL for the enclosure, with the sizes that matter (see its README).
 
 ## Layout
 
-North is the antenna end of the NodeMCU.
+North is the antenna end of the NodeMCU. The north half (the module and the eight channels)
+is as it was; the south half was laid out again on 2026-11-24, 14 mm longer, for the J5 and
+U4-supply changes and with room for 0.4 mm tracks.
 
 | Where | What |
 |---|---|
-| Middle, north half | The NodeMCU-32S on sockets, antenna at the north edge, USB plug pointing south (the area south of it is kept free for the plug) |
+| Middle, north half | The NodeMCU-32S on sockets, antenna at the north edge, USB plug pointing south (the area south of it is kept free for the plug). No copper under the antenna (a keep-out on both layers) |
 | West edge | Sensors CH1–CH4 (J11–J14), north to south. Beside each one: scope header J2n and the four channel resistors |
 | East edge | Sensors CH5–CH8 (J15–J18), mirrored |
-| Middle, south of the module | West: LP2950 sensor regulator and J5 DS18B20 (BME280 too, see above). East: J6 panel LED and J7 panel button |
-| South-west (outlined) | IR receiver on its own AGND copper. J4 photodiodes at the south edge, RV1 = IR threshold. Test loops TP3 AGND, TP4 TIA, TP5 AMP, TP6 VTH |
-| South middle | IR emitter: 4 current-limiter cells, J3 IR LEDs at the south edge |
-| South-east | Power: J1 5 V in and J2 panel switch on the east edge, D1, C1, C2, test loops TP1 (+5V), TP2 (VSENS), TP7 (GND) |
+| Under the NodeMCU | R43 (SDA pull-up), R45 (SCL pull-up), R44 (panel LED), lying flat |
+| South of the module, west | The sensor supply: R1 and C3/C4 (5 V filter), U1 LP2950, C5/C6, TP2 (VSENS). R40 (IR_IN pull-up). Then the row where the supplies cross into the receiver's AGND: R30 (VA_IR), NT1 (the ground link), R46 (VCMP) |
+| South of the module, east | J6 panel LED and J7 panel button, J5 air sensor (BME280 / DS18B20) below them |
+| South-west | IR receiver on its own AGND copper, outlined: U4 (comparator) with JP1, C17, C18 and the threshold (RV1, TP6) in the north; U3 (TIA and ×21 stage) in the south, with J4 photodiodes at the south edge. Test loops TP3 AGND, TP4 TIA, TP5 AMP, TP6 VTH |
+| East, south of CH8 | Power: J1 5 V in and J2 panel switch on the east edge, D1, C1, C2, test loops TP1 (+5V), TP7 (GND) |
+| South-east | IR emitter: four current limiters side by side (R2.2k, BC337, BC547, R22 each), R29, C7, J3 IR LEDs at the south edge |
 
 Connector pinout (every sensor connector the same way round): VA at the south end, then G, L, G, H at the north end. The scope header pins H, G, L sit level with connector pins H, G, L.
 
-- **Under the NodeMCU:** R43 and R44 are mounted flat there. Solder them before you fit the sockets.
-- **Ground:** GND is poured on both sides. The IR receiver has its own AGND pour, joined to GND only at NT1, a wire link or 0 Ω resistor on the north edge of the receiver area.
+- **Under the NodeMCU:** R43, R44 and R45 are mounted flat there. Solder them before you fit the sockets.
+- **Sensor supply:** VSENS runs down each edge outside the sensor connectors, with a stub to
+  each VA pin; the two buses meet at TP2 beside U1.
+- **Ground:** GND is poured on both sides. The IR receiver has its own AGND pour, joined to GND only at NT1, a wire link or 0 Ω resistor on the north edge of the receiver area. Only the receiver's supplies (VA_IR through R30, VCMP through R46) and IR_IN cross that edge; no other net runs over the AGND copper.
+- **Tracks:** 0.4 mm for signals; 0.6 mm for +3V3, VSENS, VA_IR, 5V_F, VCMP and VU4; 0.8 mm
+  for VIN, VSW and +5V. Clearance 0.2 mm, vias 0.8/0.4 mm (the net classes in the project).
 
 ## Notes for assembly
 
@@ -273,14 +286,13 @@ The firmware's `config.h` has this map (`CAPTURE_LINE_PINS`, L then H per channe
 
 ## Checks done
 
-- **Netlist:** the schematic netlist matches the design list: 71 nets, 119 parts.
-- **KiCad 10 check (2026-11-23, KiCad 10.0.8, `kicad-cli`):** ERC 0 violations (86 nets, 123
-  parts, with the J5 and U4-supply changes). DRC with zones refilled: 1 clearance error (a
-  +3V3 track 0.18 mm from U2 pad 2, which has no net, against the 0.2 mm rule; JLC makes 0.1
-  mm) and 50 silkscreen warnings. Schematic parity: 278 issues, of which 271 were there
-  before the changes and are naming only (pad nets `5V_F` against the schematic's `/5V_F`;
-  the `Note` field missing on footprints): "Update PCB from Schematic" clears them. The
-  other 7 are the to-do above (J5, R45, JP1, R46, C18, U4's value).
-- **Design-rule check (DRC):** 0 copper errors and 0 unconnected pads. GND and AGND connectivity was checked separately. What remains are silkscreen overlap warnings and library-path notes from the build environment.
-- **Routing rules:** signal tracks 0.3 mm, power tracks 0.4–0.6 mm, 0.25 mm clearance, vias 0.7/0.35 mm. All of these are well inside JLCPCB's standard limits.
-- **Routing method:** the board was routed with my own autorouter, not by hand, so some tracks take long ways round. It's electrically fine, but tidy it in KiCad if you like.
+- **KiCad 10 check (2026-11-24, KiCad 10.0.8, `kicad-cli`), after the new layout:** ERC 0
+  errors, 0 warnings. DRC with schematic parity, all severities: 0 violations, 0 unconnected
+  pads, 0 footprint errors (no silkscreen warnings either). Every track is 0.4, 0.6 or 0.8 mm
+  by its net class; 4 vias.
+- **Gerbers and drill files** plot from the board (`kicad-cli pcb export gerbers` and
+  `export drill`); they stay out of the repo, as above.
+- **Routing method (2026-11-24):** the supply runs (VSENS, +5V, +3V3, VIN, VSW), IR_EN (kept
+  off the AGND copper) and the ground links of J5, J6 and J7 were drawn by script and locked;
+  the rest was routed by Freerouting 2.5 (no neck-down) and checked in KiCad. GND and AGND
+  come from the pours.

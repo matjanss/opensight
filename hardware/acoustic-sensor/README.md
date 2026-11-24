@@ -6,9 +6,9 @@ GTA2718B-3 bottom-port MEMS mic → TLV9062 two-stage preamp (×6.3–17.7, ×12
 - `mic_board.kicad_pro / .kicad_sch / .kicad_pcb`: KiCad project, KiCad 10 format (open it with KiCad 10 or newer).
 - `mic_board.kicad_sym`, `mic_board.pretty/`: project-local symbols and the mic footprint (already in the project's sym-lib-table / fp-lib-table). All other footprints come from the standard KiCad libraries.
 - `mic_board_schematic.pdf`: schematic.
+- `mechanical/`: the board as STEP and STL for the holders, with the sizes that matter (see its README).
 - `mic_board_parts_list.csv`: all parts incl. hand-fitted ones, with quantities for 5 boards.
-- `fab/mic_board_gerbers_JLCPCB.zip`: gerbers + drill files (PTH and NPTH).
-- `fab/mic_board_BOM_JLCPCB.csv`, `fab/mic_board_CPL_JLCPCB.csv`: JLCPCB Economic PCBA BOM and placement (SMD parts only).
+- `production/`: the JLCPCB files from the Fabrication Toolkit plugin (options in `fabrication-toolkit-options.json`): `mic_board.zip` (gerbers + drill files), `bom.csv`, `positions.csv`, `designators.csv`, `netlist.ipc`. The BOM and positions also list the hand-fitted parts (J1, RV1–RV3, test points): leave those out of the JLC assembly order.
 
 ## Board
 - 50 × 32 mm, 2 layers, **1.0 mm** FR-4 (set this when ordering), bottom layer = GND plane, top has a GND pour.
@@ -47,8 +47,9 @@ GTA2718B-3 bottom-port MEMS mic → TLV9062 two-stage preamp (×6.3–17.7, ×12
      datasheet's pads and r 0.475–0.725 mm. Its pin-1 dot (a recess in the lid) was at the
      old pad 1's corner (KiCad's 3D y points up, the footprint's down): moved to pad 1's,
      checked in KiCad's 3D render.
-   - **Still to do: re-route VDD and OUT at MK1.** The old tracks now end on the wrong pads:
-     the DRC shows 3 shorts and 2 unconnected pads there, and nothing else new.
+   - **VDD and OUT at MK1 re-routed** (the user, 2026-11-23) onto the moved pads. DRC
+     (KiCad 10, `kicad-cli`, 2026-11-24): 0 errors, 0 unconnected pads, the 8 silkscreen
+     warnings as before. The production files made again from it.
 2. **JLC preview**: confirm the rotation of U1, U2 (pin 1 dot) and MK1 (pads towards U1, port towards J1). The CPL gives MK1 at its package centre (0.5 mm from the port).
 3. **Routing**: a scripted first pass. Worth a look in KiCad, mainly around the mic/input (C2, R2, U1 pin 3) and the comparator outputs.
 4. **ERC/DRC in KiCad 10** (2026-11-23, KiCad 10.0.8, `kicad-cli`): ERC 0 violations;
