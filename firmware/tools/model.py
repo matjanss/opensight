@@ -39,9 +39,10 @@ def sound_speed(t_c, rh, p_pa, xc=0.0004):
 
 # --- Geometry and the forward model (MODEL.md "Propagation") ---
 
-# PLAN D1/D2: CH1 bottom left, CH2 bottom right, CH3 top right slid 40 mm, CH4 top left,
+# PLAN D1/D2: CH1 bottom left, CH2 bottom right, CH3 top right moved out 25 mm along its
+# diagonal (slid 40 mm along the top edge, to (65, 105), before 2026-11-24), CH4 top left,
 # CH5 bottom middle, CH6 right middle.
-LAYOUT_D2 = np.array([[-105, -105], [105, -105], [65, 105], [-105, 105], [0, -105], [105, 0]], float)
+LAYOUT_D2 = np.array([[-105, -105], [105, -105], [122.68, 122.68], [-105, 105], [0, -105], [105, 0]], float)
 LAYOUT_SQUARE = np.array([[-105, -105], [105, -105], [105, 105], [-105, 105]], float)
 
 

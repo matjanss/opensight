@@ -83,9 +83,10 @@ const float    ARRIVAL_K_DEFAULT    = 1.0f / 3;
 // The calibration (NVS "cal", calib.cpp): per channel its mic (x, y, h), k, offset and
 // sigma. Defaults: the D1/D2 layout on CH1-CH6 (`mic default`).
 const float    MIC_H_DEFAULT_MM     = 5.5f;    // mic port behind the paper: the board's edge on it (21.5 flipped)
-// The D1/D2 layout (PLAN.md), mm: bottom left, bottom right, top right slid 40 mm along the
-// top edge, top left, bottom middle, right middle.
-const float    MIC_LAYOUT_D2[6][2]  = {{-105, -105}, {105, -105}, {65, 105}, {-105, 105}, {0, -105}, {105, 0}};
+// The D1/D2 layout (PLAN.md), mm: bottom left, bottom right, top right moved out 25 mm along
+// its diagonal (105 + 25/sqrt 2; it was slid 40 mm along the top edge, to (65, 105), before
+// 2026-11-24), top left, bottom middle, right middle.
+const float    MIC_LAYOUT_D2[6][2]  = {{-105, -105}, {105, -105}, {122.68f, 122.68f}, {-105, 105}, {0, -105}, {105, 0}};
 const float    SIGMA_DEFAULT_NS     = 50.0f;   // timing error per channel until calibrated (3e)
 // A solved shot goes to the app if the fit converged with an rms residual up to this (ns;
 // `reslimit`, stored: measure::RES_LIMIT_DEFAULT_NS). Validity proper is step 4.

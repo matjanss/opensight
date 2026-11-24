@@ -25,9 +25,9 @@ using namespace measure;
 void setUp() {}
 void tearDown() {}
 
-// PLAN D1/D2: CH1 bottom left, CH2 bottom right, CH3 top right slid 40 mm, CH4 top left,
+// PLAN D1/D2: CH1 bottom left, CH2 bottom right, CH3 top right 25 mm out along its diagonal, CH4 top left,
 // CH5 bottom middle, CH6 right middle.
-static const float D2[6][2] = {{-105, -105}, {105, -105}, {65, 105}, {-105, 105}, {0, -105}, {105, 0}};
+static const float D2[6][2] = {{-105, -105}, {105, -105}, {122.68f, 122.68f}, {-105, 105}, {0, -105}, {105, 0}};
 
 static SolveInput layout(float h, float sigma, float cMs) {
   SolveInput in = {};
@@ -648,8 +648,9 @@ static SolveInput micsAt(const float (*xy)[2], int n, float h) {
 }
 
 static void test_blast_check() {
-  // The study (PLAN D1/D2, h 0, 9 starts): the square scores 484 of 624; one corner slid
-  // 40 mm none (smallest residual 9.1 us); D2 none, with every mic or any one dropped.
+  // The study (PLAN D1/D2, h 0, 9 starts): the square scores 484 of 624; one corner moved
+  // 25 mm out along its diagonal none (smallest residual 6.9 us; slid 40 mm along the edge,
+  // before 2026-11-24: 9.1 us); D2 none, with every mic or any one dropped.
   const float SQ[4][2] = {{-105, -105}, {105, -105}, {105, 105}, {-105, 105}};
   BlastResult sq = blastCheck(micsAt(SQ, 4, 10.5f), 0x0F, 1500, 100);
   BlastResult d1 = blastCheck(micsAt(D2, 4, 10.5f), 0x0F, 1500, 100);

@@ -106,9 +106,11 @@ fit a point in the 200 × 200 mm scoring area.
   - The holder's principle: `hardware/frame/top-right-holder.svg`. The board is 44 mm
     wide (50 mm was planned before 2026-11-24) and stands across the diagonal, so beyond d ≈ 7 mm the holder overhangs the
     frame corner.
-  - **Not yet changed:** `mic default`, the simulator, `tools/model.py`, the test vectors
-    and `tools/layout_study.py` still use (65, 105). They change once d is fixed, with
-    the layout study run again (`--drop`) to confirm late channels are still found.
+  - **Changed 2026-11-24: d = 25 mm, CH3 at (122.68, 122.68)** (105 + 25/√2), the study's
+    cleanest distance. `mic default`, the simulator, `tools/model.py`, the test vectors,
+    the native tests and `tools/layout_study.py` (layouts O25, O25+B, O25+BR) use it. If
+    the holder needs a shorter d, it is `MIC_LAYOUT_D2` in `config.h` and `LAYOUT_D2` in
+    `model.py`; calibration fits the mic's x and y anyway. Checked: MEASUREMENT 7-0b.
 
 ### D2 Six mics: four corners (one slid), the bottom middle and the right middle
 
@@ -127,7 +129,7 @@ channel. It is, and with one condition: the four corners must already be off one
 - **Decision (2026-11-21):** six mics. CH1 bottom left (−105, −105), CH2 bottom right
   (105, −105), CH3 top right slid (65, 105), CH4 top left (−105, 105), CH5 bottom middle
   (0, −105), CH6 right middle (105, 0). This is `mic default` (D12). CH3 moves out along
-  the diagonal (D1's update, 2026-11-22).
+  the diagonal (D1's update, 2026-11-22): at (122.68, 122.68) from 2026-11-24.
 - **What the sixth adds** (1σ position error per unit of timing error per channel, ring
   area and whole area, from a covariance calculation with h = 10.5 mm):
 

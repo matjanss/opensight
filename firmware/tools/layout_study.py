@@ -57,6 +57,14 @@ LAYOUTS = {
         [[-105, -105], [105, -105], [65, 105], [-105, 105], [0, -105], [105, 0]], float),
     "S40+LR 6: S40 + left and right middles": np.array(
         [[-105, -105], [105, -105], [65, 105], [-105, 105], [105, 0], [-105, 0]], float),
+    # The layout from 2026-11-24 (PLAN D1's update): the top-right corner moved out 25 mm
+    # along its diagonal, to (122.68, 122.68), with and without the middles.
+    "O25 top-right corner 25 mm out along the diagonal": np.array(
+        [[-105, -105], [105, -105], [122.68, 122.68], [-105, 105]], float),
+    "O25+B 5: O25 + bottom middle": np.array(
+        [[-105, -105], [105, -105], [122.68, 122.68], [-105, 105], [0, -105]], float),
+    "O25+BR 6: O25 + bottom and right middles (the D1/D2 layout)": np.array(
+        [[-105, -105], [105, -105], [122.68, 122.68], [-105, 105], [0, -105], [105, 0]], float),
 }
 STARTS = [np.array([x, y], float) for x in (-60, 0, 60) for y in (-60, 0, 60)]
 

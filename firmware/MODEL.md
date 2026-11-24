@@ -41,7 +41,7 @@ The default layout (PLAN D1/D2), h = 5.5 mm (10.5 mm before 2026-11-24):
 |---|---|---|
 | CH1 | bottom left | −105, −105 |
 | CH2 | bottom right | 105, −105 |
-| CH3 | top right, slid 40 mm along the top edge | 65, 105 |
+| CH3 | top right, moved out 25 mm along its diagonal (slid 40 mm along the top edge, at 65, 105, before 2026-11-24) | 122.68, 122.68 |
 | CH4 | top left | −105, 105 |
 | CH5 | bottom middle | 0, −105 |
 | CH6 | right middle | 105, 0 |
