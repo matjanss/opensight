@@ -1,12 +1,26 @@
-# Builds and tests the app on Linux, Windows and macOS, and builds the firmware, on every
-# push and pull request. A tag like v0.1.0 also publishes a GitHub Release with the files.
+# Builds and tests the app on Linux, Windows and macOS, and builds the firmware, on a push
+# to main and on pull requests, but only the parts a change touches: docs and hardware
+# alone run nothing, the app builds on app changes, the firmware on firmware changes.
+# A tag like v0.1.0, or a run started by hand (Actions, "Run workflow"), builds
+# everything; a tag also publishes a GitHub Release with the files.
 name: Build
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
+    # Not evaluated for tags: a tag always builds.
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.pdf"
+      - "hardware/**"
+      - "LICENSE*"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.pdf"
+      - "hardware/**"
+      - "LICENSE*"
   workflow_dispatch:
 
 permissions:
@@ -18,8 +32,40 @@ env:
   VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}', github.sha) }}
 
 jobs:
+  # Which parts the change touches. A tag or a run by hand builds everything.
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      app: ${{ steps.filter.outputs.app == 'true' || env.ALL == 'true' }}
+      firmware: ${{ steps.filter.outputs.firmware == 'true' || env.ALL == 'true' }}
+    env:
+      ALL: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # The app's tests read firmware/test/vectors (the solver against the firmware);
+          # a protocol change touches both sides; a workflow change rebuilds everything.
+          filters: |
+            app:
+              - "app/**"
+              - "protocol/**"
+              - "firmware/test/vectors/**"
+              - ".github/workflows/**"
+            firmware:
+              - "firmware/**"
+              - "protocol/**"
+              - ".github/workflows/**"
+
   app:
     name: App (${{ matrix.name }})
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -103,6 +149,8 @@ jobs:
 
   firmware:
     name: Firmware
+    needs: changes
+    if: needs.changes.outputs.firmware == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

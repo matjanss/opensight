@@ -96,7 +96,8 @@ app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
 hardware/acoustic-sensor/     sensor board, KiCad 10
 hardware/host-board/          host board, KiCad 10
 hardware/frame/               frame drawings: top-right-holder.svg (the moved corner mic's holder, principle)
-.github/workflows/build.yml   CI; a v* tag builds a GitHub Release (app for 3 OSes + firmware)
+.github/workflows/build.yml   CI on a push to main: only the parts a change touches (docs and hardware
+                              alone: nothing); a v* tag builds all and a GitHub Release (app for 3 OSes + firmware)
 ```
 
 ## Build and test
