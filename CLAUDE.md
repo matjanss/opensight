@@ -362,12 +362,18 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   after 30 days unless marked to keep. The registration and the holes are in `cardphoto/`.
   `photo.rs` processes a photo on a thread (registration, holes against the series' shots,
   the photo resampled onto the card's grid through the placement, `<photo>.result.json`).
-  `main.rs`: "Card photo" under the series opens the photo window (QR, status, drop a file,
-  the ground-truth panel); the card view stays in the sensor's frame (the shots never turn):
+  `main.rs`: "Card photo" under the series opens the photo window (QR, status, drop a file);
+  it closes once a photo is processed (an error keeps it open). The results go into the
+  series panel: a table (#, OpenSights, Paper, both red where they differ, shot x, y, hole −
+  shot, off), the rms line and warnings above it, the photo's details folded, and "Keep the
+  photo", "Take another photo" (the window again, a new link), "Open the folder", "Remove
+  from the card" below it; the side column widens to `SIDE_WIDTH_PHOTO`. The card view stays
+  in the sensor's frame (the shots never turn):
   the photo where the real card hung, the app's card drawn there too (`photo::CardPose`, the
   print's way up from its numbers), a Card–Photo fade bar (top right), the holes as rings.
-  The series list gets a "Paper" column: each hole scored on the printed card
-  (`ShotCheck::paper`, the hole through the pose), beside the sensor's score.
+  The Paper column: each hole scored on the printed card (`ShotCheck::paper`, the hole
+  through the pose). Clicking a scored row of the series list opens that shot's popup on
+  the card (`selected_shot`, as clicking the shot; again closes it).
   `OPENSIGHTS_DEMO_PHOTO=1` adds a synthetic photo of the series (`photo::demo_photo`).
 - **Calibration (step 5d):** `calwizard.rs` holds the wizard and the field check as state
   machines (events, Status and Calibration in; actions out: calibration mode, the template

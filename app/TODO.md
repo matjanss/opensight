@@ -25,8 +25,6 @@ status and settings are in (step 5c).
   point, in the window.
 - **Fit from a log file.** `calib::logline` reads the firmware's and the app's logs: a
   "Calibrate from a log…" button would fit sparks recorded earlier (as `calibrate.py` does).
-- **An events list** at the range: the recent events with time, verdict, position and
-  residual, beside the counters (chosen against for 5c: counters only).
 
 ## The card
 
