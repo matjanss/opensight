@@ -65,7 +65,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 ```
 CLAUDE.md, PLAN.md, FUTURE_ARCHITECTURE.md, README.md
 protocol/PROTOCOL.md          the BLE protocol (source of truth)
-firmware/                     PlatformIO, Arduino-ESP32 3.x on pioarduino (IDF 5), NimBLE-Arduino 2.3
+firmware/                     PlatformIO, pinned: pioarduino 55.03.312-1 (Arduino-ESP32 3.3.12, IDF 5.5), NimBLE-Arduino 2.5.2
   MEASUREMENT.md              measurement plan and bench results
   MODEL.md                    the measurement model (source of truth)
   src/                        the firmware (modules below)
