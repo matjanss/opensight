@@ -908,10 +908,12 @@ void captureCommand(const char* line) {
                    "                       20 pairs, 10000 ns)\n"
                    "  temp                 the air: sensor, temperature, humidity, pressure, speed of sound\n"
                    "  temp scan            look for an air sensor on J5 again (it stops after 2 min)\n"
-                   "  pairing              pairing mode for 60 s, as BOOT held 2 s");
+                   "  pairing              pairing mode for 60 s, as BOOT held 2 s\n"
+                   "  reboot               restart the board (the serial port stays open)");
     calibHelp();
     positionHelp();
     simHelp();
+    uplinkHelp();
   } else if (!running) {
     Serial.println("capture is not running (see the start-up messages)");
   } else if (!strcmp(cmd, "stat")) {
@@ -962,7 +964,8 @@ void captureCommand(const char* line) {
     } else {
       airPrintStatus();
     }
-  } else if (!calibCommand(cmd, line) && !positionCommand(cmd, line) && !simCommand(cmd, line)) {
+  } else if (!calibCommand(cmd, line) && !positionCommand(cmd, line) && !simCommand(cmd, line) &&
+             !uplinkCommand(cmd, line)) {
     Serial.printf("unknown command '%s', type 'help'\n", cmd);
   }
 }

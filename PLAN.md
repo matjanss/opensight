@@ -516,7 +516,9 @@ The raw-event message and calibration over BLE (D7): **done 2026-11-23** (MEASUR
 5a–5c, protocol v3, passing over BLE). The Rust fit (`app/calib`, ported from
 `calibrate.py` and checked against the same logs) and the calibration wizard with the field
 check in the desktop app: **done 2026-11-23** (5d, passing over BLE with the simulator).
-The shot store in flash.
+The shot store in flash: **done 2026-11-24** (5e: every hit in a 128 KB flash ring across
+reboots, the shot request and clear across boots, passing on the bare NodeMCU and over BLE;
+a real power cut is the user's test, 5e-8).
 
 ### Phase 4: the network (FUTURE_ARCHITECTURE step 2)
 

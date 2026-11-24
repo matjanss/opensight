@@ -18,8 +18,8 @@ rust-analyzer picks up `app/`.
   measuring hardware is running, a short press on BOOT makes a random test shot.
 - The app shows the shots on a 10 m air pistol card and scores them: whole rings with X for an inner ten, or decimals (a setting). The series
   list and total sit next to the card.
-- No shot is lost when the link drops: the sensor keeps its last 64 shots and resends the
-  ones the app missed.
+- No shot is lost when the link drops or the sensor restarts: it keeps its shots in flash
+  (about 2,000 of them) and resends the ones the app missed.
 - A shot the sensor heard but couldn't measure (a second shot too soon after another), or
   one only the light curtain saw (through an existing hole), is listed in the series as
   "not scored", with a notice on the card: check the paper card for those.

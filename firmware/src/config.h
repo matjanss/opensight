@@ -15,7 +15,13 @@ const uint32_t PAIRING_BLINK_MS    = 150;    // LED half-period while in pairing
 const uint32_t LOOP_PERIOD_MS      = 10;     // button sampling rate; nothing here needs to be faster
 const uint32_t SHOT_FLASH_MS       = 80;     // LED flashes this long for every shot
 
-const int      SHOT_BUFFER          = 64;     // shots kept for resending after a link drop
+// The shot store (lib/store, MEASUREMENT 5e): every hit in flash, in the `shots` partition
+// (partitions.csv: data, subtype 0x40, 128 KB = 1920 hits at least), across reboots. With no
+// such partition (an old partition table), a ring in RAM of STORE_RAM_SECTORS sectors.
+const uint8_t  STORE_PART_SUBTYPE   = 0x40;
+const int      STORE_RAM_SECTORS    = 4;      // the fallback: 4 KB each, 129 hits at least
+const uint32_t STORE_QUIET_MS       = 2000;   // erase the sector ahead only after this long
+                                              // without a shot or an event (about 45 ms)
 const uint32_t SHOT_RETRY_MS        = 500;    // wait after a failed indication before retrying
 const int      EVENT_BUFFER         = 32;     // events kept for resending (protocol v3, 180 bytes each)
 const uint32_t STATUS_PERIOD_MS     = 500;    // Status is rebuilt this often, notified if it changed

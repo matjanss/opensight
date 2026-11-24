@@ -57,7 +57,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 
 | Part | Where it stands | Next (see) |
 |---|---|---|
-| Firmware: BLE, pairing, uplink | Protocol v3 (step 5b): `uplink.cpp` with the hit and event rings, Status, Control, Calibration and Settings; bench test passes over BLE (2026-11-23, merged to `main`) | Flash shot store (PLAN D6), MQTT (phase 4) |
+| Firmware: BLE, pairing, uplink | Protocol v3 (step 5b): `uplink.cpp` with the hits and the event ring, Status, Control, Calibration and Settings; bench test passes over BLE (2026-11-23, merged to `main`). The shot store in flash (5e, PLAN D6): every hit kept across reboots, requests and clears across boots; bench 5e-1 to 5e-7 pass (2026-11-24, branch `step5e-shotstore`) | 5e-8, a real power cut (the user); MQTT (phase 4) |
 | Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration, PLAN phase 0) passes all its simulated tests on a bare NodeMCU (2026-11-22, merged to `main`): the solver on the board, drop-one, the blast check, calibration mode and `tools/calibrate.py`. The DS18B20 and BME280 tests (3a-3, 3a-4) wait for the parts. Step 4a (the verdict) passes its simulated bench tests (2026-11-22, merged to `main`). Step 4b (the curtain) passes its simulated bench tests (2026-11-22, run by Claude, merged to `main`) Step 7 (the real boards, PLAN phase 1): the tests written and `tools/bench.py` passing its self-test; 7-0 (h 5.5 mm, simulated) passes (2026-11-24, branch `phase1-prep`) | The boards' arrival (PLAN phase 1, MEASUREMENT 7); 3a-3/3a-4 when the parts are there |
 | Sensor board (`hardware/acoustic-sensor/`) | v0.3 designed (KiCad 10), not yet on the bench | Its "check before ordering" list; then the summary's initial calibration, polarity, PLAN phase 1 |
 | Host board (`hardware/host-board/`) | v0.3 ready to order: the J5 (BME280) and U4-supply changes on the board, the south half laid out again and the board routed again (2026-11-24, 76 × 132 mm, 0.4/0.6/0.8 mm tracks, DRC and ERC clean); firmware already on its pin map | The user's look in KiCad, then order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
@@ -79,8 +79,11 @@ firmware/                     PlatformIO, pinned: pioarduino 55.03.312-1 (Arduin
                               record (the log lines), blast (the blast check)
   lib/bme280/                 BME280/BMP280 compensation (portable)
   lib/proto/                  protocol v3's messages, encoded and decoded (portable)
+  lib/store/                  the shot store: hits in a flash ring across reboots (portable)
+  partitions.csv              the partition table: Arduino's default with a 128 KB `shots` partition
   test/test_measure/          Unity tests of the core on the PC (`pio test -e native`)
   test/test_proto/            Unity tests of lib/proto against PROTOCOL.md's examples
+  test/test_store/            Unity tests of lib/store: reboots, wrap-around, torn writes, clears
   test/vectors/               shared test vectors, written by tools/model.py
   tools/model.py              the model's reference implementation (numpy)
   tools/replay.cpp            replays a serial log's events through lib/measure (g++)
@@ -124,7 +127,8 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   `app/` connects to a bonded sensor, subscribes to everything, writes the event log as the
   app does, and with `writes` exercises Settings, Calibration and Control (MEASUREMENT 5);
   `drive` runs the calibration wizard and the field check from stdin (`check`, `calibrate`,
-  `quit`; MEASUREMENT 5d).
+  `quit`; MEASUREMENT 5d). `PROBE_FROM=<boot hex>:<seq>` asks for shots from there,
+  `PROBE_CLEAR=1` clears up to the last one received (MEASUREMENT 5e).
   Opening the serial port resets the board (Linux): start a serial session first, then the
   probe.
 - **Tools:** `python3 firmware/tools/layout_study.py [--drop] [--offsets]` (a few
@@ -288,8 +292,12 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   `loop()` (microseconds per event). The interrupt and the code it calls
   stay in IRAM, because NVS writes stall the flash cache.
 - `uplink.cpp` (step 5b, PLAN D6): what goes to the app, in protocol v3 (`lib/proto/`).
-  - The hit ring: the last 64 hits (kind shot, hole or missed), indicated one at a time until
-    the app confirms each; shot requests and clear requests (`clearedSeq`).
+  - The hits (kind shot, hole or missed) go into the shot store (`lib/store/`, the `shots`
+    partition in `partitions.csv`, 5e): every hit in flash across reboots, the newest 1,921
+    at least; indicated one at a time until the app confirms each. A shot request continues
+    from any boot the store holds; a clear request clears up to (boot, seq), earlier boots
+    too, kept in NVS (`"shots"`). The sector ahead is erased after 2 s with no shot or event.
+    Serial `shots`, `shots clear`, and `reboot` (a clean restart for tests).
   - The event ring: the last 32 events (every verdict, everything a `rec` line has), the
     same way, after any waiting hit. `position.cpp` adds each event and its hit, `curtain.cpp`
     a hole, `capture.cpp` a missed shot.

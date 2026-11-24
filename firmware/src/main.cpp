@@ -151,7 +151,12 @@ static void pollSerial() {
         line[len] = 0;
         // `pairing`: as BOOT held 2 s (the serial port means the board is in hand anyway).
         if (!strcmp(line, "pairing")) setPairing(true);
-        else captureCommand(line);
+        // `reboot`: a clean restart, the serial port stays open (the shot store's tests, 5e).
+        else if (!strcmp(line, "reboot")) {
+          Serial.println("rebooting");
+          Serial.flush();
+          ESP.restart();
+        } else captureCommand(line);
         len = 0;
       }
     } else if (c == '\b' || c == 0x7F) {   // backspace: the terminal shows the corrected line

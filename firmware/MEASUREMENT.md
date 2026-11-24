@@ -89,7 +89,7 @@ so a problem shows up in the step that caused it.
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
 | 3 | Solver and calibration | **simulated tests pass** (bare NodeMCU, 2026-11-22; merged to `main`): 3a-1, 3a-2, 3a-5, 3b (PC), 3c, 3d, 3e. Waiting for the parts: 3a-3 and 3a-4 (DS18B20, BME280). With the boards: the same solver and calibration on real sensors (PLAN phase 1) |
 | 4 | Validity checks | 4a (the verdict) passes its simulated bench tests on a bare NodeMCU (2026-11-22). 4b (the curtain) passes its simulated bench tests on a bare NodeMCU (2026-11-22, run by Claude). 4c (loudness, sharpness) planned |
-| 5 | Protocol and app | 5a (protocol v3), 5b (firmware) and 5c (app) built; their bench test passes over BLE from the PC (2026-11-23, run by Claude, merged to `main`). 5d (the calibration wizard, the Rust fit, the field check) passes its bench test over BLE (2026-11-23, run by Claude, merged to `main`) |
+| 5 | Protocol and app | 5a (protocol v3), 5b (firmware) and 5c (app) built; their bench test passes over BLE from the PC (2026-11-23, run by Claude, merged to `main`). 5d (the calibration wizard, the Rust fit, the field check) passes its bench test over BLE (2026-11-23, run by Claude, merged to `main`). 5e (the shot store in flash) passes 5e-1 to 5e-7 (2026-11-24, run by Claude, branch `step5e-shotstore`); 5e-8 (a real power cut) is the user's |
 | 6 | Wi-Fi and MQTT | planned |
 | 7 | The real boards (PLAN phase 1) | tests written and the analysis tool (`tools/bench.py`) passing its self-test (2026-11-24); 7-0 (h 5.5 mm, simulated) passes; 7-1 to 7-7 wait for the boards |
 
@@ -1373,6 +1373,68 @@ clear`, `sigma 50`, `k 0.33333`.
 nominal layout), `CALIBRATED <id>` (the sensor holds the record: serial `cal: record <id> ...
 in use`), the second check about 0.01 mm, `sim random 200` about 0.013–0.015 mm rms (as 3e-3).
 
+#### 5e. The shot store in flash
+
+PLAN D6 ("no shot is ever lost, and that includes a reboot"), phase 3's last item. Branch
+`step5e-shotstore`.
+
+Built:
+
+- **`lib/store/`** (portable, tested on the PC in `test/test_store`): a ring of 64-byte
+  records in 4 KB sectors, each hit with a store number H (from 1, never reused, also
+  across reboots) in slot H mod (slots); magic, H, boot, seq, the Shot message as sent, a
+  CRC-32. A record is written once; a sector is erased whole before reuse. A record torn
+  by a power cut fails its CRC and is skipped; H moves on past a slot that isn't blank.
+  `begin` rebuilds the boots from the slots (two passes, no big buffers). One sector ahead
+  is kept erased (`eraseAhead`); the newest 1,921 hits at least are held in 128 KB.
+- **`partitions.csv`:** Arduino's default table with a 128 KB `shots` partition (data,
+  subtype 0x40) cut from the unused `spiffs` area; nvs, otadata and both app slots at the
+  same offsets, so settings, calibration and bonds survive the new table.
+- **`uplink.cpp`:** every hit goes into the store (reads through the partition's memory
+  map, writes and erases through the partition API). A shot request (boot, next) starts at
+  that boot's hit with seq ≥ next and goes on through the later boots; a boot the store has
+  no hits of (0: the app has none): every hit not cleared. A clear request clears up to
+  (boot, seq), earlier boots too; the cleared H is kept in NVS (`"shots"`, `clr`). The
+  sector ahead is erased after 2 s without a shot or an event, and no hit waiting. Events
+  stay in the 32-event RAM ring. With no `shots` partition (an old table): a 16 KB ring in
+  RAM, and a warning at boot.
+- Serial: `shots` (held, H range, cleared, the boot's hits, capacity, torn at boot, the
+  slowest write and erase), `shots clear`.
+- PROTOCOL.md: the shot request and clear request across boots (no message changes, no
+  version bump: an old app works as before, and gets more).
+- The probe: `PROBE_FROM=<boot hex>:<seq>` asks from there, `PROBE_CLEAR=1` clears up to the
+  last hit received, and a summary per boot (seq range, gaps).
+
+Bench test (bare NodeMCU over serial and the probe over BLE, run by Claude):
+
+1. **5e-1, PC:** `pio test -e native`: `test_store` 8 of 8 (reboots, requests across
+   boots, five laps of the ring, a write cut at each of its 64 bytes, a cut erase, clears).
+2. **5e-2, the new table:** flashed with `pio run -t upload` (it writes the partition
+   table). Boot: `shots: 0 hits held from 0 boot(s), 0 torn, capacity 1921`. The NVS
+   survived: `mic` as before, the probe connects without pairing again.
+3. **5e-3, hits survive reboots:** `mic sim`, `sim random 30`; reboot: `30 hits held from
+   1 boot(s)`; `sim random 10`; reboot: `40 hits held from 2 boot(s)`, 0 torn.
+4. **5e-4, across boots over BLE:** the probe from (0, 0): boot 1 seq 1–30, then boot 2
+   seq 1–10, in order, 0 gaps. `PROBE_FROM=<boot 1>:21`: boot 1 21–30, then boot 2 1–10.
+   `PROBE_FROM=<boot 2>:11`: none.
+5. **5e-5, clear:** the probe with `PROBE_CLEAR=1`: serial `Shots up to 10 of boot <2>
+   cleared`; reboot; the probe from (0, 0): no shots; `shots`: cleared up to H 40.
+6. **5e-6, a full ring under load:** `sim random 2100`, no app: PASS as before (every shot
+   solved and sent, none missed, no late starts), with the ring wrapping (an erase every 64
+   hits, about 45 ms, on entering a sector when no quiet moment came). Then `shots`: 1,921
+   to 2,048 held; the slowest write under a millisecond, the erase about 30–60 ms; `stat`
+   as before.
+7. **5e-7, resets at any moment:** during `sim random 300`, an EN reset (RTS pulsed, as
+   esptool does) at a random moment, 5 times. Each boot: one boot more, 0 torn, the hits
+   before the reset held. Then the probe from (0, 0): every boot's hits in order, no gap.
+   (An EN reset restarts the ESP32 but the flash chip keeps power and finishes a write it
+   has begun, so it can't tear a record: the PC tests do that, byte by byte, and 5e-8.)
+8. **5e-8, a real power cut (the user, once):** a serial session open, `mic sim`, `sim
+   random 1000`; pull the USB cable at a random moment, plug it in again, 5 times. Expect
+   at each boot (`shots: ... hits held from ... boot(s), N torn`): N 0 almost always (a
+   write takes 0.6–3 ms of every 150 ms), 1 at most; then `shots` and the app connected:
+   every boot's hits in order, a gap in seq only where a boot line reported a torn record.
+
 ### 6. Wi-Fi and MQTT
 
 FUTURE_ARCHITECTURE.md step 2. Check the GPIO 36/39 erratum here (see Risks).
@@ -1523,6 +1585,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-24 | 5e | The shot store. PC: `pio test -e native` (31 cases). Bare NodeMCU flashed with the new table (logs `logs/upload-261124-*-5e.log`), run by Claude over serial (`logs/device-monitor-261124-131158-5e-a.log`, `-131401-5e-b.log`, `-5e-c.log`, `-5e-6.log`, `-5e-6b.log`, `-5e-7.log`, `-5e-7b.log`) and over BLE with the probe (`logs/probe-261124-5e-*.out`) | **PASS, 5e-1 to 5e-7.** 5e-1: `test_store` 8 of 8 (five laps of an 8-sector ring, 449 held at the end against 385 guaranteed; a write cut at each of its 64 bytes: nothing earlier lost, the torn hit absent; a cut erase). 5e-2: boot `capacity 1921`; the NVS kept (`mic` as before), and the store kept through the next reflash too (uploads don't touch `shots`). 5e-3: 30 hits, `reboot` (added for this: a clean restart): `30 hits held from 1 boot(s), 0 torn`, read in 42 ms; 10 more, reboot: 40 from 2 boots. 5e-4: the probe from (0, 0): boot 074B3DEF seq 1–30 then 651E3407 1–10, in order. **On that first connection after the reflash every hit came twice in a row** (80 for 40); the next connections with the same firmware: never (20, 0, 40, 1938, 1954 shots, none twice). The new build's "services changed" with BlueZ (bench 5) is the likely cause; the app drops duplicates by (boot, seq), so no score changes. `PROBE_FROM=074B3DEF:21`: seq 21–30 then the second boot's 1–10; `PROBE_FROM=651E3407:11`: none. 5e-5: `PROBE_CLEAR=1` after the 40: cleared up to H 40 (both boots), kept through a reboot; the probe then got 0. 5e-6: `sim random 2000` is the simulator's limit (its first try refused 2100), so two runs of 1100: both PASS (1100 of 1100 ok, sent, 0 missed, 0 late starts, 0.0125 / 0.0124 mm rms), the ring wrapped: 1921 held (H 320–2240), one erase done at a quiet moment (2 s); the slowest write 3.3 ms (typically 0.6), the slowest erase 29 ms; `stat`: interrupt 8.4 %, longest 22.4 µs (as before), 2200 events, 0 possibly missed. Found on the way: the quiet erase also waited for "no hit waiting to be sent", which never comes with no app connected: removed (an erase only delays the next indication). 5e-7, first try: reopening the port right after closing it didn't reset the board (the hits all stayed one boot: the store's "1 boot" was right); then with EN pulsed through RTS: 5 resets, each boot one boot more, 0 torn, the ring read in 98–100 ms; the probe got 1954 hits: the long run's boot seq 984–2601, then the five reset boots 1–85, 1–75, 1–27, 1–74, 1–75, 0 gaps, 336 in all = the 336 events logged before the resets. |
 | 2026-11-24 | 7-0b | The top-right mic moved out 25 mm along its diagonal, to (122.68, 122.68) (PLAN D1's update). PC: `model.py` (vectors made again), `pio test -e native`, the app's `cargo test`, `layout_study.py --drop` (log `logs/layout-study-261124-o25.txt`). Bare NodeMCU, run by Claude over serial: `mic default`, `mic sim`, `sim random 160`, `sim fault late 5`, `sim random 60`; log `logs/device-monitor-261124-125746-o25.log` | **PASS.** Native tests 23 of 23; the blast check: the four corners alone score 0 (smallest residual 6871 ns, the study's 6.9 µs), all six 0 (50.9 µs), any one dropped 0 (31.5–46.0 µs). The app's tests 68 pass (1 ignored, the phone), the Rust solver against the new vectors. The study: O25 (4 corners) 0 of 624 blasts, 6.88 µs; O25+B (5) 0, 31.6 µs, a late channel found 555 of 555 and then 0 blasts (S40+B: 553 of 555); O25+BR (6, the layout now) 0, 51.1 µs (S40+BR: 34.5 µs), a late channel found 666 of 666, then 0 blasts. On the board: `mic default` and `mic sim` put CH3 (the simulator's CH5) at (122.68, 122.68), and the board's blast check finds none, with every mic or any one dropped (1049 ms). `sim random 160`: 160 of 160 ok, 0.0123 mm rms, worst 0.028. The moved mic 24 µs late (`sim fault late 5`): dropped in 60 of 60, every shot ok, 0.0145 mm rms. Note: the board's boot text has ROM bytes in it, so `grep` takes the log for binary; use `grep -a`. |
 | 2026-11-24 | 7-0 | Bare NodeMCU, h 5.5 mm (the new default), run by Claude over serial: `mic default`, `mic sim`, `sim at 20 -30 100`, `sim random 160`; log `logs/device-monitor-261124-124225-h55.log`, upload `logs/upload-261124-*.log` (the first try: "Failed to start stub flasher", the second flashed); then `tools/bench.py` on that log, and `bench.py --selftest` | **PASS.** Every mic at h 5.50 mm after `mic default` and `mic sim`. `sim at`: 100 of 100 ok; `sim random 160`: 160 of 160 ok, error 0.0130 mm rms, worst 0.0276, none dropped. `bench.py verify --drop`: 0.013 mm rms, worst 0.028 (the simulator's own figures); without CH7 or CH8 (the middle mics) 0.014, without a corner 0.016–0.020. `bench.py repeat` (the 100 `sim at` shots): runs, but its predicted scatter is half the measured (0.007 against 0.014 mm): at one fixed point the simulator's only error is the sampling, nearly the same every shot (some channels' t0 differences vary by 3 ns), not the independent noise the method assumes; real analog noise is. `bench.py kcheck` on the simulator: k 0.305–0.361 (true 1/3 on all) with t2 − t1 spanning only 0.1–1.6 µs. This found two faults in the tool, both fixed: (1) the edges' sampling error is in t1 and in t2 − t1 alike and pulls the slope low (by σq²(2k + 1)/var(t2 − t1)): now corrected, the mean k 0.334; (2) over so short a range the boards' comparison misfires (a synthetic check: χ² up to 31 for equal boards, on the 25 ns grid or not; 4–7 over 1–10 µs): now no verdict under 1 µs (1σ). Self-test: 7 checks PASS (noise per channel within 6 %, a 24 µs late trip found, k within 0.0024, a curved channel found, equal boards agreeing in 5 of 5, no verdict on a short range in 5 of 5, the swap's k and offset recovered and its error 0.170 → 0.015 mm). |
 | 2026-11-23 | 5d | Bare NodeMCU, BLE from the PC (the probe in `drive` mode, `target/release/examples/probe`), the simulator on serial, run by Claude; serial `logs/device-monitor-261123-074754-5d.log`, probe `logs/probe-261123-074754-5d.out`, app log `logs/app-events-261123-074754-5d.log` | **Passes.** Field check before: 5 sparks at (0, 0), 0.436 mm (within the 0.5 mm limit: at the centre `sim cal truth` is least off). The wizard took the 160 sparks of `sim cal 10` (0 ignored), fitted: residual 38.5 ns, the error over the 16 points 0.814 → 0.013 mm rms (every point's worst under 0.035 mm); wrote record `E2BA6297`, which the sensor confirmed in Status and serial (`in use`). Field check after: 0.010 mm. `sim random 200` afterwards: 0.0145 mm rms, worst 0.061 mm (3e-3 with calibrate.py: 0.0140). `calibrate.py` on the same 160 sparks: mics within 0.0004 mm, k within 0.0001, offsets within 1.3 ns (±50 ns), the same 38.5 ns and 0.814 → 0.013 mm. On the PC: the solver meets the firmware's vector tolerances (worst position 0.000055 mm); the fit against calibrate.py's self-test within 0.1 sd. **Found:** scipy's defaults (1e-8) stop a few ns short of the minimum along the flat k–offset valley (objective 629 427 against the Rust fit's 629 420): `calibrate.py`'s final fit now uses tolerances of 1e-14 and central differences (629 420.24; offsets within 0.25 ns of the Rust fit). The last printed digits can still differ, so the two records' IDs aren't compared. |

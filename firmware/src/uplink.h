@@ -1,9 +1,10 @@
 // OpenSights - the uplink (PLAN D6): what goes to the app, and what the app sets, in protocol
 // v3 (protocol/PROTOCOL.md). BLE now (ble_link.cpp), MQTT later with the same messages.
 //
-// - Shots: the last SHOT_BUFFER hits (kind shot, hole or missed), numbered per boot,
-//   indicated one at a time until the app confirms each; a shot request asks for them again,
-//   a clear request forgets them.
+// - Shots: every hit (kind shot, hole or missed), numbered per boot, kept in flash across
+//   reboots (lib/store, the `shots` partition), indicated one at a time until the app
+//   confirms each; a shot request asks for them again (from any boot the store holds), a
+//   clear request forgets them.
 // - Events: the last EVENT_BUFFER events, every verdict, with everything a `rec` line has;
 //   delivered the same way, after any waiting shot.
 // - Status (notified when it changes), Control (calibration mode, template point),
@@ -31,3 +32,7 @@ uint32_t uplinkEvent(proto::Event& e, uint32_t nowMs);
 uint32_t uplinkHole(uint64_t tNs, int32_t lenNs, uint32_t nowMs);
 // Activity in the dead time while event `eventN` was read (capture.cpp): a missed shot.
 uint32_t uplinkMissed(uint32_t eventN, uint32_t nowMs);
+
+// Serial: `shots`, `shots clear`.
+void uplinkHelp();
+bool uplinkCommand(const char* cmd, const char* line);

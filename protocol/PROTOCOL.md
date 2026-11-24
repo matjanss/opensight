@@ -137,13 +137,20 @@ Example: hit 4, a hole at 13 000 ms, from event 19 →
 
 Shot request (app → sensor, 8 bytes): `u32` boot, `u32` next seq. "Send your shots from
 `next seq` of `boot` on."
-- The sensor keeps the last **64 hits** of the current boot (in RAM).
+- The sensor keeps its hits **in flash, across reboots**: the newest 1,921 at least, of
+  this boot and earlier ones (the shot store, `firmware/MEASUREMENT.md` 5e). Without the
+  store's partition (an old partition table) it keeps the newest 129 in RAM.
 - When it subscribes, an app gets only hits made after that. Right after subscribing,
   the app writes a request with the boot and seq of the last hit it has, plus 1.
-- If `boot` is not the sensor's current boot (for example 0, because the app has no hits
-  yet), the sensor sends every hit it still has.
+- The sensor sends that boot's hits from `next seq` on, then every later boot's hits,
+  oldest first. So an app that was away while the sensor rebooted gets the hits of the
+  boot it knew, then the new boot's.
+- If the sensor has no hits of `boot` (for example 0, because the app has no hits yet, or
+  a boot so old its hits dropped out), it sends every hit it still has that was not
+  cleared, earlier boots included: the series as the sensor last knew it.
 - The app drops duplicates by (boot, seq). A gap in `seq` within one boot means hits
-  were lost: more than 64 were made while the app was away.
+  were lost: more were made while the app was away than the sensor keeps, or a power cut
+  tore the one being written.
 - A request of the wrong length is ignored.
 
 Example: the app has hit 3 of boot `0x12345678` → `78 56 34 12 04 00 00 00`.
@@ -154,10 +161,13 @@ series, with the newest hit it has, so the cleared hits are not sent again on a 
 connect (for example after the app restarts).
 - Hits after `last seq` are kept: a hit made while the request was on its way still
   reaches the app.
-- If `boot` is not the sensor's current boot, the request is ignored (the sensor has none of
-  those hits any more). `last seq` beyond the newest hit means all hits.
+- It clears every earlier boot's hits too: the series up to that hit.
+- If the sensor has no hits of `boot`, the request is ignored. `last seq` beyond that
+  boot's newest hit means all of its hits.
+- The cleared point is kept across reboots.
 - Numbering is not reset: the next hit keeps counting from the last one.
-- A cleared hit is never sent again, also not when a shot request asks for it.
+- A cleared hit is never sent again, also not when a shot request asks for it, also not
+  after a reboot.
 
 Example: clear up to hit 3 of boot `0x12345678` → `01 78 56 34 12 03 00 00 00`.
 

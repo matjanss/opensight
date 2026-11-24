@@ -163,7 +163,17 @@ async fn main() -> Result<(), String> {
     for c in [&status, &shot, &event] {
         p.subscribe(c).await.map_err(|e| format!("subscribe: {e}"))?;
     }
-    p.write(&shot, &proto::encode_shot_request(0, 0), WriteType::WithResponse)
+    // PROBE_FROM=<boot hex>:<seq>: ask for hits from there (an app that has that boot's
+    // hits up to seq - 1, the shot store test, MEASUREMENT 5e); otherwise (0, 0): an app with none.
+    let (from_boot, from_seq) = std::env::var("PROBE_FROM")
+        .ok()
+        .and_then(|v| {
+            let (b, q) = v.split_once(':')?;
+            Some((u32::from_str_radix(b, 16).ok()?, q.parse().ok()?))
+        })
+        .unwrap_or((0, 0));
+    println!("probe: shot request from boot {from_boot:08X} seq {from_seq}");
+    p.write(&shot, &proto::encode_shot_request(from_boot, from_seq), WriteType::WithResponse)
         .await
         .map_err(|e| e.to_string())?;
     p.write(
@@ -382,8 +392,9 @@ async fn main() -> Result<(), String> {
         if n.uuid == proto::SHOT_UUID {
             let s = proto::decode_shot(&n.value).ok_or("shot decode")?;
             println!(
-                "probe: shot {} kind {:?} x {:.2} y {:.2} event {} cal {:08X} sigma {:?} flags {:02X}",
+                "probe: shot {} boot {:08X} kind {:?} x {:.2} y {:.2} event {} cal {:08X} sigma {:?} flags {:02X}",
                 s.seq,
+                s.boot,
                 s.kind,
                 s.x_mm(),
                 s.y_mm(),
@@ -449,6 +460,31 @@ async fn main() -> Result<(), String> {
         "probe: shots linked to a received event marked sent: {linked} of {}",
         shots.iter().filter(|s| s.event != 0).count()
     );
+    // The shots per boot, in the order they came: seq ranges and any gap (the shot store).
+    let mut runs: Vec<(u32, u32, u32, u32)> = Vec::new(); // boot, first seq, last seq, gaps
+    for s in &shots {
+        match runs.last_mut() {
+            Some(r) if r.0 == s.boot => {
+                if s.seq != r.2 + 1 {
+                    r.3 += 1;
+                }
+                r.2 = s.seq;
+            }
+            _ => runs.push((s.boot, s.seq, s.seq, 0)),
+        }
+    }
+    for (boot, a, b, g) in &runs {
+        println!("probe: shots of boot {boot:08X}: seq {a} to {b}, {g} gap(s)");
+    }
+    // PROBE_CLEAR=1: clear up to the last shot received, as the app's "Clear series".
+    if std::env::var("PROBE_CLEAR").is_ok_and(|v| v == "1")
+        && let Some(last) = shots.last()
+    {
+        p.write(&shot, &proto::encode_shot_clear(last.boot, last.seq), WriteType::WithResponse)
+            .await
+            .map_err(|e| e.to_string())?;
+        println!("probe: clear sent: up to seq {} of boot {:08X}", last.seq, last.boot);
+    }
     p.disconnect().await.ok();
     Ok(())
 }
