@@ -31,6 +31,11 @@ pub const SEARCH_MM: f64 = 4.0;
 /// The matched filter's least contrast for a hole (the difference's units: the paper–ink
 /// range).
 const MIN_CONTRAST: f64 = 0.15;
+/// A gauge circle's radius, as a share of the calibre's: what a hole's mark can be.
+const GAUGE_R_MIN: f64 = 0.8;
+const GAUGE_R_MAX: f64 = 1.4;
+/// The black disc's radius (the ISSF air pistol card: rings 7–10), mm.
+const BLACK_MM: f64 = 29.75;
 /// The radius out to which holes are looked for without a shot (the scoring area), mm.
 const SCORING_MM: f64 = 80.0;
 
@@ -908,6 +913,110 @@ pub fn all_holes(rgb: &Rgb, reg: &Registration) -> Vec<HoleFit> {
 
 fn find_all(rgb: &Rgb, reg: &Registration, exp: &Expected, skip: &[(f64, f64)]) -> Vec<HoleFit> {
     let r0 = HOLE_D_MM / 2.0;
+    // A hole is round and clearly different from the card.
+    candidates(rgb, reg, exp, skip, SCORING_MM, 0.5)
+        .into_iter()
+        .filter(|h| {
+            h.contrast >= MIN_CONTRAST
+                && (h.radius_mm - r0).abs() < 0.5
+                && h.center.0.hypot(h.center.1) <= SCORING_MM
+        })
+        .collect()
+}
+
+/// Every hole in the scoring area, without shots, as the gauge sees it (C5): the blobs' fits
+/// (the openings), each with the gauge's circle from there, for a calibre of `diameter_mm`.
+/// Kept: those whose circle is near the calibre's size and clearly damaged inside, one per
+/// hole. Then overlapping holes are fitted again together, their radius held at the median of
+/// the single holes in the same zone (black or white: the mark's edge differs), or one shared
+/// radius fitted if there are none.
+pub fn all_gauges(rgb: &Rgb, reg: &Registration, diameter_mm: f64) -> Vec<(HoleFit, crate::gauge::GaugeFit)> {
+    use crate::gauge::{GaugeFit, gauge};
+    let exp = Expected::from_photo(rgb, reg);
+    let r_cal = diameter_mm / 2.0;
+    // A torn hole's opening and its rim can be separate blobs, each smaller than the pellet's
+    // disc: smaller blobs are tried too (the gauge rejects what has no round edge).
+    let found = candidates(rgb, reg, &exp, &[], SCORING_MM + 2.0, 0.2);
+    // The mark's edge is the calibre's circle or a little outside it (a smear, a halo); the
+    // print's details (a ring's number: radius 0.9–1.6 mm) are well inside.
+    let ok = |g: &GaugeFit| {
+        (GAUGE_R_MIN * r_cal..GAUGE_R_MAX * r_cal).contains(&g.radius_mm) && g.damage >= MIN_CONTRAST
+    };
+    let fits: Vec<Option<GaugeFit>> = crate::par_map(&found, |h| {
+        gauge(rgb, &reg.map, &exp, &[h.center], diameter_mm, None)
+            .and_then(|g| g.into_iter().next())
+            .filter(ok)
+    });
+    let mut out: Vec<(HoleFit, GaugeFit)> = found
+        .into_iter()
+        .zip(fits)
+        .filter_map(|(h, g)| g.map(|g| (h, g)))
+        .collect();
+    // Two starts in one hole (a torn one fitted as two openings) give two circles on the same
+    // damage: the smoother one is kept.
+    out.sort_by(|a, b| a.1.rough_mm.total_cmp(&b.1.rough_mm));
+    let mut keep: Vec<(HoleFit, GaugeFit)> = Vec::new();
+    for (h, g) in out.drain(..) {
+        if keep
+            .iter()
+            .all(|(_, k)| (k.center.0 - g.center.0).hypot(k.center.1 - g.center.1) > r_cal)
+        {
+            keep.push((h, g));
+        }
+    }
+    // Overlapping holes: groups of circles closer than their radii and a margin.
+    let centres: Vec<(f64, f64)> = keep.iter().map(|(_, g)| g.center).collect();
+    let r_typ = {
+        let mut r: Vec<f64> = keep.iter().map(|(_, g)| g.radius_mm).collect();
+        r.sort_by(f64::total_cmp);
+        r.get(r.len() / 2).copied().unwrap_or(r_cal)
+    };
+    let groups = groups(&centres, 2.0 * r_typ + 0.5);
+    let in_black = |c: (f64, f64)| c.0.hypot(c.1) < BLACK_MM;
+    let zone_r = |black: bool| {
+        let mut r: Vec<f64> = groups
+            .iter()
+            .filter(|g| g.len() == 1 && in_black(centres[g[0]]) == black)
+            .map(|g| keep[g[0]].1.radius_mm)
+            .collect();
+        r.sort_by(f64::total_cmp);
+        r.get(r.len() / 2).copied()
+    };
+    let radius = [zone_r(false), zone_r(true)];
+    let multi: Vec<&Vec<usize>> = groups.iter().filter(|g| g.len() > 1).collect();
+    let again: Vec<Option<Vec<GaugeFit>>> = crate::par_map(&multi, |g| {
+        let starts: Vec<(f64, f64)> = g.iter().map(|&i| centres[i]).collect();
+        let black = starts.iter().filter(|c| in_black(**c)).count() * 2 > starts.len();
+        gauge(
+            rgb,
+            &reg.map,
+            &exp,
+            &starts,
+            diameter_mm,
+            radius[usize::from(black)],
+        )
+    });
+    for (g, fits) in multi.iter().zip(again) {
+        if let Some(fits) = fits {
+            for (&i, f) in g.iter().zip(fits) {
+                keep[i].1 = f;
+            }
+        }
+    }
+    keep
+}
+
+/// The blobs where the photo differs from the card within `reach` of the centre, of at least
+/// `min_area` of the pellet's disc, each fitted as one or more holes (unfiltered).
+fn candidates(
+    rgb: &Rgb,
+    reg: &Registration,
+    exp: &Expected,
+    skip: &[(f64, f64)],
+    reach: f64,
+    min_area: f64,
+) -> Vec<HoleFit> {
+    let r0 = HOLE_D_MM / 2.0;
     let res = 5.0;
     let f = Field::new(rgb, &reg.map, exp, (0.0, 0.0), SCORING_MM + 4.0, res);
     // Blobs: where the photo differs from the card, in the scoring area, away from the holes
@@ -916,7 +1025,7 @@ fn find_all(rgb: &Rgb, reg: &Registration, exp: &Expected, skip: &[(f64, f64)]) 
         .map(|k| {
             let p = f.point(k % f.n, k / f.n);
             f.d[k] > 0.2
-                && p.0.hypot(p.1) <= SCORING_MM
+                && p.0.hypot(p.1) <= reach
                 && skip.iter().all(|s| (s.0 - p.0).hypot(s.1 - p.1) > r0 + 0.6)
         })
         .collect();
@@ -947,14 +1056,14 @@ fn find_all(rgb: &Rgb, reg: &Registration, exp: &Expected, skip: &[(f64, f64)]) 
             }
         }
         let area = blob.len() as f64 / (res * res);
-        if area < 0.5 * disc {
+        if area < min_area * disc {
             continue; // the print's details (a number's strokes), dust
         }
         blobs.push(blob.iter().map(|&k| f.point(k % f.n, k / f.n)).collect());
     }
     // Each blob on its own core: how many holes, from the area, then one or two more if they
     // clearly fit better.
-    let out: Vec<HoleFit> = crate::par_map(&blobs, |pts| {
+    crate::par_map(&blobs, |pts| {
         let area = pts.len() as f64 / (res * res);
         let n0 = ((area / disc).round() as usize).clamp(1, 6);
         let mut best: Option<(Vec<HoleFit>, f64)> = None;
@@ -981,15 +1090,7 @@ fn find_all(rgb: &Rgb, reg: &Registration, exp: &Expected, skip: &[(f64, f64)]) 
     })
     .into_iter()
     .flatten()
-    .collect();
-    // A hole is round and clearly different from the card.
-    out.into_iter()
-        .filter(|h| {
-            h.contrast >= MIN_CONTRAST
-                && (h.radius_mm - r0).abs() < 0.5
-                && h.center.0.hypot(h.center.1) <= SCORING_MM
-        })
-        .collect()
+    .collect()
 }
 
 /// n starts spread over a blob's points: k-means from the farthest-point choice.

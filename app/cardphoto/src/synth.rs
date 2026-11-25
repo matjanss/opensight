@@ -42,6 +42,11 @@ pub struct Params {
     /// A ragged edge (torn paper): each hole's radius varies around it by this much (rms, mm),
     /// a random sum of harmonics 2 to 10 per hole. 0: round holes.
     pub hole_ragged_mm: f64,
+    /// Torn holes, as the C5 photos show (`app/CARDPHOTO.md`): within the pellet's circle a
+    /// smaller opening off its centre (the table, in the card's shadow), torn paper around it,
+    /// and a rim at the circle's edge (a grey smear on paper, a halo of flaked ink on black).
+    /// The circle's centre is the truth.
+    pub torn: bool,
     /// The table's mean level (0..1) and its texture's strength.
     pub table: f32,
     /// The table's colour, if not grey (`table` is then its brightness for the texture).
@@ -71,6 +76,7 @@ impl Default for Params {
             holes: vec![],
             hole_d_mm: 4.5,
             hole_ragged_mm: 0.0,
+            torn: false,
             table: 0.2,
             table_rgb: None,
             table_texture: 0.06,
@@ -165,6 +171,10 @@ pub fn photo(tex: &CardTexture, p: &Params) -> (Gray, Mapping) {
 
 /// The paper's tint (a warm white), on the card's grey render.
 const PAPER_TINT: [f32; 3] = [1.0, 0.985, 0.95];
+/// Torn holes' parts: torn paper (a cool white), the smear on paper, the flaked ink's halo.
+const TORN: [f32; 3] = [0.8, 0.82, 0.85];
+const SMEAR: [f32; 3] = [0.42, 0.4, 0.38];
+const FLAKED: [f32; 3] = [0.82, 0.82, 0.8];
 
 /// A synthetic photo in colour and its truth (the holes are found in colour).
 pub fn photo_rgb(tex: &CardTexture, p: &Params) -> (Rgb, Mapping) {
@@ -197,7 +207,6 @@ pub fn photo_rgb(tex: &CardTexture, p: &Params) -> (Rgb, Mapping) {
     let mut out = Rgb::new(p.w, p.h);
     let table_rgb = p.table_rgb.unwrap_or([p.table; 3]);
     let hole_r = p.hole_d_mm / 2.0;
-    let hole_r2 = hole_r * hole_r;
     // Ragged edges: per hole, harmonics m = 2..10 (amplitude ~ 1/m, random phase), scaled to
     // the rms asked for.
     let ragged: Vec<Vec<(f64, f64)>> = (0..p.holes.len())
@@ -221,23 +230,51 @@ pub fn photo_rgb(tex: &CardTexture, p: &Params) -> (Rgb, Mapping) {
         })
         .collect();
     let reach2 = (hole_r + 4.0 * p.hole_ragged_mm).powi(2);
-    let in_hole = |q: (f64, f64)| -> bool {
-        p.holes.iter().zip(&ragged).any(|(h, rg)| {
-            let d2 = (q.0 - h.0).powi(2) + (q.1 - h.1).powi(2);
-            if rg.is_empty() {
-                return d2 < hole_r2;
-            }
-            if d2 >= reach2 {
-                return false;
-            }
-            let phi = (q.1 - h.1).atan2(q.0 - h.0);
-            let r = hole_r
-                + rg.iter()
-                    .enumerate()
-                    .map(|(k, (a, ph))| a * ((k + 2) as f64 * phi + ph).cos())
-                    .sum::<f64>();
-            d2 < r * r
+    // Torn holes: per hole the opening's offset from the centre and its size.
+    let openings: Vec<((f64, f64), f64)> = (0..p.holes.len())
+        .map(|i| {
+            let mut rng = Rng::new(p.seed ^ (0x5A5A + i as u64));
+            let (a, d) = (
+                std::f64::consts::TAU * rng.uniform(),
+                0.3 * hole_r * rng.uniform(),
+            );
+            ((d * a.cos(), d * a.sin()), hole_r * (0.5 + 0.2 * rng.uniform()))
         })
+        .collect();
+    let rim = 0.35;
+    // What of a hole is at a card point: None (the card), Some(0) the table seen through it,
+    // Some(1) torn paper, Some(2) the rim (the last two: torn holes only).
+    let in_hole = |q: (f64, f64)| -> Option<u8> {
+        let mut out: Option<u8> = None;
+        for ((h, rg), (off, ro)) in p.holes.iter().zip(&ragged).zip(&openings) {
+            let d2 = (q.0 - h.0).powi(2) + (q.1 - h.1).powi(2);
+            let r = if rg.is_empty() {
+                hole_r
+            } else {
+                if d2 >= reach2 {
+                    continue;
+                }
+                let phi = (q.1 - h.1).atan2(q.0 - h.0);
+                hole_r
+                    + rg.iter()
+                        .enumerate()
+                        .map(|(k, (a, ph))| a * ((k + 2) as f64 * phi + ph).cos())
+                        .sum::<f64>()
+            };
+            if d2 >= r * r {
+                continue;
+            }
+            let part = if !p.torn || (q.0 - h.0 - off.0).hypot(q.1 - h.1 - off.1) < *ro {
+                0
+            } else if d2.sqrt() > r - rim {
+                2
+            } else {
+                1
+            };
+            // The table wins over paper, torn paper over a rim.
+            out = Some(out.map_or(part, |o: u8| o.min(part)));
+        }
+        out
     };
     // Each pixel averages 3 x 3 points over its area, as a sensor's pixel does (no aliasing
     // of the thin ring lines).
@@ -263,15 +300,28 @@ pub fn photo_rgb(tex: &CardTexture, p: &Params) -> (Rgb, Mapping) {
                     }
                     let tn = 1.0 + p.table_texture * table_noise(px, py, p.seed) as f32 / p.table.max(0.05);
                     let table = table_rgb.map(|c| c * tn);
-                    let v = if q.0.abs() < half && q.1.abs() < half && !in_hole(q) {
-                        let tx = (q.0 + half) * tex.px_per_mm - 0.5;
-                        let ty = (half - q.1) * tex.px_per_mm - 0.5;
-                        match tex.img.sample(tx, ty) {
-                            Some(g) => PAPER_TINT.map(|t| g * t),
-                            None => table,
-                        }
+                    let tx = (q.0 + half) * tex.px_per_mm - 0.5;
+                    let ty = (half - q.1) * tex.px_per_mm - 0.5;
+                    let print = if q.0.abs() < half && q.1.abs() < half {
+                        tex.img.sample(tx, ty)
                     } else {
-                        table
+                        None
+                    };
+                    let v = match (print, in_hole(q)) {
+                        (Some(g), None) => PAPER_TINT.map(|t| g * t),
+                        (None, _) => table,
+                        // The table through a torn hole, in the card's shadow.
+                        (Some(_), Some(0)) if p.torn => table.map(|c| 0.5 * c),
+                        (Some(_), Some(0)) => table,
+                        (Some(_), Some(1)) => TORN,
+                        // The rim: on paper the pellet's grey smear, on ink flaked white.
+                        (Some(g), Some(_)) => {
+                            if g > 0.5 {
+                                SMEAR
+                            } else {
+                                FLAKED
+                            }
+                        }
                     };
                     for k in 0..3 {
                         sum[k] += v[k];

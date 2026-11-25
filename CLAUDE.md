@@ -124,8 +124,9 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   (CARDPHOTO.md C2): fixed synthetic cases with their truth, and stored photos; one JSON line
   per case.
 - **Real card photos (C5):** `cargo run --release -p cardphoto --example c5 -- <photo>... >
-  out.jsonl` in `app/`: the registration and the unguided holes per file (`C5_NOHOLES=1`,
-  `C5_RECT=<dir>` for the photos on the card's grid). The user's photos are in
+  out.jsonl` in `app/`: the registration, the unguided holes and the gauge's circles (torn
+  holes, `cardphoto/src/gauge.rs`) per file (`C5_NOHOLES=1`, `C5_CAL=<mm>`, `C5_RECT=<dir>`
+  for the photos on the card's grid). The user's photos are in
   `~/dev/opensights-photos/` (one folder per card; not in git).
 - **The calibration crate:** `cargo test` in `app/` also runs `calib/` (the workspace's
   default members): the solver against `firmware/test/vectors`, the fit against

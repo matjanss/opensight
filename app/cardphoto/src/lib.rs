@@ -16,6 +16,7 @@
 
 pub mod card;
 pub mod detect;
+pub mod gauge;
 pub mod holes;
 pub mod meta;
 pub mod register;

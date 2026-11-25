@@ -1,5 +1,6 @@
 //! CARDPHOTO C5: real photos. Each file given: the registration and every hole in the scoring
-//! area (the unguided search: these cards were not shot on a sensor), one JSON line each.
+//! area (the unguided search: these cards were not shot on a sensor), the openings and the
+//! gauge's circles (`C5_CAL=<mm>`, 4.5 by default), one JSON line each.
 //!
 //! `cargo run --release -p cardphoto --example c5 -- <photo>... > out.jsonl`
 
@@ -7,7 +8,7 @@ use std::time::Instant;
 
 use cardphoto::Rgb;
 use cardphoto::card::issf_air_pistol;
-use cardphoto::holes::all_holes;
+use cardphoto::holes::{all_gauges, all_holes};
 use cardphoto::register::register;
 use serde_json::json;
 
@@ -28,14 +29,19 @@ fn one(path: &str) -> serde_json::Value {
     };
     let t_reg = t0.elapsed().as_secs_f64() - t_decode;
     // C5_NOHOLES=1: the registration alone.
-    let holes = if std::env::var_os("C5_NOHOLES").is_some() {
-        vec![]
+    // C5_CAL=<mm>: the calibre (4.5 by default).
+    let cal: f64 = std::env::var("C5_CAL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4.5);
+    let (holes, gauges) = if std::env::var_os("C5_NOHOLES").is_some() {
+        (vec![], vec![])
     } else {
-        all_holes(&rgb, &reg)
+        (all_holes(&rgb, &reg), all_gauges(&rgb, &reg, cal))
     };
     let t_holes = t0.elapsed().as_secs_f64() - t_decode - t_reg;
     if let Some(dir) = std::env::var_os("C5_RECT") {
-        rectified(&rgb, &reg, &holes, path, std::path::Path::new(&dir));
+        rectified(&rgb, &reg, &holes, &gauges, path, std::path::Path::new(&dir));
     }
     let h = reg.map.h / reg.map.h[(2, 2)];
     let hm: Vec<Vec<f64>> = (0..3).map(|i| (0..3).map(|j| h[(i, j)]).collect()).collect();
@@ -64,16 +70,26 @@ fn one(path: &str) -> serde_json::Value {
             "sd": f.sd_mm,
             "contrast": f.contrast,
         })).collect::<Vec<_>>(),
+        "gauges": gauges.iter().map(|(h, g)| json!({
+            "c": [g.center.0, g.center.1],
+            "r": g.radius_mm,
+            "sd": g.sd_mm,
+            "rays": g.rays,
+            "rough": g.rough_mm,
+            "damage": g.damage,
+            "open": { "c": [h.center.0, h.center.1], "r": h.radius_mm, "contrast": h.contrast },
+        })).collect::<Vec<_>>(),
     })
 }
 
 /// C5_RECT=<dir>: the photo on the card's grid, 6 px/mm, card x right and y up (the
 /// registration's axes, so turned by a quarter turn or not as it found them), the holes found
-/// in red (their fitted circle, and the centre).
+/// in red (their fitted circle, and the centre), the gauge's circles in blue.
 fn rectified(
     rgb: &Rgb,
     reg: &cardphoto::register::Registration,
     holes: &[cardphoto::holes::HoleFit],
+    gauges: &[(cardphoto::holes::HoleFit, cardphoto::gauge::GaugeFit)],
     path: &str,
     dir: &std::path::Path,
 ) {
@@ -91,23 +107,24 @@ fn rectified(
             img.put_pixel(i, j, image::Rgb(c.map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8)));
         }
     }
-    let mut dot = |x: f64, y: f64| {
+    let mut dot = |x: f64, y: f64, c: [u8; 3]| {
         let (i, j) = (((x + half) * ppm) as i64, ((half - y) * ppm) as i64);
         if (0..i64::from(n)).contains(&i) && (0..i64::from(n)).contains(&j) {
-            img.put_pixel(i as u32, j as u32, image::Rgb([255, 0, 0]));
+            img.put_pixel(i as u32, j as u32, image::Rgb(c));
         }
     };
-    for h in holes {
+    let circles = holes
+        .iter()
+        .map(|h| (h.center, h.radius_mm, [255, 0, 0]))
+        .chain(gauges.iter().map(|(_, g)| (g.center, g.radius_mm, [0, 90, 255])));
+    for (c, r, col) in circles {
         for k in 0..360 {
             let a = f64::from(k).to_radians();
-            dot(
-                h.center.0 + h.radius_mm * a.cos(),
-                h.center.1 + h.radius_mm * a.sin(),
-            );
+            dot(c.0 + r * a.cos(), c.1 + r * a.sin(), col);
         }
         for d in -3..=3 {
-            dot(h.center.0 + f64::from(d) / ppm, h.center.1);
-            dot(h.center.0, h.center.1 + f64::from(d) / ppm);
+            dot(c.0 + f64::from(d) / ppm, c.1, col);
+            dot(c.0, c.1 + f64::from(d) / ppm, col);
         }
     }
     let p = std::path::Path::new(path);
@@ -129,9 +146,10 @@ fn main() {
             "{path}: {}",
             v.get("error").map_or_else(
                 || format!(
-                    "rms {:.4} mm, {} holes, {:.1} s",
+                    "rms {:.4} mm, {} holes, {} gauges, {:.1} s",
                     v["rms_mm"].as_f64().unwrap(),
                     v["holes"].as_array().unwrap().len(),
+                    v["gauges"].as_array().unwrap().len(),
                     v["s_decode"].as_f64().unwrap()
                         + v["s_reg"].as_f64().unwrap()
                         + v["s_holes"].as_f64().unwrap()
