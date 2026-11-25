@@ -84,8 +84,16 @@ fn residuals(q: &[f64], lens0: &Lens, pts: &[RingPoint], model: &CardModel) -> V
         .collect()
 }
 
-/// Weighted Levenberg-Marquardt from q0; weights per point (the robust reweighting).
-fn minimize(q0: &[f64], lens0: &Lens, pts: &[RingPoint], model: &CardModel, w: &[f64]) -> Vec<f64> {
+/// Weighted Levenberg-Marquardt from q0; weights per point (the robust reweighting). With
+/// `lens` false, the lens's k1 and k2 stay as they are.
+fn minimize(
+    q0: &[f64],
+    lens0: &Lens,
+    pts: &[RingPoint],
+    model: &CardModel,
+    w: &[f64],
+    lens: bool,
+) -> Vec<f64> {
     // Typical sizes, for the finite differences' steps.
     let scale = |q: &[f64], i: usize| -> f64 {
         let lin = q[0]
@@ -128,8 +136,16 @@ fn minimize(q0: &[f64], lens0: &Lens, pts: &[RingPoint], model: &CardModel, w: &
             }
         }
         let f = DVector::from_iterator(m, r0.iter().zip(w).map(|(r, w)| r * w.sqrt()));
-        let a = jac.transpose() * &jac;
-        let g = jac.transpose() * f;
+        let mut a = jac.transpose() * &jac;
+        let mut g = jac.transpose() * f;
+        if !lens {
+            for p in 8..10 {
+                a.row_mut(p).fill(0.0);
+                a.column_mut(p).fill(0.0);
+                a[(p, p)] = 1.0;
+                g[p] = 0.0;
+            }
+        }
         let mut improved = false;
         for _ in 0..20 {
             let mut ad = a.clone();
@@ -175,13 +191,20 @@ fn mad_sigma(r: &[f64]) -> f64 {
 }
 
 /// Fits the mapping to edge points, robustly (Huber weights from the residuals' MAD, a few
-/// rounds). Returns the parameters and the final residuals.
-fn fit(map: &Mapping, d: (f64, f64), pts: &[RingPoint], model: &CardModel) -> (Vec<f64>, Vec<f64>) {
+/// rounds). Returns the parameters and the final residuals. With `lens` false, the lens stays
+/// as `map` has it.
+fn fit(
+    map: &Mapping,
+    d: (f64, f64),
+    pts: &[RingPoint],
+    model: &CardModel,
+    lens: bool,
+) -> (Vec<f64>, Vec<f64>) {
     let lens0 = map.lens;
     let mut q = pack(map, d.0, d.1);
     let mut w = vec![1.0; pts.len()];
     for _ in 0..6 {
-        q = minimize(&q, &lens0, pts, model, &w);
+        q = minimize(&q, &lens0, pts, model, &w, lens);
         let r = residuals(&q, &lens0, pts, model);
         let k = (1.5 * mad_sigma(&r)).max(0.002);
         w = r
@@ -211,15 +234,35 @@ pub fn register(img: &Gray, model: &CardModel) -> Result<Registration, String> {
     let mut d = (0.0, 0.0);
     let mut pts = Vec::new();
     let mut res = Vec::new();
-    for window in [2.0, 0.8, 0.5] {
-        pts = ring_points(img, &map, model, con, 720, window, step);
+    // From the disc outwards: the coarse mapping (from the disc alone) can be several mm off
+    // at the outer rings of a close, tilted photo, more than the window and up to the next
+    // ring (8 mm away). So the inner rings first, the lens held, then further out, each
+    // stage's guess reaching at most about 40 % beyond the rings already fitted; then the
+    // whole card, the lens free, in narrower windows.
+    for (reach, window, lens) in [
+        (38.0, 2.0, false),
+        (54.0, 2.0, false),
+        (f64::INFINITY, 2.0, true),
+        (f64::INFINITY, 0.8, true),
+        (f64::INFINITY, 0.5, true),
+    ] {
+        let part = CardModel {
+            features: model
+                .features
+                .iter()
+                .copied()
+                .filter(|f| f.radius_mm <= reach)
+                .collect(),
+            ..model.clone()
+        };
+        pts = ring_points(img, &map, &part, con, 720, window, step);
         if pts.len() < 500 {
             return Err(format!(
                 "only {} edge points on the rings: not enough of the card in focus",
                 pts.len()
             ));
         }
-        let (q, r) = fit(&map, d, &pts, model);
+        let (q, r) = fit(&map, d, &pts, &part, lens);
         let (m, dd, dl) = unpack(&q, &map.lens);
         map = m;
         d = (dd, dl);

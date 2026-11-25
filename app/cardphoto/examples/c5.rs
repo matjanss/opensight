@@ -1,0 +1,143 @@
+//! CARDPHOTO C5: real photos. Each file given: the registration and every hole in the scoring
+//! area (the unguided search: these cards were not shot on a sensor), one JSON line each.
+//!
+//! `cargo run --release -p cardphoto --example c5 -- <photo>... > out.jsonl`
+
+use std::time::Instant;
+
+use cardphoto::Rgb;
+use cardphoto::card::issf_air_pistol;
+use cardphoto::holes::all_holes;
+use cardphoto::register::register;
+use serde_json::json;
+
+fn one(path: &str) -> serde_json::Value {
+    let t0 = Instant::now();
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return json!({ "file": path, "error": e.to_string() }),
+    };
+    let rgb = match Rgb::decode(&bytes) {
+        Ok(r) => r,
+        Err(e) => return json!({ "file": path, "error": e }),
+    };
+    let t_decode = t0.elapsed().as_secs_f64();
+    let reg = match register(&rgb.to_gray(), &issf_air_pistol()) {
+        Ok(r) => r,
+        Err(e) => return json!({ "file": path, "w": rgb.w, "h": rgb.h, "error": e }),
+    };
+    let t_reg = t0.elapsed().as_secs_f64() - t_decode;
+    // C5_NOHOLES=1: the registration alone.
+    let holes = if std::env::var_os("C5_NOHOLES").is_some() {
+        vec![]
+    } else {
+        all_holes(&rgb, &reg)
+    };
+    let t_holes = t0.elapsed().as_secs_f64() - t_decode - t_reg;
+    if let Some(dir) = std::env::var_os("C5_RECT") {
+        rectified(&rgb, &reg, &holes, path, std::path::Path::new(&dir));
+    }
+    let h = reg.map.h / reg.map.h[(2, 2)];
+    let hm: Vec<Vec<f64>> = (0..3).map(|i| (0..3).map(|j| h[(i, j)]).collect()).collect();
+    json!({
+        "file": path,
+        "w": rgb.w,
+        "h": rgb.h,
+        "s_decode": t_decode,
+        "s_reg": t_reg,
+        "s_holes": t_holes,
+        "rms_mm": reg.rms_mm,
+        "points": reg.points,
+        "kept": reg.kept,
+        "per_feature": reg.per_feature,
+        "d_dark": reg.d_dark,
+        "d_light": reg.d_light,
+        "k1": reg.map.lens.k1,
+        "k2": reg.map.lens.k2,
+        "lens": [reg.map.lens.cx, reg.map.lens.cy, reg.map.lens.norm],
+        "H": hm,
+        "outline": reg.rotation_from_outline,
+        "contrast": [reg.contrast.paper, reg.contrast.ink],
+        "holes": holes.iter().map(|f| json!({
+            "c": [f.center.0, f.center.1],
+            "r": f.radius_mm,
+            "sd": f.sd_mm,
+            "contrast": f.contrast,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// C5_RECT=<dir>: the photo on the card's grid, 6 px/mm, card x right and y up (the
+/// registration's axes, so turned by a quarter turn or not as it found them), the holes found
+/// in red (their fitted circle, and the centre).
+fn rectified(
+    rgb: &Rgb,
+    reg: &cardphoto::register::Registration,
+    holes: &[cardphoto::holes::HoleFit],
+    path: &str,
+    dir: &std::path::Path,
+) {
+    let ppm = 6.0;
+    let half = 86.0;
+    let n = (2.0 * half * ppm) as u32;
+    let mut img = image::RgbImage::new(n, n);
+    for j in 0..n {
+        for i in 0..n {
+            let q = (
+                -half + (f64::from(i) + 0.5) / ppm,
+                half - (f64::from(j) + 0.5) / ppm,
+            );
+            let c = rgb.sample_at(&reg.map, q).unwrap_or([0.0, 0.0, 0.0]);
+            img.put_pixel(i, j, image::Rgb(c.map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8)));
+        }
+    }
+    let mut dot = |x: f64, y: f64| {
+        let (i, j) = (((x + half) * ppm) as i64, ((half - y) * ppm) as i64);
+        if (0..i64::from(n)).contains(&i) && (0..i64::from(n)).contains(&j) {
+            img.put_pixel(i as u32, j as u32, image::Rgb([255, 0, 0]));
+        }
+    };
+    for h in holes {
+        for k in 0..360 {
+            let a = f64::from(k).to_radians();
+            dot(
+                h.center.0 + h.radius_mm * a.cos(),
+                h.center.1 + h.radius_mm * a.sin(),
+            );
+        }
+        for d in -3..=3 {
+            dot(h.center.0 + f64::from(d) / ppm, h.center.1);
+            dot(h.center.0, h.center.1 + f64::from(d) / ppm);
+        }
+    }
+    let p = std::path::Path::new(path);
+    let name = format!(
+        "{}_{}.png",
+        p.parent()
+            .and_then(|d| d.file_name())
+            .map_or("x".into(), |d| d.to_string_lossy()),
+        p.file_stem().map_or("x".into(), |f| f.to_string_lossy())
+    );
+    img.save(dir.join(name)).unwrap();
+}
+
+fn main() {
+    for path in std::env::args().skip(1) {
+        let v = one(&path);
+        println!("{v}");
+        eprintln!(
+            "{path}: {}",
+            v.get("error").map_or_else(
+                || format!(
+                    "rms {:.4} mm, {} holes, {:.1} s",
+                    v["rms_mm"].as_f64().unwrap(),
+                    v["holes"].as_array().unwrap().len(),
+                    v["s_decode"].as_f64().unwrap()
+                        + v["s_reg"].as_f64().unwrap()
+                        + v["s_holes"].as_f64().unwrap()
+                ),
+                |e| format!("ERROR {e}")
+            )
+        );
+    }
+}

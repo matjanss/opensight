@@ -15,7 +15,7 @@ and reviews the results.
 | C2 | The holes: finding them, matching them to the shots | synthetic tests pass (2026-11-23); real holes in C5 |
 | C3 | The upload: QR code, the phone page, storage | tests over HTTP pass (2026-11-23); the phone test passes (the user, 2026-11-24) |
 | C4 | In the app: the photo under the shots, the ground-truth panel | the processing passes through the app's path (2026-11-23); the UI looked at and accepted (the user, 2026-11-24) |
-| C5 | Real photos: registration (no holes), then holes | waiting for the photos |
+| C5 | Real photos: registration (no holes), then holes | first set (2026-11-25): registration passes after a fix; the holes need a model for torn holes (see C5) |
 | C6 | The serial number from the photo | later |
 
 ## The card and its coordinates
@@ -46,8 +46,11 @@ Builds, in a library crate `app/cardphoto/` (pure Rust, workspace member, `cargo
    a nearer one), so the rings set it to their ISSF size, which is what scoring uses; paper
    that changed size between the shot and the photo shows in C2, as a scale between the shots
    and the holes. Robust (Huber weights from the residuals' MAD), so hole edges, dust and the
-   printed numbers drop out; Levenberg-Marquardt (`nalgebra`), three rounds of edge points
-   with narrower windows (±2, 0.8, 0.5 mm). Circles fix everything but the card's rotation
+   printed numbers drop out; Levenberg-Marquardt (`nalgebra`). The edge points are found
+   from the disc outwards (C5): the circles out to 38 mm, then to 54 mm, both with the lens
+   held, each in a ±2 mm window about the last fit; then all circles with the lens free, in
+   windows of ±2, 0.8 and 0.5 mm. (From the disc alone, the outer rings of a close, tilted
+   photo can be off by more than the window, or by a whole ring.) Circles fix everything but the card's rotation
    about its centre: that is fixed here by the card's square outline where it is in the photo
    (else arbitrary), and settled in C2 by the shots.
 5. **Diagnostics:** the rms residual of the edge points, in mm on the card; how many points,
@@ -296,7 +299,8 @@ scanner is at hand (the accuracy, not only the spread).
 **The card's thickness (not in the model yet):** a hole is a short tube through the card, not
 a circle on its surface. Seen at an angle θ from the camera, the surface seen through it is
 where the top and bottom openings overlap: narrower by about t·tan θ, its centre about
-t·tan θ / 2 off the hole's centre on the surface, away from the camera. With t = 0.4 mm that is 0.05 mm at 15°,
+t·tan θ / 2 off the hole's centre on the surface, toward the camera (the bottom opening
+seen through the top one shifts toward the camera by t·tan θ; first written here as away). With t = 0.4 mm that is 0.05 mm at 15°,
 0.09 mm at 25°, 0.12 mm at 30°. Even a photo from straight above sees holes off the lens's
 axis at an angle: with a phone's main lens (about 70° across) close enough for the card to
 fill 70 % of the frame, a hole 78 mm from the centre is seen at about 24°. The tilted photos
@@ -309,6 +313,33 @@ hole found at the same card position in every photo (its spread is the photo met
 precision; expected under 0.05 mm), and that spread against the angle each photo saw the hole
 at (the thickness above); every hole of every card found, none false.
 
+**The tool:** `cargo run --release -p cardphoto --example c5 -- <photo>... > out.jsonl` in
+`app/`: per file the registration (rms, points per circle, the lens, the homography) and every
+hole the unguided search finds, one JSON line each; `C5_NOHOLES=1` the registration alone,
+`C5_RECT=<dir>` each photo on the card's grid (6 px/mm) with the holes drawn. The analysis
+(the camera's pose from the homography, the holes' spread across photos) was done with
+scripts outside the repo; the numbers are in Results.
+
+**What the first set showed (2026-11-25), and what's next:**
+
+- **Torn holes.** These pellets tore the card rather than punching a clean 4.5 mm disc. In
+  the white, the table shows through an opening only about 3 mm across, in a grey torn rim.
+  In the black, the ink flakes off around the cut (a white halo, partly outside it), and white
+  flaps of paper lie in the hole. The hole model (the table's colour inside a circle, the
+  card outside) fits the opening: r 1.35–1.6 mm in the white (then rejected: the filter wants
+  2.25 ± 0.5 mm) and often as two circles; about 2.0 mm in the black (the halo counted in).
+  A model to decide: the hole as everything that isn't intact card, within a circle of the
+  pellet's size (as a scoring gauge sees it). A first try on card 1's black holes changed
+  their spread little (0.20 → 0.19, 0.17 → 0.14 mm, before the alignment was fixed).
+- **A light wooden table** (close to the cream paper) makes the holes in the white faint: the
+  next set on a strongly coloured surface (a blue or green folder), as the shooter's guide
+  says.
+- **The card's thickness:** not seen yet (t fitted 0.11 ± 0.14 mm, the spreads unchanged);
+  the torn flaps, which look different from each angle, are larger.
+- **For the user:** how these holes were made (pellet type, backing card, distance); a second
+  set on a coloured surface, some from straight above from further away (2× lens); scans of
+  cards 1 and 3.
+
 ## C6. The serial number
 
 Later: where and how the serial is printed (a close-up from the user), then reading its 6
@@ -320,6 +351,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-25 | C5 | The user's first set: an iPhone 14 Plus, main lens (26 mm, f/1.5), 4032 × 3024, no flash, a light wooden table, daylight; the clean card 13 photos and a 600 dpi scan; four holed cards (1: 012370, 12 photos; 2: 012373, 10; 3: 12; 4: 012371, 9 and a scan); the camera 160–370 mm above the card, tilts 2–35°, the card's corners seen at up to 53°. Two files damaged in the copy (IMG_3441, IMG_3449: a grey band at one side). Run by Claude with the `c5` example | **Registration: fail, fixed, then pass.** First: 13 photos with only 1,700–5,000 of about 7,900 edge points, rms 0.10–0.19 mm and an absurd lens (k1 up to +1.36, k2 −6.1): the outer rings lost, the first window placed from the disc alone. With the fit grown outwards (C1 4): every file 6,700–7,900 points (4,000–5,000 in two), rms 0.017–0.080 mm (the scans 0.016–0.018; about 0.02 mm from straight above, 0.05–0.08 at 20–33° of tilt), k1 −0.04 to −0.23 with k2 0.07–0.67 (the two trade off), the line offsets d_dark −0.09 to +0.03 and d_light about −0.09 mm. **Holes: partly.** The clean card: none found in 14 files (no false holes). The holes in the black found in every photo; those in the white mostly not (cards 2 and 4: 0–4 found, and those split): fitted at r 1.35–1.6 mm and rejected (see C5). Spread across photos, each photo's rotation fitted to the holes found in at least 80 % of them: card 3's three touching holes sd 0.043–0.078 mm (worst 0.17 mm, seen at 33°), card 1's two holes in the black 0.090 and 0.130 mm; without any alignment, card 1's two holes 34.353 mm apart with sd 0.095 mm, their distances from the centre sd 0.049 and 0.084 mm. Card thickness fitted 0.11 ± 0.14 mm (no effect seen). `cargo test` passes (cardphoto 10 + 7 + 5, the app 47). |
 | 2026-11-24 | C2 | The user: a test of 50 shots in the app, from the `photo-speed` worktree | **Pass** (the user's report: "works out perfectly"); the same test from the old code had taken nearly 2 minutes. Merged to `main`, with C4's series panel. **Found on the merge:** `upload_stores_without_metadata` failed once in the full `cargo test` (the photo tests now keep every core busy): the server answered the phone before telling the app, and the test reads the app's event right after the answer. Now the app first; the full `cargo test` passes 3 times in a row. |
 | 2026-11-24 | C2 | The holes made faster (the user: "the analysis takes a long time"), old and new compared by `holes_bench` on 38 cases (24 synthetic with their truth, 14 stored demo photos with their shots), run by Claude | **Pass.** Before: 3–5 s a photo, 85 s for 41 shots (a group of 16 touching holes fitted together, the cost growing as n³ with a numerical Jacobian), 4–56 minutes or an error for dense series. Now (release build, one case at a time): the stored photos 0.1–0.4 s (41 shots 1.2 s), the 41-shot demo 1.2 s (115 s), pairs 0.5–1.4 s (18–23 s), dense series of 20–60 shots 3–11 s. The same holes as before to 0.00001 mm on the tests' cards, the stored photos, the demo, the pairs and the torn nine. **Found on the way:** (1) in shot-out clusters, circles hidden by their neighbours ran off by metres and pulled the shared radius to 1.35 mm, both versions: now held to their shots. (2) Tight central groups could get the wrong quarter turn (rms 16–19 mm): now only holes agreeing on one placement count. (3) Holes in a shot-out middle were reported found but 1–4 mm off: now those not pinned down (sd over 0.25 mm, radius 0.2 mm off the median) are not found. (4) Fitting doubtful groups again (the user's idea of a slower, more robust fallback) made things worse (see C2): dropped; the quarter turn's fallback to all shots stays. Dense series against the old code: 20 shots at 6 mm sd 9 found, none off (12, 3 up to 1.9 mm off); 40 at 6 mm 6 found, none off (an error); torn pairs fewer wrong holes (13 → 8, the worst 0.56 → 0.27 mm; 15 → 13); 40 at 6 mm torn 23 found, 10 more than 0.2 mm off, the worst 3.3 mm (22, 9, 2.4 mm); the other dense series within a hole of the old counts. Shot-out fits are chaotic: a change in the last digits of a sum moves those results (the same code twice gives the same). 4 new tests (`overlapping_pairs`, `ragged_holes`, `dense_group_never_misplaced`, `demo_41_shots_in_time`); `cargo test` passes (cardphoto 10 + 7 + 5). |
 | 2026-11-24 | C4 | The user's wishes: the photo window closes once the photo is processed (an error keeps it open); the results in the series panel as a table, columns #, OpenSights, Paper (both red where they differ), shot x, y, hole − shot, off, with the summary and warnings above and the photo's buttons below; a click on a series row opens the shot's popup on the card. `cargo test` run by Claude | **Built**, `cargo test` passes (68, 1 ignored: the phone); no warnings. The UI: to be looked at (the user), with `OPENSIGHTS_DEMO_PHOTO=1 cargo run` (the Card photo window's demo button). |
