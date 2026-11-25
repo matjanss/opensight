@@ -283,16 +283,31 @@ Builds (`src/photo.rs`, the window in `main.rs`):
 
 ## C5. Real photos
 
-From the user: about 10 photos of a card without holes, and about 10 of a card with holes
-(some in the black, some in the white, some cutting a ring line, two or three overlapping):
-flat on a table, card filling 60–90 % of the frame, angles up to about 15°, daylight and lamp
-light, a dark and a light table; the original files (not sent through a chat app), and which
-phone.
+From the user (2026-11-25: one clean card and nine with holes, so more than first asked):
+10 photos of the clean card, 10 of the holed card with the most varied holes (in the black,
+in the white, cutting a ring line, overlapping), 3–4 of each of the other eight; one folder
+per card (`~/opensights-photos/clean/`, `card1/`–`card9/`). Flat on a grey or coloured
+surface (not black), nothing behind the paper, no flash or shadow; card filling 60–90 % of
+the frame; tilts from straight down to 30°; some with the phone's 2× or 3× lens from further
+away; daylight and lamp light; the original files (not sent through a chat app), and which
+phone; the card's thickness if a calliper is at hand. A 600 dpi scan of each holed card if a
+scanner is at hand (the accuracy, not only the spread).
+
+**The card's thickness (not in the model yet):** a hole is a short tube through the card, not
+a circle on its surface. Seen at an angle θ from the camera, the surface seen through it is
+where the top and bottom openings overlap: narrower by about t·tan θ, its centre about
+t·tan θ / 2 off the hole's centre on the surface, away from the camera. With t = 0.4 mm that is 0.05 mm at 15°,
+0.09 mm at 25°, 0.12 mm at 30°. Even a photo from straight above sees holes off the lens's
+axis at an angle: with a phone's main lens (about 70° across) close enough for the card to
+fill 70 % of the frame, a hole 78 mm from the centre is seen at about 24°. The tilted photos
+and the tele lens's photos measure this; if it shows, the hole model takes the camera's
+position (from the registration) and the card's thickness.
 
 **Tests:** registration on every photo (the residual; the warnings); the same card's scale
 and the lens's distortion consistent across photos of one phone; then the holes: the same
 hole found at the same card position in every photo (its spread is the photo method's own
-precision; expected under 0.05 mm).
+precision; expected under 0.05 mm), and that spread against the angle each photo saw the hole
+at (the thickness above); every hole of every card found, none false.
 
 ## C6. The serial number
 
