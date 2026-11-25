@@ -374,7 +374,7 @@ fn run(case: &Case, tex: &CardTexture) -> Value {
             "truth": truth.as_ref().map(|_| json!({"holes": truth_holes.len(), "matched": matched, "worst": worst})),
         });
     }
-    let gt = match ground_truth(&rgb, &reg, &shots) {
+    let gt = match ground_truth(&rgb, &reg, &shots, 4.5) {
         Ok(g) => g,
         Err(e) => return json!({"name": case.name, "reg_s": t_reg, "error": e}),
     };

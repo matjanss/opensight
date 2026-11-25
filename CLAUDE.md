@@ -370,7 +370,11 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   re-encoding; stored in `photos/` next to `logs/` with a JSON beside it; originals removed
   after 30 days unless marked to keep. The registration and the holes are in `cardphoto/`: the hole fit with direct derivatives,
   big groups and the groups themselves on the cores (`par_map`), holes not pinned down
-  reported as not found (CARDPHOTO.md C2).
+  reported as not found (CARDPHOTO.md C2). Real holes are torn (C5): a single hole is the
+  gauge's circle (`gauge.rs`: the mark's outer edge along 360 rays, for the card's
+  `pellet_diameter_mm`), overlapping holes the old model's and flagged; the expected card
+  includes the printed numbers (the median of their four copies). `view.rs`: the camera's
+  angle from the homography and the expected error; over 10° the app warns but uses the photo.
   `photo.rs` processes a photo on a thread (registration, holes against the series' shots,
   the photo resampled onto the card's grid through the placement, `<photo>.result.json`).
   `main.rs`: "Card photo" under the series opens the photo window (QR, status, drop a file);

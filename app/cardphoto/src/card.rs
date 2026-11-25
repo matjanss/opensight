@@ -33,6 +33,9 @@ pub struct CardModel {
     pub paper_band_mm: (f64, f64),
     /// Where the black between ring 8's line and the disc's edge is.
     pub ink_band_mm: (f64, f64),
+    /// The printed ring numbers: upright, the same on the card's four axes (along its edges),
+    /// centred at these distances from the centre.
+    pub number_radii_mm: Vec<f64>,
 }
 
 /// The ISSF 10 m air pistol card (`assets/cards/issf-10m-air-pistol.*`): 170 × 170 mm.
@@ -58,5 +61,8 @@ pub fn issf_air_pistol() -> CardModel {
         half_size_mm: 85.0,
         paper_band_mm: (31.5, 36.0),
         ink_band_mm: (23.5, 28.0),
+        // In the middle of the bands: 8 and 7 in the black, 6 to 1 on the white; 4.5 mm type
+        // (a digit about 3.2 × 2.5 mm).
+        number_radii_mm: vec![17.75, 25.75, 33.75, 41.75, 49.75, 57.75, 65.75, 73.75],
     }
 }

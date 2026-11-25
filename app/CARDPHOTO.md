@@ -15,7 +15,7 @@ and reviews the results.
 | C2 | The holes: finding them, matching them to the shots | synthetic tests pass (2026-11-23); real holes in C5 |
 | C3 | The upload: QR code, the phone page, storage | tests over HTTP pass (2026-11-23); the phone test passes (the user, 2026-11-24) |
 | C4 | In the app: the photo under the shots, the ground-truth panel | the processing passes through the app's path (2026-11-23); the UI looked at and accepted (the user, 2026-11-24) |
-| C5 | Real photos: registration (no holes), then holes | first set (2026-11-25): registration passes after a fix; the holes with the gauge (torn holes): every hole found, 0.04–0.06 mm from straight above; tilted photos, overlapping holes and the app's use still open (see C5) |
+| C5 | Real photos: registration (no holes), then holes | first set (2026-11-25): registration passes after a fix; the holes with the gauge (torn holes): every hole found, 0.035–0.046 mm from straight above; in the app, with the camera's angle and the expected error; overlapping torn holes and the scans' truth still open (see C5) |
 | C6 | The serial number from the photo | later |
 
 ## The card and its coordinates
@@ -391,17 +391,59 @@ photos included). Synthetic torn holes (`tests/gauge.rs`: the opening off-centre
 torn paper, a smear or a halo, a light wooden table, 3° and 25° of tilt): all 8 found, centres
 within 0.038 mm, radii within 0.03 mm, the ring numbers and the clean card not taken for holes.
 
+**In the app (2026-11-25, the user: "if the user doesn't want to take another photo, just use
+the one that was provided with a message that the error may be x mm").**
+
+- **The holes with shots** (`holes::ground_truth`, the calibre from the card's
+  `pellet_diameter_mm`, so a .22 card gauges 5.6 mm): the first round places the card from
+  the old model's circles (quick; the gauge's if the old model sees none, as in a scan where
+  the lid's white fills the holes). The second: a single hole is the gauge's circle, seeded at
+  the old model's circle and at the shot (the smoother kept: a long torn mark can give a circle
+  on one lobe from one seed); the old model's circle stays where the gauge's is smaller than
+  the pellet (0.97 of its radius) or than the opening the old model pinned down (by 0.1 mm):
+  then the gauge saw something inside, not the edge (a table as dark as the ink). A hole that
+  overlaps another (openings closer than the calibre, or circles that cross) stays the old
+  model's and is flagged (`ShotResult::overlap`): the gauge's joint fit put the synthetic
+  clean pairs up to 1.6 mm off, the old model 0.06 mm. Holes no shot explains: the gauge's
+  unguided search.
+- **The gauge, refined on the way:** the first round looks 1 mm further out (a seed off the
+  centre must reach the far side of a rim larger than the calibre; from 0.7 mm off it settled
+  on a smaller circle inside), later rounds out to the circle found; the circle fit's weights
+  Huber, then Tukey's biweight (a run of edges pulled in by a ring line next to the hole is
+  dropped, not only weakened: 0.04 → 0.004 mm on the demo photo's hole).
+- **The printed numbers** are in the expected card now (`holes::Expected`): each ring's number
+  is the same upright digit on the card's four axes, so where a number is, the expected look
+  is the median of its four copies in the photo (a hole on one copy doesn't move it); only
+  when the outline fixed the card's axes. Before, a hole next to a number was pulled towards
+  it (0.06 mm) and the numbers were found as holes by the unguided gauge.
+- **The camera's angle** (`cardphoto::view`): the camera's centre from the homography (the
+  focal length from it too when the photo is tilted more than 8°: within 4 % of the phone's
+  26 mm on 44 of 56 photos; else a 26 mm lens), its angle from straight above at the card's
+  centre (within 2.5° of the analysis with the known lens). The expected error per photo,
+  fitted on the first set: per axis √(0.045² + (0.4 · tan θ · ρ / 80)²) mm, ρ the holes' rms
+  distance from the centre (0.34 fitted, taken larger: cards vary), shown as the rms over both
+  axes. Over 10°, a warning: "Taken 24° from straight above: the holes may be off by about
+  0.19 mm (rms), against about 0.06 mm from straight above … This photo is used; take another
+  from straight above for a closer check." The details always give the angle and the expected
+  error; overlapping holes get their own warning. The result JSON has `camera_deg`,
+  `expected_mm` and each shot's `overlap`.
+- **Checks:** `tests/gauge.rs` `torn_holes_with_shots` (torn holes, the card turned 90.5°, the
+  shots with 0.3 mm of noise): all 8 within 0.027 mm. The `c5` example's `C5_GUIDED=1` (shots
+  made from the photo's own gauge circles, turned, shifted, 0.3 mm of noise): every hole of
+  every file found again, single holes within 0.075 mm of the unguided gauge (0.027 mm but
+  card 1), card 3's pair flagged, no extra holes, 1–5 s a photo; the scans too.
+
 **Not solved yet:**
 
-- **Overlapping holes in the black** (card 3's pair): the outline is ragged (flaked ink, a tail
-  into the white) and the pair's separation comes out 1.8–4.7 mm from photo to photo. With the
-  series' shots (how many holes, about how far apart) the joint fit is better constrained; until
-  then such holes don't count as ground truth.
-- **Tilted photos:** either the app asks for a photo from straight above and checks the tilt
-  (from the homography and the phone's focal length), or the registration fits the card's
-  bend (only possible when tilted: heights show as parallax). The first is cheap.
-- **The app** still uses the old hole model (`ground_truth`); the gauge goes in there next, with
-  the calibre as a setting.
+- **Overlapping holes** (card 3's pair, in the black): with the wider first round the unguided
+  joint gauge fit holds them to 0.056 and 0.072 mm across photos; with shots they are the old
+  model's (better on clean synthetic pairs), off by up to 2.6 mm on this torn pair, and
+  flagged. A test case of torn overlapping holes with a known truth would settle which to use.
+- **Tilted photos:** the app warns and gives the expected error. Fitting the card's bend in
+  the registration (heights show as parallax only when tilted) would recover them; later, if
+  needed.
+- **The calibre:** the white rims (5.2–5.7 mm) look like .22 LR; the scans of cards 1 and 3
+  will tell, and then the true positions.
 
 ## C6. The serial number
 
@@ -414,6 +456,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-25 | C5 | The gauge in the app (`ground_truth`, the no-shot path, the camera's angle, the expected error), the printed numbers in the expected card, the gauge's wider first round and Tukey weights; run by Claude: `cargo test`, the `c5` example with `C5_GUIDED=1` on all 61 files | **Pass** (overlapping torn holes aside). Synthetic: torn holes with shots 0.027 mm (all 8); clean holes as before or better (single holes 0.005–0.006 mm; overlapping pairs 0.058 mm, was 0.17; the 41-shot demo 0.037 mm, 2.0 s, was 1.2 s); the app's demo photo without shots within 0.05 mm. Tried and dropped: the gauge's joint fit for overlapping holes with shots (synthetic pairs up to 1.6 mm off); masking the numbers instead of modelling them (holes next to a number up to 0.09 mm off). Real: every hole found in every file with shots, single holes within 0.075 mm of the unguided gauge, card 3's pair flagged in all 12 photos, no extra holes. Spread across photos (unguided): from straight above 0.035 mm per axis in the white (54 hole positions), 0.046 mm in the black (22, the pair now included); at 12–34°: 0.120 and 0.065 mm. Card 3's pair 0.056 and 0.072 mm. Card 4 against its scans: 0.08–0.13 mm, its long hole 0.19 mm. The camera's angle within 2.5° of the earlier analysis. `cargo test` passes (cardphoto 10 + 4 + 10 + 7, the app 47), clippy clean. |
 | 2026-11-25 | C5 | The gauge (torn holes) on the first set, as above; run by Claude with the `c5` example | **Partly.** Every hole found, the same count in every file of each card: clean 0 (14 files), card 1: 5 (12), card 2: 4 (10), card 3: 9 (12), card 4: 3 (9 and both scans); before: 0–8 per photo. The circles: r 2.62–2.86 mm in the white, 2.32–2.45 mm in the black (±0.01–0.06 per hole across photos); their edge points within 0.06–0.2 mm of the circle in the white, 0.2–0.5 in the black. Spread per hole across photos, each photo's rotation fitted to the matched holes: 0.03–0.08 mm per axis for holes under 45 mm from the centre, 0.10–0.17 mm for those 50–81 mm out; card 3's overlapping pair 0.5 mm (not solved). From straight above (12 photos under 10°): 0.041 mm in the white (54 hole positions), 0.058 mm in the black (15); at 12–33° (30 photos): 0.118 and 0.228 mm. Card 4's photos (their mean) against its scans: 0.08–0.11, 0.15–0.16 (its elongated hole), 0.12 mm. Synthetic torn holes (`tests/gauge.rs`): pass, worst centre 0.038 mm, radius 0.030 mm. `cargo test` passes (cardphoto 8 + 3 + 10 + 7, the app 47), clippy clean. |
 | 2026-11-25 | C5 | The user's first set: an iPhone 14 Plus, main lens (26 mm, f/1.5), 4032 × 3024, no flash, a light wooden table, daylight; the clean card 13 photos and a 600 dpi scan; four holed cards (1: 012370, 12 photos; 2: 012373, 10; 3: 12; 4: 012371, 9 and a scan); the camera 160–370 mm above the card, tilts 2–35°, the card's corners seen at up to 53°. Two files damaged in the copy (IMG_3441, IMG_3449: a grey band at one side). Run by Claude with the `c5` example | **Registration: fail, fixed, then pass.** First: 13 photos with only 1,700–5,000 of about 7,900 edge points, rms 0.10–0.19 mm and an absurd lens (k1 up to +1.36, k2 −6.1): the outer rings lost, the first window placed from the disc alone. With the fit grown outwards (C1 4): every file 6,700–7,900 points (4,000–5,000 in two), rms 0.017–0.080 mm (the scans 0.016–0.018; about 0.02 mm from straight above, 0.05–0.08 at 20–33° of tilt), k1 −0.04 to −0.23 with k2 0.07–0.67 (the two trade off), the line offsets d_dark −0.09 to +0.03 and d_light about −0.09 mm. **Holes: partly.** The clean card: none found in 14 files (no false holes). The holes in the black found in every photo; those in the white mostly not (cards 2 and 4: 0–4 found, and those split): fitted at r 1.35–1.6 mm and rejected (see C5). Spread across photos, each photo's rotation fitted to the holes found in at least 80 % of them: card 3's three touching holes sd 0.043–0.078 mm (worst 0.17 mm, seen at 33°), card 1's two holes in the black 0.090 and 0.130 mm; without any alignment, card 1's two holes 34.353 mm apart with sd 0.095 mm, their distances from the centre sd 0.049 and 0.084 mm. Card thickness fitted 0.11 ± 0.14 mm (no effect seen). `cargo test` passes (cardphoto 10 + 7 + 5, the app 47). |
 | 2026-11-24 | C2 | The user: a test of 50 shots in the app, from the `photo-speed` worktree | **Pass** (the user's report: "works out perfectly"); the same test from the old code had taken nearly 2 minutes. Merged to `main`, with C4's series panel. **Found on the merge:** `upload_stores_without_metadata` failed once in the full `cargo test` (the photo tests now keep every core busy): the server answered the phone before telling the app, and the test reads the app's event right after the answer. Now the app first; the full `cargo test` passes 3 times in a row. |

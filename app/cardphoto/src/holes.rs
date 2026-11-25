@@ -14,6 +14,7 @@
 
 use nalgebra::{DMatrix, DVector};
 
+use crate::gauge::{GaugeFit, gauge};
 use crate::register::Registration;
 use crate::{Mapping, Rgb};
 
@@ -31,6 +32,12 @@ pub const SEARCH_MM: f64 = 4.0;
 /// The matched filter's least contrast for a hole (the difference's units: the paper–ink
 /// range).
 const MIN_CONTRAST: f64 = 0.15;
+/// A gauge circle more than this smaller than the old model's opening saw something inside
+/// the hole, not its edge, mm; so did one smaller than this share of the calibre's radius (a
+/// pellet's mark is at least its own size: the C5 holes 2.29 mm and up for 4.5 mm, clean
+/// synthetic ones 2.22–2.24 mm at the rim's half height).
+const INSIDE_MM: f64 = 0.1;
+const MARK_MIN: f64 = 0.97;
 /// A gauge circle's radius, as a share of the calibre's: what a hole's mark can be.
 const GAUGE_R_MIN: f64 = 0.8;
 const GAUGE_R_MAX: f64 = 1.4;
@@ -48,6 +55,46 @@ pub struct Expected {
     ink: [[f64; 6]; 3],
     rho_step: f64,
     profile: Vec<[f32; 3]>,
+    /// The printed numbers (when the card's axes are known): per ring's number, its four
+    /// copies' centres and their median look on a grid around them.
+    numbers: Vec<NumberPatch>,
+}
+
+/// A ring's number as the photo shows it: the same digit, upright, on the card's four axes;
+/// per point around it the median of the four copies (a hole on one copy doesn't move it).
+struct NumberPatch {
+    centres: [(f64, f64); 4],
+    grid: Vec<[f32; 3]>,
+}
+
+/// A number's patch: ±this around its centre, mm, on a grid of this step.
+const NUMBER_HALF_MM: f64 = 2.6;
+const NUMBER_STEP_MM: f64 = 0.05;
+
+impl NumberPatch {
+    fn n() -> usize {
+        (2.0 * NUMBER_HALF_MM / NUMBER_STEP_MM).round() as usize + 1
+    }
+
+    /// The patch's look at a card point, if the point is on one of its copies.
+    fn at(&self, q: (f64, f64)) -> Option<[f32; 3]> {
+        let n = Self::n();
+        let c = self
+            .centres
+            .iter()
+            .find(|c| (q.0 - c.0).abs() < NUMBER_HALF_MM && (q.1 - c.1).abs() < NUMBER_HALF_MM)?;
+        let fx = ((q.0 - c.0 + NUMBER_HALF_MM) / NUMBER_STEP_MM).clamp(0.0, (n - 1) as f64 - 1e-9);
+        let fy = ((q.1 - c.1 + NUMBER_HALF_MM) / NUMBER_STEP_MM).clamp(0.0, (n - 1) as f64 - 1e-9);
+        let (i, j) = (fx.floor() as usize, fy.floor() as usize);
+        let (tx, ty) = ((fx - i as f64) as f32, (fy - j as f64) as f32);
+        let g = |i: usize, j: usize| self.grid[j * n + i];
+        let (a, b, c2, d) = (g(i, j), g(i + 1, j), g(i, j + 1), g(i + 1, j + 1));
+        Some(
+            [0, 1, 2].map(|k| {
+                (a[k] * (1.0 - tx) + b[k] * tx) * (1.0 - ty) + (c2[k] * (1.0 - tx) + d[k] * tx) * ty
+            }),
+        )
+    }
 }
 
 fn basis(q: (f64, f64)) -> [f64; 6] {
@@ -115,6 +162,7 @@ impl Expected {
             ink,
             rho_step: 0.1,
             profile: Vec::new(),
+            numbers: Vec::new(),
         };
         // The print by radius: the median over the full circle (a hole is a small part of it).
         let n_rho = ((SCORING_MM + 4.0) / e.rho_step) as usize + 1;
@@ -147,6 +195,42 @@ impl Expected {
             slot
         });
         e.profile = profile;
+        // The numbers, where the card's axes are known (the outline fixed them).
+        if reg.rotation_from_outline {
+            let radii = crate::card::issf_air_pistol().number_radii_mm;
+            let n = NumberPatch::n();
+            e.numbers = crate::par_map(&radii, |&m| {
+                let centres = [(m, 0.0), (-m, 0.0), (0.0, m), (0.0, -m)];
+                let mut grid = vec![[0.0f32; 3]; n * n];
+                for j in 0..n {
+                    for i in 0..n {
+                        let o = (
+                            -NUMBER_HALF_MM + i as f64 * NUMBER_STEP_MM,
+                            -NUMBER_HALF_MM + j as f64 * NUMBER_STEP_MM,
+                        );
+                        let mut v: Vec<[f32; 3]> = centres
+                            .iter()
+                            .filter_map(|c| {
+                                let q = (c.0 + o.0, c.1 + o.1);
+                                rgb.sample_at(map, q).map(|c| e.normalize(c, q))
+                            })
+                            .collect();
+                        let mut out = [0.0f32; 3];
+                        for (k, slot) in out.iter_mut().enumerate() {
+                            v.sort_by(|a, b| a[k].total_cmp(&b[k]));
+                            // The median (of four: the middle two's mean).
+                            *slot = match v.len() {
+                                0 => 1.0,
+                                l if l % 2 == 1 => v[l / 2][k],
+                                l => 0.5 * (v[l / 2 - 1][k] + v[l / 2][k]),
+                            };
+                        }
+                        grid[j * n + i] = out;
+                    }
+                }
+                NumberPatch { centres, grid }
+            });
+        }
         e
     }
 
@@ -162,6 +246,9 @@ impl Expected {
 
     /// The print's expected normalised colour at a card point.
     pub fn at(&self, q: (f64, f64)) -> [f32; 3] {
+        if let Some(v) = self.numbers.iter().find_map(|p| p.at(q)) {
+            return v;
+        }
         let f = (q.0.hypot(q.1) / self.rho_step).min((self.profile.len() - 1) as f64 - 1e-9);
         let i = f.floor() as usize;
         let t = (f - i as f64) as f32;
@@ -792,6 +879,8 @@ fn fit_placement(pairs: &[Pair], angle0: f64, with_scale: bool) -> Placement {
 pub struct ShotResult {
     /// Its hole, if one was found where it should be.
     pub hole: Option<HoleFit>,
+    /// Whether its hole overlaps others (fitted together with them: less certain).
+    pub overlap: bool,
     /// The hole minus the placed shot, card mm: the sensor's error for this shot.
     pub diff_mm: Option<(f64, f64)>,
 }
@@ -847,8 +936,9 @@ fn groups(points: &[(f64, f64)], gap: f64) -> Vec<Vec<usize>> {
 }
 
 /// A hole counts as ground truth only if its fit pins it down: its centre known to this,
-/// mm (deep in a shot-out cluster a circle can slide where the paper is gone), and its radius
-/// within `RADIUS_SPREAD_MM` of the photo's other holes (the median).
+/// mm (deep in a shot-out cluster a circle can slide where the paper is gone), and (the old
+/// model's circles) its radius within `RADIUS_SPREAD_MM` of the photo's other holes (the
+/// median).
 const SD_MAX_MM: f64 = 0.25;
 const RADIUS_SPREAD_MM: f64 = 0.2;
 /// The quarter turn counts a shot's coarse hole only if it agrees with one placement for all
@@ -856,8 +946,8 @@ const RADIUS_SPREAD_MM: f64 = 0.2;
 /// tight group, the group's own) are scattered.
 const QUARTER_AGREE_MM: f64 = 2.0;
 
-/// Per hole, whether it is pinned down (`SD_MAX_MM`, `RADIUS_SPREAD_MM`) among the holes
-/// that count for their starts (`hole_ok`); those that don't count, false.
+/// Per hole of the old model, whether it is pinned down (`SD_MAX_MM`, `RADIUS_SPREAD_MM`)
+/// among the holes that count for their starts (`hole_ok`); those that don't count, false.
 fn pinned(fits: &[HoleFit], starts: &[(f64, f64)], r0: f64) -> Vec<bool> {
     let ok: Vec<bool> = fits.iter().zip(starts).map(|(h, s)| hole_ok(h, *s, r0)).collect();
     let mut radii: Vec<f64> = fits
@@ -877,7 +967,8 @@ fn pinned(fits: &[HoleFit], starts: &[(f64, f64)], r0: f64) -> Vec<bool> {
         .collect()
 }
 
-/// Whether a hole counts for its start (its shot as placed): clear, round, and near.
+/// Whether an old model's hole counts for its start (its shot as placed): clear, round, and
+/// near.
 fn hole_ok(h: &HoleFit, start: (f64, f64), r0: f64) -> bool {
     h.contrast >= MIN_CONTRAST
         && (h.radius_mm - r0).abs() < 0.6
@@ -886,8 +977,14 @@ fn hole_ok(h: &HoleFit, start: (f64, f64), r0: f64) -> bool {
 
 /// Fits the holes at card points `starts` (grouped when close; the groups on the machine's
 /// cores, the biggest first).
-fn fit_at(rgb: &Rgb, reg: &Registration, exp: &Expected, starts: &[(f64, f64)], res: f64) -> Vec<HoleFit> {
-    let r0 = HOLE_D_MM / 2.0;
+fn fit_at(
+    rgb: &Rgb,
+    reg: &Registration,
+    exp: &Expected,
+    starts: &[(f64, f64)],
+    res: f64,
+    r0: f64,
+) -> Vec<HoleFit> {
     let mut groups = groups(starts, 2.0 * r0 + 1.0);
     groups.sort_by_key(|g| std::cmp::Reverse(g.len()));
     let fitted: Vec<Vec<HoleFit>> = crate::par_map(&groups, |g| {
@@ -927,26 +1024,24 @@ fn find_all(rgb: &Rgb, reg: &Registration, exp: &Expected, skip: &[(f64, f64)]) 
 /// Every hole in the scoring area, without shots, as the gauge sees it (C5): the blobs' fits
 /// (the openings), each with the gauge's circle from there, for a calibre of `diameter_mm`.
 /// Kept: those whose circle is near the calibre's size and clearly damaged inside, one per
-/// hole. Then overlapping holes are fitted again together, their radius held at the median of
-/// the single holes in the same zone (black or white: the mark's edge differs), or one shared
-/// radius fitted if there are none.
-pub fn all_gauges(rgb: &Rgb, reg: &Registration, diameter_mm: f64) -> Vec<(HoleFit, crate::gauge::GaugeFit)> {
-    use crate::gauge::{GaugeFit, gauge};
+/// hole; overlapping holes fitted again together (`refit_overlaps`).
+pub fn all_gauges(rgb: &Rgb, reg: &Registration, diameter_mm: f64) -> Vec<(HoleFit, GaugeFit)> {
     let exp = Expected::from_photo(rgb, reg);
+    unguided_gauges(rgb, reg, &exp, diameter_mm)
+}
+
+fn unguided_gauges(
+    rgb: &Rgb,
+    reg: &Registration,
+    exp: &Expected,
+    diameter_mm: f64,
+) -> Vec<(HoleFit, GaugeFit)> {
     let r_cal = diameter_mm / 2.0;
     // A torn hole's opening and its rim can be separate blobs, each smaller than the pellet's
     // disc: smaller blobs are tried too (the gauge rejects what has no round edge).
-    let found = candidates(rgb, reg, &exp, &[], SCORING_MM + 2.0, 0.2);
-    // The mark's edge is the calibre's circle or a little outside it (a smear, a halo); the
-    // print's details (a ring's number: radius 0.9–1.6 mm) are well inside.
-    let ok = |g: &GaugeFit| {
-        (GAUGE_R_MIN * r_cal..GAUGE_R_MAX * r_cal).contains(&g.radius_mm) && g.damage >= MIN_CONTRAST
-    };
-    let fits: Vec<Option<GaugeFit>> = crate::par_map(&found, |h| {
-        gauge(rgb, &reg.map, &exp, &[h.center], diameter_mm, None)
-            .and_then(|g| g.into_iter().next())
-            .filter(ok)
-    });
+    let found = candidates(rgb, reg, exp, &[], SCORING_MM + 2.0, 0.2);
+    let fits: Vec<Option<GaugeFit>> =
+        crate::par_map(&found, |h| single_gauge(rgb, reg, exp, h.center, diameter_mm));
     let mut out: Vec<(HoleFit, GaugeFit)> = found
         .into_iter()
         .zip(fits)
@@ -964,20 +1059,60 @@ pub fn all_gauges(rgb: &Rgb, reg: &Registration, diameter_mm: f64) -> Vec<(HoleF
             keep.push((h, g));
         }
     }
-    // Overlapping holes: groups of circles closer than their radii and a margin.
-    let centres: Vec<(f64, f64)> = keep.iter().map(|(_, g)| g.center).collect();
+    let seeds: Vec<(f64, f64)> = keep.iter().map(|(_, g)| g.center).collect();
+    let mut fits: Vec<Option<GaugeFit>> = keep.iter().map(|(_, g)| Some(g.clone())).collect();
+    refit_overlaps(rgb, reg, exp, &seeds, &mut fits, diameter_mm);
+    keep.into_iter()
+        .zip(fits)
+        .filter_map(|((h, _), g)| g.map(|g| (h, g)))
+        .collect()
+}
+
+/// Whether a gauge circle can be a hole's mark: the calibre's circle or a little outside it (a
+/// smear, a halo), not the print's details (a ring's number: radius 0.9–1.6 mm), and clearly
+/// damaged inside.
+fn gauge_ok(g: &GaugeFit, r_cal: f64) -> bool {
+    (GAUGE_R_MIN * r_cal..GAUGE_R_MAX * r_cal).contains(&g.radius_mm) && g.damage >= MIN_CONTRAST
+}
+
+/// One hole's gauge circle from `seed`, if it can be a hole's mark.
+fn single_gauge(
+    rgb: &Rgb,
+    reg: &Registration,
+    exp: &Expected,
+    seed: (f64, f64),
+    diameter_mm: f64,
+) -> Option<GaugeFit> {
+    gauge(rgb, &reg.map, exp, &[seed], diameter_mm, None)
+        .and_then(|g| g.into_iter().next())
+        .filter(|g| gauge_ok(g, diameter_mm / 2.0))
+}
+
+/// Overlapping holes (`seeds` closer than two typical radii and a margin) fitted again
+/// together: their circles' outer arcs make the outline, the radius held at the median of the
+/// single holes in the same zone (black or white: the mark's edge differs), or one shared
+/// radius fitted if there are none. If the joint fit fails, none of them counts.
+fn refit_overlaps(
+    rgb: &Rgb,
+    reg: &Registration,
+    exp: &Expected,
+    seeds: &[(f64, f64)],
+    fits: &mut [Option<GaugeFit>],
+    diameter_mm: f64,
+) {
+    let r_cal = diameter_mm / 2.0;
     let r_typ = {
-        let mut r: Vec<f64> = keep.iter().map(|(_, g)| g.radius_mm).collect();
+        let mut r: Vec<f64> = fits.iter().flatten().map(|g| g.radius_mm).collect();
         r.sort_by(f64::total_cmp);
         r.get(r.len() / 2).copied().unwrap_or(r_cal)
     };
-    let groups = groups(&centres, 2.0 * r_typ + 0.5);
+    let groups = groups(seeds, 2.0 * r_typ + 0.5);
     let in_black = |c: (f64, f64)| c.0.hypot(c.1) < BLACK_MM;
     let zone_r = |black: bool| {
         let mut r: Vec<f64> = groups
             .iter()
-            .filter(|g| g.len() == 1 && in_black(centres[g[0]]) == black)
-            .map(|g| keep[g[0]].1.radius_mm)
+            .filter(|g| g.len() == 1 && in_black(seeds[g[0]]) == black)
+            .filter_map(|g| fits[g[0]].as_ref().map(|f| f.radius_mm))
             .collect();
         r.sort_by(f64::total_cmp);
         r.get(r.len() / 2).copied()
@@ -985,25 +1120,23 @@ pub fn all_gauges(rgb: &Rgb, reg: &Registration, diameter_mm: f64) -> Vec<(HoleF
     let radius = [zone_r(false), zone_r(true)];
     let multi: Vec<&Vec<usize>> = groups.iter().filter(|g| g.len() > 1).collect();
     let again: Vec<Option<Vec<GaugeFit>>> = crate::par_map(&multi, |g| {
-        let starts: Vec<(f64, f64)> = g.iter().map(|&i| centres[i]).collect();
+        let starts: Vec<(f64, f64)> = g.iter().map(|&i| seeds[i]).collect();
         let black = starts.iter().filter(|c| in_black(**c)).count() * 2 > starts.len();
         gauge(
             rgb,
             &reg.map,
-            &exp,
+            exp,
             &starts,
             diameter_mm,
             radius[usize::from(black)],
         )
+        .filter(|f| f.iter().all(|f| gauge_ok(f, r_cal)))
     });
-    for (g, fits) in multi.iter().zip(again) {
-        if let Some(fits) = fits {
-            for (&i, f) in g.iter().zip(fits) {
-                keep[i].1 = f;
-            }
+    for (g, joint) in multi.iter().zip(again) {
+        for (k, &i) in g.iter().enumerate() {
+            fits[i] = joint.as_ref().map(|f| f[k].clone());
         }
     }
-    keep
 }
 
 /// The blobs where the photo differs from the card within `reach` of the centre, of at least
@@ -1185,8 +1318,14 @@ struct Quarter {
     part: bool,
 }
 
-fn find_quarter(rgb: &Rgb, reg: &Registration, exp: &Expected, shots: &[(f64, f64)], all: bool) -> Quarter {
-    let r0 = HOLE_D_MM / 2.0;
+fn find_quarter(
+    rgb: &Rgb,
+    reg: &Registration,
+    exp: &Expected,
+    shots: &[(f64, f64)],
+    all: bool,
+    r0: f64,
+) -> Quarter {
     let quarter = std::f64::consts::FRAC_PI_2;
     let turn = |k: u8, s: (f64, f64)| {
         let (sn, cs) = (f64::from(k) * quarter).sin_cos();
@@ -1245,7 +1384,7 @@ fn find_quarter(rgb: &Rgb, reg: &Registration, exp: &Expected, shots: &[(f64, f6
         .map(|j| scores[j])
         .fold(f64::NEG_INFINITY, f64::max);
     if part && !(top > 0.0 && second < QUARTER_CLEAR * top) {
-        return find_quarter(rgb, reg, exp, shots, true);
+        return find_quarter(rgb, reg, exp, shots, true, r0);
     }
     // The coarse holes at that turn: those already found, then the rest.
     let mut at: Vec<Option<((f64, f64), f64)>> = vec![None; shots.len()];
@@ -1286,8 +1425,9 @@ fn match_from(
     exp: &Expected,
     shots: &[(f64, f64)],
     q: &Quarter,
+    diameter_mm: f64,
 ) -> Result<Matched, String> {
-    let r0 = HOLE_D_MM / 2.0;
+    let r0 = diameter_mm / 2.0;
     let mut placement = Placement {
         angle: f64::from(q.k) * std::f64::consts::FRAC_PI_2,
         quarter: q.k,
@@ -1318,20 +1458,111 @@ fn match_from(
             .sqrt()
     };
     let with_scale = shots.len() >= 5 && spread > 20.0;
-    let mut fits = Vec::new();
-    let mut dropped = 0;
-    for _ in 0..2 {
-        let starts: Vec<(f64, f64)> = shots.iter().map(|s| placement.apply(*s)).collect();
-        fits = fit_at(rgb, reg, exp, &starts, 10.0);
-        // A hole counts if it is clear, round, and near where its shot says.
-        let good = pinned(&fits, &starts, r0);
-        let mut pairs: Vec<Pair> = shots
+    // The holes near the placed shots. The first round places the card from the old model's
+    // circles (quick; the openings are near enough for that). The second: a hole that
+    // overlaps another is the old model's (the table seen through the circles' union: better
+    // for overlapping holes with shots, the synthetic pairs show; flagged), a single hole the
+    // gauge's circle (the mark's edge, C5), seeded by the old model's circle where it found
+    // one near the shot.
+    let holes_at = |starts: &[(f64, f64)], gauge: bool| -> Vec<Option<(HoleFit, bool)>> {
+        let opening = fit_at(rgb, reg, exp, starts, 10.0, r0);
+        let good = pinned(&opening, starts, r0);
+        let at: Vec<(f64, f64)> = opening
             .iter()
-            .zip(&fits)
-            .zip(&good)
-            .filter(|(_, g)| **g)
-            .map(|((s, h), _)| (*s, h.center))
+            .zip(starts)
+            .map(|(h, s)| {
+                let near = (h.center.0 - s.0).hypot(h.center.1 - s.1) < SEARCH_MM;
+                if near && h.contrast >= MIN_CONTRAST {
+                    h.center
+                } else {
+                    *s
+                }
+            })
             .collect();
+        let overlap: Vec<bool> = (0..at.len())
+            .map(|i| (0..at.len()).any(|j| j != i && (at[i].0 - at[j].0).hypot(at[i].1 - at[j].1) < 2.0 * r0))
+            .collect();
+        let singles: Vec<usize> = (0..at.len()).filter(|&i| gauge && !overlap[i]).collect();
+        // Seeded at the old model's circle and at the shot (a long torn mark can give a circle on
+        // one lobe from one seed and on the whole mark from another): the smoother kept.
+        let gauged: Vec<Option<GaugeFit>> = crate::par_map(&singles, |&i| {
+            let seeds: &[(f64, f64)] = if (at[i].0 - starts[i].0).hypot(at[i].1 - starts[i].1) > 0.3 {
+                &[at[i], starts[i]]
+            } else {
+                &[at[i]]
+            };
+            seeds
+                .iter()
+                .filter_map(|&s| single_gauge(rgb, reg, exp, s, diameter_mm))
+                .filter(|g| {
+                    (g.center.0 - starts[i].0).hypot(g.center.1 - starts[i].1) < SEARCH_MM
+                        && g.sd_mm <= SD_MAX_MM
+                })
+                .min_by(|a, b| a.rough_mm.total_cmp(&b.rough_mm))
+        });
+        let mut out: Vec<Option<(HoleFit, bool)>> = opening
+            .iter()
+            .cloned()
+            .zip(&good)
+            .zip(&overlap)
+            .map(|((h, g), o)| g.then_some((h, *o)))
+            .collect();
+        // The gauge's circle, unless it is smaller than the pellet or than the opening the old
+        // model pinned down: then it didn't see the hole's edge (a table as dark as the ink)
+        // but something inside, and the old model's circle stays.
+        let inside = |i: usize, g: &GaugeFit| {
+            g.radius_mm < MARK_MIN * r0 || (good[i] && g.radius_mm < opening[i].radius_mm - INSIDE_MM)
+        };
+        for (&i, g) in singles.iter().zip(gauged) {
+            let g = g.filter(|g| !inside(i, g));
+            if let Some(g) = g {
+                out[i] = Some((
+                    HoleFit {
+                        center: g.center,
+                        radius_mm: g.radius_mm,
+                        sd_mm: g.sd_mm,
+                        contrast: g.damage,
+                    },
+                    false,
+                ));
+            } else if !good[i] {
+                out[i] = None;
+            }
+        }
+        // Holes whose circles cross overlap too, however far apart their openings were.
+        let circles: Vec<Option<((f64, f64), f64)>> = out
+            .iter()
+            .map(|h| h.as_ref().map(|h| (h.0.center, h.0.radius_mm)))
+            .collect();
+        for i in 0..out.len() {
+            let Some((ci, ri)) = circles[i] else { continue };
+            let crossed = circles
+                .iter()
+                .enumerate()
+                .any(|(j, c)| j != i && c.is_some_and(|(cj, rj)| (ci.0 - cj.0).hypot(ci.1 - cj.1) < ri + rj));
+            if crossed {
+                out[i].as_mut().unwrap().1 = true;
+            }
+        }
+        out
+    };
+    let mut fits: Vec<Option<(HoleFit, bool)>> = Vec::new();
+    let mut dropped = 0;
+    let pairs_of = |fits: &[Option<(HoleFit, bool)>]| -> Vec<Pair> {
+        shots
+            .iter()
+            .zip(fits)
+            .filter_map(|(s, h)| h.as_ref().map(|h| (*s, h.0.center)))
+            .collect()
+    };
+    for round in 0..2 {
+        let starts: Vec<(f64, f64)> = shots.iter().map(|s| placement.apply(*s)).collect();
+        fits = holes_at(&starts, round == 1);
+        if round == 0 && pairs_of(&fits).is_empty() {
+            // No hole the old model sees (a scan: the lid's white in the holes): the gauge's.
+            fits = holes_at(&starts, true);
+        }
+        let mut pairs = pairs_of(&fits);
         if pairs.is_empty() {
             return Err("no hole fitted where the shots are".into());
         }
@@ -1361,24 +1592,23 @@ fn match_from(
         }
     }
     let starts: Vec<(f64, f64)> = shots.iter().map(|s| placement.apply(*s)).collect();
-    let good = pinned(&fits, &starts, r0);
     let results: Vec<ShotResult> = fits
         .into_iter()
         .zip(&starts)
-        .zip(good)
-        .map(|((h, st), good)| {
-            if good {
-                ShotResult {
+        .map(
+            |(h, st)| match h.filter(|h| (h.0.center.0 - st.0).hypot(h.0.center.1 - st.1) < SEARCH_MM) {
+                Some((h, overlap)) => ShotResult {
                     diff_mm: Some((h.center.0 - st.0, h.center.1 - st.1)),
+                    overlap,
                     hole: Some(h),
-                }
-            } else {
-                ShotResult {
+                },
+                None => ShotResult {
                     hole: None,
+                    overlap: false,
                     diff_mm: None,
-                }
-            }
-        })
+                },
+            },
+        )
         .collect();
     let d: Vec<f64> = results
         .iter()
@@ -1400,13 +1630,19 @@ fn match_from(
 /// The quarter turn is judged on part of the shots when there are many; if then a shot finds
 /// no hole, or pairs are left out as outliers, it is judged again on all of them, and if
 /// that gives another turn, the turn that matches more holes (then the smaller rms) wins.
-pub fn ground_truth(rgb: &Rgb, reg: &Registration, shots: &[(f64, f64)]) -> Result<GroundTruth, String> {
+pub fn ground_truth(
+    rgb: &Rgb,
+    reg: &Registration,
+    shots: &[(f64, f64)],
+    diameter_mm: f64,
+) -> Result<GroundTruth, String> {
     if shots.is_empty() {
         return Err("no shots to match".into());
     }
+    let r0 = diameter_mm / 2.0;
     let exp = Expected::from_photo(rgb, reg);
-    let q = find_quarter(rgb, reg, &exp, shots, false);
-    let first = match_from(rgb, reg, &exp, shots, &q);
+    let q = find_quarter(rgb, reg, &exp, shots, false, r0);
+    let first = match_from(rgb, reg, &exp, shots, &q, diameter_mm);
     let doubtful = match &first {
         Ok(m) => m.dropped > 0 || m.shots.iter().any(|r| r.hole.is_none()),
         Err(_) => true,
@@ -1415,9 +1651,9 @@ pub fn ground_truth(rgb: &Rgb, reg: &Registration, shots: &[(f64, f64)]) -> Resu
     let mut best = first;
     if q.part && doubtful {
         quarter_all = true;
-        let q2 = find_quarter(rgb, reg, &exp, shots, true);
+        let q2 = find_quarter(rgb, reg, &exp, shots, true, r0);
         if q2.k != q.k {
-            let second = match_from(rgb, reg, &exp, shots, &q2);
+            let second = match_from(rgb, reg, &exp, shots, &q2, diameter_mm);
             let found = |m: &Matched| m.shots.iter().filter(|r| r.hole.is_some()).count();
             let take = match (&best, &second) {
                 (Err(_), Ok(_)) => true,
@@ -1435,7 +1671,23 @@ pub fn ground_truth(rgb: &Rgb, reg: &Registration, shots: &[(f64, f64)]) -> Resu
         .iter()
         .filter_map(|r| r.hole.as_ref().map(|h| h.center))
         .collect();
-    let extra = find_all(rgb, reg, &exp, &found);
+    // Holes no shot explains: the unguided search's, away from those found.
+    let extra = unguided_gauges(rgb, reg, &exp, diameter_mm)
+        .into_iter()
+        .map(|(_, g)| g)
+        .filter(|g| {
+            g.center.0.hypot(g.center.1) <= SCORING_MM
+                && found
+                    .iter()
+                    .all(|f| (f.0 - g.center.0).hypot(f.1 - g.center.1) > r0)
+        })
+        .map(|g| HoleFit {
+            center: g.center,
+            radius_mm: g.radius_mm,
+            sd_mm: g.sd_mm,
+            contrast: g.damage,
+        })
+        .collect();
     Ok(GroundTruth {
         placement: m.placement,
         shots: m.shots,

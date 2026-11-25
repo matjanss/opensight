@@ -21,6 +21,7 @@ pub mod holes;
 pub mod meta;
 pub mod register;
 pub mod synth;
+pub mod view;
 
 use nalgebra::{Matrix3, Vector3};
 

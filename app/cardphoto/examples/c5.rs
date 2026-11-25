@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use cardphoto::Rgb;
 use cardphoto::card::issf_air_pistol;
-use cardphoto::holes::{all_gauges, all_holes};
+use cardphoto::holes::{all_gauges, all_holes, ground_truth};
 use cardphoto::register::register;
 use serde_json::json;
 
@@ -40,9 +40,46 @@ fn one(path: &str) -> serde_json::Value {
         (all_holes(&rgb, &reg), all_gauges(&rgb, &reg, cal))
     };
     let t_holes = t0.elapsed().as_secs_f64() - t_decode - t_reg;
+    // C5_GUIDED=1: the app's way, with shots made from the gauge's holes (turned 90.5°, shifted
+    // (0.7, -0.4) mm, 0.3 mm of noise): per hole how far the matched hole is from the gauge's.
+    let guided = std::env::var_os("C5_GUIDED").map(|_| {
+        let (angle, shift) = (90.5f64.to_radians(), (0.7, -0.4));
+        let (sn, cs) = (-angle).sin_cos();
+        let mut rng = cardphoto::synth::Rng::new(9);
+        let shots: Vec<(f64, f64)> = gauges
+            .iter()
+            .map(|(_, g)| {
+                let (x, y) = (g.center.0 - shift.0, g.center.1 - shift.1);
+                (
+                    cs * x - sn * y + 0.3 * rng.gauss(),
+                    sn * x + cs * y + 0.3 * rng.gauss(),
+                )
+            })
+            .collect();
+        let t = Instant::now();
+        match ground_truth(&rgb, &reg, &shots, cal) {
+            Ok(gt) => json!({
+                "s": t.elapsed().as_secs_f64(),
+                "extra": gt.extra.len(),
+                "holes": gt.shots.iter().zip(&gauges).map(|(r, (_, g))| r.hole.as_ref().map(|h| json!({
+                    "off": (h.center.0 - g.center.0).hypot(h.center.1 - g.center.1),
+                    "r": h.radius_mm,
+                    "overlap": r.overlap,
+                }))).collect::<Vec<_>>(),
+            }),
+            Err(e) => json!({ "error": e }),
+        }
+    });
     if let Some(dir) = std::env::var_os("C5_RECT") {
         rectified(&rgb, &reg, &holes, &gauges, path, std::path::Path::new(&dir));
     }
+    let v = cardphoto::view::view(&reg.map);
+    let view = json!({
+        "tilt": v.tilt_deg,
+        "f_px": v.f_px,
+        "f_from_photo": v.f_from_photo,
+        "camera": [v.camera_mm.0, v.camera_mm.1, v.camera_mm.2],
+    });
     let h = reg.map.h / reg.map.h[(2, 2)];
     let hm: Vec<Vec<f64>> = (0..3).map(|i| (0..3).map(|j| h[(i, j)]).collect()).collect();
     json!({
@@ -63,6 +100,7 @@ fn one(path: &str) -> serde_json::Value {
         "lens": [reg.map.lens.cx, reg.map.lens.cy, reg.map.lens.norm],
         "H": hm,
         "outline": reg.rotation_from_outline,
+        "view": view,
         "contrast": [reg.contrast.paper, reg.contrast.ink],
         "holes": holes.iter().map(|f| json!({
             "c": [f.center.0, f.center.1],
@@ -70,6 +108,7 @@ fn one(path: &str) -> serde_json::Value {
             "sd": f.sd_mm,
             "contrast": f.contrast,
         })).collect::<Vec<_>>(),
+        "guided": guided,
         "gauges": gauges.iter().map(|(h, g)| json!({
             "c": [g.center.0, g.center.1],
             "r": g.radius_mm,

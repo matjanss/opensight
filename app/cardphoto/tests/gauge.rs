@@ -5,7 +5,7 @@
 
 use cardphoto::Mapping;
 use cardphoto::card::issf_air_pistol;
-use cardphoto::holes::all_gauges;
+use cardphoto::holes::{all_gauges, ground_truth};
 use cardphoto::register::{Registration, register};
 use cardphoto::synth::{Params, photo_rgb};
 
@@ -119,4 +119,54 @@ fn clean_card_on_wood() {
         "{:?}",
         found.iter().map(|(_, g)| g.center).collect::<Vec<_>>()
     );
+}
+
+/// With shots (the app's way): each torn hole found at its shot and placed within 0.05 mm,
+/// the shots placed with the sensor's error (0.3 mm) and the card's placement unknown.
+#[test]
+fn torn_holes_with_shots() {
+    let p = torn(20.0, 14, singles());
+    let (rgb, truth) = photo_rgb(texture(), &p);
+    let reg = register(&rgb.to_gray(), &issf_air_pistol()).unwrap();
+    // The frame: the card turned 90.5° and shifted; the shots with 0.3 mm of noise.
+    let (angle, shift) = (90.5f64.to_radians(), (0.7, -0.4));
+    let mut rng = cardphoto::synth::Rng::new(5);
+    let (sn, cs) = (-angle).sin_cos();
+    let shots: Vec<(f64, f64)> = p
+        .holes
+        .iter()
+        .map(|h| {
+            let (x, y) = (h.0 - shift.0, h.1 - shift.1);
+            (
+                cs * x - sn * y + 0.3 * rng.gauss(),
+                sn * x + cs * y + 0.3 * rng.gauss(),
+            )
+        })
+        .collect();
+    let gt = ground_truth(&rgb, &reg, &shots, 4.5).unwrap();
+    let mut worst = 0.0f64;
+    for (r, want) in gt.shots.iter().zip(&p.holes) {
+        let h = r
+            .hole
+            .as_ref()
+            .unwrap_or_else(|| panic!("({:+.2}, {:+.2}) not found", want.0, want.1));
+        let c = to_truth(&reg, &truth, h.center);
+        worst = worst.max((c.0 - want.0).hypot(c.1 - want.1));
+        if std::env::var_os("HOLES_DEBUG").is_some() {
+            println!(
+                "  {want:?} off {:.3} r {:.2} contrast {:.2}",
+                (c.0 - want.0).hypot(c.1 - want.1),
+                h.radius_mm,
+                h.contrast
+            );
+        }
+        assert!(!r.overlap);
+    }
+    println!(
+        "torn, with shots: {} holes, worst {worst:.4} mm, {} extra",
+        gt.shots.len(),
+        gt.extra.len()
+    );
+    assert!(worst < 0.05, "{worst}");
+    assert!(gt.extra.is_empty(), "{:?}", gt.extra);
 }

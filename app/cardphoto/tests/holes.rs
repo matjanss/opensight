@@ -71,7 +71,7 @@ fn check(
 ) -> (GroundTruth, Check) {
     let (rgb, truth) = photo_rgb(texture(), p);
     let reg = register(&rgb.to_gray(), &issf_air_pistol()).unwrap_or_else(|e| panic!("{name}: {e}"));
-    let gt = ground_truth(&rgb, &reg, shots).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let gt = ground_truth(&rgb, &reg, shots, 4.5).unwrap_or_else(|e| panic!("{name}: {e}"));
     let mut worst_hole = 0.0f64;
     let mut sum_placed = 0.0f64;
     for (s, r) in shots.iter().zip(&gt.shots) {
@@ -299,7 +299,7 @@ fn own_holes(name: &str, p: &Params, shots: &[(f64, f64)]) -> (usize, f64, f64) 
     let (rgb, truth) = photo_rgb(texture(), p);
     let reg = register(&rgb.to_gray(), &issf_air_pistol()).unwrap_or_else(|e| panic!("{name}: {e}"));
     let t = std::time::Instant::now();
-    let gt = ground_truth(&rgb, &reg, shots).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let gt = ground_truth(&rgb, &reg, shots, 4.5).unwrap_or_else(|e| panic!("{name}: {e}"));
     let secs = t.elapsed().as_secs_f64();
     let mut worst = 0.0f64;
     let mut found = 0;
@@ -307,6 +307,14 @@ fn own_holes(name: &str, p: &Params, shots: &[(f64, f64)]) -> (usize, f64, f64) 
         if let Some(h) = &r.hole {
             let c = to_truth(&reg, &truth, h.center);
             worst = worst.max((c.0 - want.0).hypot(c.1 - want.1));
+            if std::env::var_os("HOLES_DEBUG").is_some() {
+                println!(
+                    "  {want:?} off {:.3} r {:.2} overlap {}",
+                    (c.0 - want.0).hypot(c.1 - want.1),
+                    h.radius_mm,
+                    r.overlap
+                );
+            }
             found += 1;
         }
     }

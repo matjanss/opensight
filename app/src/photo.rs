@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use cardphoto::card::issf_air_pistol;
-use cardphoto::holes::{GroundTruth, HoleFit, Placement, all_holes, ground_truth};
+use cardphoto::holes::{GroundTruth, HoleFit, Placement, all_gauges, ground_truth};
 use cardphoto::register::{Registration, register};
+use cardphoto::view::{TILT_OK_DEG, expected_error_mm};
 use cardphoto::{Gray, Rgb};
 use eframe::egui::{Color32, ColorImage};
 
@@ -83,6 +84,8 @@ pub struct ShotCheck {
     /// The hole centre's uncertainty from the photo (1σ, a lower bound), and its diameter.
     pub sd_mm: f64,
     pub hole_d_mm: f64,
+    /// Whether its hole overlaps another (fitted together: less certain).
+    pub overlap: bool,
     /// The hole on the paper: mm from the printed card's centre (y up, the print's way up
     /// when `print_quarter` is known), what a scorer would gauge. Scoring needs only its
     /// distance from the centre, so an unknown quarter turn doesn't change the score.
@@ -104,6 +107,10 @@ pub struct Processed {
     /// when they didn't decide), and by how much the best turn won.
     pub print_quarter: Option<u8>,
     pub print_margin: f64,
+    /// The camera's angle from straight above the card (at its centre), degrees, and the
+    /// holes' expected error from this photo (rms, mm; `cardphoto::view`).
+    pub camera_deg: f64,
+    pub expected_mm: f64,
     /// Where the printed card was in the frame (with no shots: the frame is the print's).
     pub pose: CardPose,
     /// With shots: the card's placement in the frame, each shot against its hole, the rms,
@@ -132,6 +139,28 @@ impl Processed {
             w.push(format!(
                 "The rings fit with {:.3} mm rms: the card may not lie flat, or the photo is blurred.",
                 self.reg_rms_mm
+            ));
+        }
+        if self.camera_deg > TILT_OK_DEG {
+            w.push(format!(
+                "Taken {:.0}° from straight above: the holes may be off by about {:.2} mm (rms), against about \
+                 {:.2} mm from straight above (a card that doesn't lie quite flat shows when seen at an angle). \
+                 This photo is used; take another from straight above for a closer check.",
+                self.camera_deg,
+                self.expected_mm,
+                expected_error_mm(0.0, 0.0)
+            ));
+        }
+        let overlapping = self
+            .shots
+            .iter()
+            .filter(|s| s.hole.is_some() && s.overlap)
+            .count();
+        if overlapping > 0 {
+            w.push(format!(
+                "{overlapping} hole{} overlap{} another: less certain than the single holes.",
+                if overlapping == 1 { "" } else { "s" },
+                if overlapping == 1 { "s" } else { "" }
             ));
         }
         if self.print_quarter.is_none() {
@@ -175,6 +204,8 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
     let (k, margin) = print_quarter(&rgb, &reg, card);
     let print_quarter = (margin >= MIN_PRINT_MARGIN).then_some(k);
     let k = print_quarter.unwrap_or(0);
+    // The holes are gauged for the card's pellet (C5: a torn hole's mark is its circle).
+    let diameter = f64::from(card.pellet_diameter_mm);
     let (placement, scaled, checks, rms, holes, view) = if shots.is_empty() {
         // No shots: the frame is the print's (the numbers upright).
         let view = Placement {
@@ -183,13 +214,13 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
             shift: (0.0, 0.0),
             scale: 1.0,
         };
-        let holes = all_holes(&rgb, &reg)
+        let holes: Vec<(f64, f64)> = all_gauges(&rgb, &reg, diameter)
             .iter()
-            .map(|h| view.to_frame(h.center))
+            .map(|(_, g)| view.to_frame(g.center))
             .collect();
         (None, false, Vec::new(), None, holes, view)
     } else {
-        let gt = ground_truth(&rgb, &reg, shots)?;
+        let gt = ground_truth(&rgb, &reg, shots, diameter)?;
         let checks = shot_checks(&gt, shots);
         let extra = gt.extra.iter().map(|h| gt.placement.to_frame(h.center)).collect();
         let rms = rms_of(&checks);
@@ -202,6 +233,16 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
             gt.placement,
         )
     };
+    // How far the holes are from the card's centre (rms), for the expected error.
+    let rho = {
+        let pts: Vec<(f64, f64)> = if shots.is_empty() {
+            holes.clone()
+        } else {
+            shots.to_vec()
+        };
+        (pts.iter().map(|p| p.0 * p.0 + p.1 * p.1).sum::<f64>() / pts.len().max(1) as f64).sqrt()
+    };
+    let camera_deg = cardphoto::view::view(&reg.map).tilt_deg;
     let image = on_grid(&rgb, &reg, &view, card);
     let pose = CardPose::new(&view, k);
     let checks = checks
@@ -222,6 +263,8 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
         px_per_mm: px_per_mm(&reg),
         print_quarter,
         print_margin: margin,
+        camera_deg,
+        expected_mm: expected_error_mm(camera_deg, rho),
         pose,
         placement,
         scaled,
@@ -250,6 +293,7 @@ fn shot_checks(gt: &GroundTruth, shots: &[(f64, f64)]) -> Vec<ShotCheck> {
                 diff: hole.map(|h| (h.0 - s.0, h.1 - s.1)),
                 sd_mm: r.hole.as_ref().map_or(0.0, |h| h.sd_mm / gt.placement.scale),
                 hole_d_mm: r.hole.as_ref().map_or(0.0, |h| 2.0 * h.radius_mm),
+                overlap: r.overlap,
                 paper: None, // set once the card's pose is known
             }
         })
@@ -376,6 +420,7 @@ fn result_json(p: &Processed, card: &Card) -> String {
                 "diff_mm": s.diff.map(pair),
                 "hole_sd_mm": s.hole.map(|_| round(s.sd_mm)),
                 "hole_d_mm": s.hole.map(|_| round(s.hole_d_mm)),
+                "overlap": s.hole.map(|_| s.overlap),
                 "paper_mm": s.paper.map(pair),
                 "sensor_score": score(s.shot),
                 "paper_score": s.paper.map(score),
@@ -393,6 +438,8 @@ fn result_json(p: &Processed, card: &Card) -> String {
             "points": p.reg_points.1,
             "k1": round(p.k1),
             "px_per_mm": (p.px_per_mm * 100.0).round() / 100.0,
+            "camera_deg": (p.camera_deg * 10.0).round() / 10.0,
+            "expected_mm": round(p.expected_mm),
         },
         "placement": p.placement.as_ref().map(|pl| serde_json::json!({
             "quarter_turns": pl.quarter,

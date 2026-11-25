@@ -3641,8 +3641,9 @@ fn photo_summary(ui: &mut Ui, cp: &CardPhoto, series_len: usize) {
         .id_salt("photo_details")
         .show(ui, |ui| {
             let mut details = format!(
-                "{:.1} px per mm; the rings fit to {:.3} mm rms ({} of {} edge points); lens k1 {:+.3}.",
-                p.px_per_mm, p.reg_rms_mm, p.reg_points.0, p.reg_points.1, p.k1
+                "{:.1} px per mm; the rings fit to {:.3} mm rms ({} of {} edge points); lens k1 {:+.3}. \
+                 Taken {:.0}° from straight above: the holes expected to within about {:.2} mm (rms).",
+                p.px_per_mm, p.reg_rms_mm, p.reg_points.0, p.reg_points.1, p.k1, p.camera_deg, p.expected_mm
             );
             if let Some(pl) = &p.placement {
                 let c = p.pose.centre;

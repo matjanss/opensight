@@ -9,10 +9,11 @@
 //!
 //! From a start, rays go out every 1°; on each, the damage (how far the photo is from the
 //! expected card, `Expected::diff`) is followed out to where it ends: the last drop below
-//! `LEVEL` within `REACH_MM` past the calibre's radius, with intact card after it for
+//! `LEVEL` within `REACH_MM` past the calibre's radius (the circle's once found; the first
+//! round `SEED_SLACK_MM` further, for a start off the centre), with intact card after it for
 //! `CLEAR_MM`, placed at half the rim's height. Flaps inside (card-coloured) are passed over; a neighbour's damage further out
-//! is not reached. A circle is fitted to those edge points (Huber weights: a tear sticking out
-//! counts little), the rays cast again from its centre until it settles. Overlapping holes
+//! is not reached. A circle is fitted to those edge points (robust weights: a tear sticking out
+//! counts for nothing), the rays cast again from its centre until it settles. Overlapping holes
 //! are fitted together: their circles' outer arcs make the outline.
 
 use crate::holes::Expected;
@@ -28,7 +29,9 @@ const STEP_MM: f64 = 0.04;
 /// The damage level that finds an edge (`Expected::diff`'s units: the paper–ink range); the
 /// edge is then placed at the rim's half height.
 pub const LEVEL: f64 = 0.15;
-/// How far past the calibre's radius an edge is looked for, mm.
+/// How far a start may be off the hole's centre, mm (the first round looks this much further).
+const SEED_SLACK_MM: f64 = 1.0;
+/// How far past the calibre's radius (or the circle's, if larger) an edge is looked for, mm.
 const REACH_MM: f64 = 1.0;
 /// How far inside an edge the rim's peak is looked for, mm.
 const PEAK_MM: f64 = 0.6;
@@ -52,6 +55,8 @@ pub struct GaugeFit {
     pub rough_mm: f64,
     /// The mean damage inside 0.8 of the radius.
     pub damage: f64,
+    /// How many holes were fitted together (overlapping), this one included: 1 alone.
+    pub together: usize,
 }
 
 /// The damage along one ray from `c` at angle `a`, smoothed over three steps.
@@ -111,7 +116,8 @@ fn edge(d: &[f64], limit: usize, clear: usize) -> Option<f64> {
     Some((k as f64 - 1.0 + t) * STEP_MM)
 }
 
-/// Circles fitted to points together (Gauss–Newton, Huber weights), from `c0`, all of radius
+/// Circles fitted to points together (Gauss–Newton, Huber then Tukey weights), from `c0`, all of
+/// radius
 /// `r0`; with `fixed`, the radius held, else one shared radius fitted. Each point belongs to
 /// the circle it is nearest to (the outline of overlapping holes is made of their circles'
 /// outer arcs). Returns the centres, the radius, and per circle the centre's sd, the robust
@@ -175,12 +181,28 @@ fn circles(pts: &[Pt], c0: &[Pt], r0: f64, fixed: bool) -> (Vec<Pt>, f64, Vec<(f
             }
         }
         if round < 3 {
+            // Huber first; then Tukey's biweight, which drops a run of edges pulled off the
+            // circle (a tear, a printed line's edge next to the hole) instead of only
+            // weakening it.
             let res: Vec<f64> = assign(&c, r).into_iter().map(|x| x.1).collect();
-            let k = (1.5 * mad(&mut res.clone())).max(0.01);
-            w = res
-                .iter()
-                .map(|x| if x.abs() <= k { 1.0 } else { k / x.abs() })
-                .collect();
+            let m = mad(&mut res.clone()).max(0.005);
+            w = if round == 0 {
+                let k = 1.5 * m;
+                res.iter()
+                    .map(|x| if x.abs() <= k { 1.0 } else { k / x.abs() })
+                    .collect()
+            } else {
+                let k = TUKEY * m;
+                res.iter()
+                    .map(|x| {
+                        if x.abs() < k {
+                            (1.0 - (x / k).powi(2)).powi(2)
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect()
+            };
         }
     }
     let asg = assign(&c, r);
@@ -210,6 +232,8 @@ fn circles(pts: &[Pt], c0: &[Pt], r0: f64, fixed: bool) -> (Vec<Pt>, f64, Vec<(f
     (c, r, per)
 }
 
+/// Tukey's biweight cut, in robust sds (1.4826 · MAD) of the edge points about the circle.
+const TUKEY: f64 = 4.685;
 /// The least edge points a circle needs.
 const MIN_POINTS: usize = 60;
 
@@ -228,15 +252,23 @@ pub fn gauge(
 ) -> Option<Vec<GaugeFit>> {
     let r_cal = diameter_mm / 2.0;
     let fixed = radius.is_some();
-    let limit = ((r_cal + REACH_MM) / STEP_MM).ceil() as usize;
     let clear = (CLEAR_MM / STEP_MM).ceil() as usize;
-    let n = limit + clear + 1;
     let mut c: Vec<Pt> = starts.to_vec();
     let mut r = radius.unwrap_or(r_cal);
     let mut pts: Vec<Pt> = Vec::new();
     let mut per = Vec::new();
     for round in 0..8 {
         pts.clear();
+        // How far out an edge is looked for: from a start up to `SEED_SLACK_MM` off the
+        // centre, the far side of a mark larger than the calibre must be in reach; then out to
+        // the circle found so far.
+        let reach = if round == 0 {
+            r_cal.max(r) + SEED_SLACK_MM
+        } else {
+            r.max(r_cal)
+        } + REACH_MM;
+        let limit = (reach / STEP_MM).ceil() as usize;
+        let n = limit + clear + 1;
         for ck in &c {
             for k in 0..RAYS {
                 let a = k as f64 / RAYS as f64 * std::f64::consts::TAU;
@@ -278,6 +310,7 @@ pub fn gauge(
                 rays,
                 rough_mm,
                 damage: damage(rgb, map, exp, *center, 0.8 * r),
+                together: starts.len(),
             })
             .collect(),
     )
