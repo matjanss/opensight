@@ -283,7 +283,7 @@ Builds (`src/photo.rs`, the window in `main.rs`):
 
 ## C5. Real photos
 
-From the user (2026-11-25: one clean card and nine with holes, so more than first asked):
+From the user (2026-11-25: one clean card and nine with 3–5 holes each, so more cards than first asked):
 10 photos of the clean card, 10 of the holed card with the most varied holes (in the black,
 in the white, cutting a ring line, overlapping), 3–4 of each of the other eight; one folder
 per card (`~/opensights-photos/clean/`, `card1/`–`card9/`). Flat on a grey or coloured
