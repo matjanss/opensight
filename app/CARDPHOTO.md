@@ -331,14 +331,17 @@ scripts outside the repo; the numbers are in Results.
   A model to decide: the hole as everything that isn't intact card, within a circle of the
   pellet's size (as a scoring gauge sees it). A first try on card 1's black holes changed
   their spread little (0.20 → 0.19, 0.17 → 0.14 mm, before the alignment was fixed).
-- **A light wooden table** (close to the cream paper) makes the holes in the white faint: the
-  next set on a strongly coloured surface (a blue or green folder), as the shooter's guide
-  says.
+- **A light wooden table** (close to the cream paper) makes the holes in the white faint.
+  The user (2026-11-25): no coloured surface for the next set, since shooters won't always
+  use one; the hole model has to work on a light table. In the app the series' shots say
+  where each hole should be (within a few mm), which the unguided search here doesn't have.
 - **The card's thickness:** not seen yet (t fitted 0.11 ± 0.14 mm, the spreads unchanged);
   the torn flaps, which look different from each angle, are larger.
-- **For the user:** how these holes were made (pellet type, backing card, distance); a second
-  set on a coloured surface, some from straight above from further away (2× lens); scans of
-  cards 1 and 3.
+- **How the holes were made** (the user): 4.5 mm air pellets or .22 LR (5.6 mm), not known.
+  The openings fitted (r 1.8–2.7 mm, mean 2.0–2.2) suggest 4.5 mm; the scans will tell. The
+  calibre has to be a setting either way (PLAN: air guns and subsonic .22).
+- **The set:** 4 holed cards and 1 clean (enough for now, the user). Still to come: scans of
+  cards 1 and 3, the truth for the photos.
 
 ## C6. The serial number
 
