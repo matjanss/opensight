@@ -6,17 +6,28 @@ status and settings are in (step 5c).
 
 ## Protocol v3 (step 5c leftovers)
 
-- **Unscored hits by hand: the check with a sensor.** Resolving by hand is in (branch
-  `app-unscored`), passing its unit tests and the headless UI test (`resolve_hits_by_hand`,
-  2026-11-26). Still to run, when the NodeMCU is on USB again: real holes and missed shots
+- **Unscored hits by hand: the check with a sensor.** Resolving by hand is in (merged to
+  `main` 2026-11-26), passing its unit tests, the headless UI test (`resolve_hits_by_hand`)
+  and the user's look at the demo. Still to run, when the NodeMCU is on USB again: real holes and missed shots
   over BLE. Curtain on (`curtain on`) with `sim dip 60`, then `sim fault silent` (expect a
   hole per shot, "not scored") and `sim fault double` (expect a MISSED hit); resolve one of
   each in the app, check the `manual` lines in the day's log, then disconnect and reconnect:
   the series stays as resolved (the decisions live in memory with the series, so an app
   restart loses both).
-- **Unscored hits: the card photo's suggestion.** With a card photo, a hole no shot claims
-  (`Processed::holes`) is likely the unscored hit's: the resolve window could offer "the
-  photo's hole at x, y".
+- **Unscored hits: resolved at the end of the series, with the card photo.** Now each hit
+  is resolved on its own, whenever the shooter clicks it. A better workflow (the user,
+  2026-11-26; think it through before building) does it once, at the end of the series,
+  together with the check against the paper:
+  1. shoot the series (the unscored hits only listed, as now);
+  2. upload the card photo(s) and correct the scores against the paper;
+  3. confirm the hits still not scored and place them on the card.
+
+  The photo helps with step 3: a hole no shot claims (`Processed::holes`) is likely an
+  unscored hit's, so the app can offer "the photo's hole at x, y" for each, and the
+  shooter only confirms (or places it by hand, or calls it a miss, as now). Open points:
+  what "correct the scores" means for a shot whose paper score differs (take the paper's?
+  keep both?), several unscored hits against several unclaimed holes (which goes where),
+  and whether the series counts as finished only once every hit is resolved.
 - **Settings editor.** The sensor's settings (span, dead time, validity limits, the curtain's
   window) are shown read-only; the protocol can write them (Settings).
 - **The IR curtain on or off, in the settings.** A switch for whether a shot needs the
