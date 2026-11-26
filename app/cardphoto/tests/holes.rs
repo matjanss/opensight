@@ -376,6 +376,9 @@ fn dense_group_never_misplaced() {
 }
 
 /// The app's demo of 41 shots, which once took 85 s: every hole, and well within the time.
+/// The limit is wall time, shared with the other tests running beside it: here 2.5 s alone,
+/// 6 s with them (12 cores); on CI's smaller runners up to 32 s (Windows, 2026-11-26). The
+/// old fit took 115 s alone here, so 30 s here and 120 s on CI (`CI` set) both catch it.
 #[test]
 fn demo_41_shots_in_time() {
     let (angle, shift) = (90.5f64.to_radians(), (0.7, -0.4));
@@ -391,5 +394,6 @@ fn demo_41_shots_in_time() {
     let (found, worst, secs) = own_holes("demo, 41 shots", &p, &layouts::SHOTS41);
     assert_eq!(found, 41);
     assert!(worst < 0.06, "a hole {worst} mm off");
-    assert!(secs < 30.0, "{secs} s");
+    let limit = if std::env::var_os("CI").is_some() { 120.0 } else { 30.0 };
+    assert!(secs < limit, "{secs} s, the limit {limit} s");
 }
