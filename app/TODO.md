@@ -6,9 +6,17 @@ status and settings are in (step 5c).
 
 ## Protocol v3 (step 5c leftovers)
 
-- **Unscored hits: resolve them.** A hole or a missed shot is listed as "not scored". The
-  shooter (or range officer) should be able to place it on the card by hand after checking
-  the paper, or mark it a miss, so the total is complete.
+- **Unscored hits by hand: the check with a sensor.** Resolving by hand is in (branch
+  `app-unscored`), passing its unit tests and the headless UI test (`resolve_hits_by_hand`,
+  2026-11-26). Still to run, when the NodeMCU is on USB again: real holes and missed shots
+  over BLE. Curtain on (`curtain on`) with `sim dip 60`, then `sim fault silent` (expect a
+  hole per shot, "not scored") and `sim fault double` (expect a MISSED hit); resolve one of
+  each in the app, check the `manual` lines in the day's log, then disconnect and reconnect:
+  the series stays as resolved (the decisions live in memory with the series, so an app
+  restart loses both).
+- **Unscored hits: the card photo's suggestion.** With a card photo, a hole no shot claims
+  (`Processed::holes`) is likely the unscored hit's: the resolve window could offer "the
+  photo's hole at x, y".
 - **Settings editor.** The sensor's settings (span, dead time, validity limits, the curtain's
   window) are shown read-only; the protocol can write them (Settings).
 - **The IR curtain on or off, in the settings.** A switch for whether a shot needs the
@@ -34,4 +42,5 @@ status and settings are in (step 5c).
   group, two shots through the same hole), the click should list all of them: shot
   number, score and position for each, newest first. Picking one from the list opens its
   info as now. A single shot under the pointer opens its popup directly, as now.
-  (Asked for 2026-11-22.)
+  (Asked for 2026-11-22.) Include the hits resolved by hand: a "same hole" one lies exactly
+  on its shot.

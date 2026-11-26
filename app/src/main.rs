@@ -9,8 +9,10 @@ mod count;
 mod eventlog;
 mod photo;
 mod protocol;
+mod resolve;
 mod upload;
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
@@ -25,6 +27,7 @@ use ble::{Command, Event, SensorInfo};
 use calwizard::{Action, FieldCheck, Phase, Wizard};
 use card::{Card, CardTexture, Higher, Score};
 use eventlog::EventLog;
+use resolve::{How, Key};
 
 const CONTENT_MAX_WIDTH: f32 = 460.0;
 /// Width of the column next to the target card; below this window width they stack.
@@ -661,8 +664,14 @@ struct SensorApp {
     /// sensor; cleared by the user or when another sensor connects.
     series: Vec<(protocol::Shot, Score)>,
     /// The series' hits with no position (a hole, a missed shot), each with how many scored
-    /// shots came before it: listed in their place, never scored.
+    /// shots came before it: listed in their place, not scored until resolved by hand.
     unscored: Vec<(usize, protocol::Shot)>,
+    /// The hits resolved by hand (`resolve`), now in `series`: how, by (boot, seq).
+    manual: HashMap<Key, How>,
+    /// Resolving a hit by hand, while its window is open.
+    resolving: Option<Resolving>,
+    /// Where the card was drawn last: the resolve window opens beside it.
+    card_rect: egui::Rect,
     series_sensor: Option<String>,
     /// Protocol v3: the sensor's state, its calibration and settings, and what its events
     /// said since connecting (read-only here; the calibration wizard comes in step 5d).
@@ -679,8 +688,8 @@ struct SensorApp {
     cal_report: Option<String>,
     /// The card photo window (`CARDPHOTO.md` C3/C4), while open: the link for the phone.
     photo_task: Option<PhotoTask>,
-    /// A photo being processed, and the series' length it was taken with.
-    photo_job: Option<(mpsc::Receiver<Result<photo::Processed, String>>, usize)>,
+    /// A photo being processed, and the sensor's shots it was taken with.
+    photo_job: Option<PhotoJobRx>,
     /// The processed photo of the current series: under the shots, and its ground truth.
     card_photo: Option<CardPhoto>,
     photo_error: Option<String>,
@@ -712,12 +721,22 @@ struct SensorApp {
     /// Decimal scoring (10.4) instead of traditional whole rings with X. Off by default.
     decimal_scoring: bool,
     settings_open: bool,
+    /// `OPENSIGHTS_DEMO_HITS` set: the card with a synthetic series (shots, holes and a
+    /// missed shot) without a sensor, to try resolving hits by hand.
+    demo_hits: bool,
 }
 
 impl SensorApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::with_link(cc, ble::spawn(cc.egui_ctx.clone()))
+    }
+
+    /// With the BLE thread's channels (the UI tests pass channels with no thread).
+    fn with_link(
+        cc: &eframe::CreationContext<'_>,
+        (cmd, events): (UnboundedSender<Command>, mpsc::Receiver<Event>),
+    ) -> Self {
         let storage = cc.storage;
-        let (cmd, events) = ble::spawn(cc.egui_ctx.clone());
         let replay_delay_s = storage
             .and_then(|s| s.get_string(KEY_REPLAY_DELAY))
             .and_then(|v| v.parse().ok())
@@ -740,6 +759,9 @@ impl SensorApp {
             shots_supported: false,
             series: Vec::new(),
             unscored: Vec::new(),
+            manual: HashMap::new(),
+            resolving: None,
+            card_rect: egui::Rect::NOTHING,
             series_sensor: None,
             status: None,
             config: None,
@@ -793,11 +815,144 @@ impl SensorApp {
                 .and_then(|s| s.get_string(KEY_DECIMAL))
                 .is_some_and(|v| v == "true"),
             settings_open: false,
+            demo_hits: false,
         }
+        .with_demo_hits()
+    }
+
+    fn with_demo_hits(self) -> Self {
+        if std::env::var_os("OPENSIGHTS_DEMO_HITS").is_none() {
+            return self;
+        }
+        self.demo_series()
+    }
+
+    /// The demo series (`OPENSIGHTS_DEMO_HITS`, the UI tests), as the sensor would send it:
+    /// shots 1, 2, a hole, shots 3, 4, a missed shot, shot 5, a hole, shot 6.
+    fn demo_series(mut self) -> Self {
+        self.demo_hits = true;
+        self.series_sensor = Some("demo".into());
+        let hits: [(protocol::Kind, f32, f32); 9] = [
+            (protocol::Kind::Shot, 3.1, -4.2),
+            (protocol::Kind::Shot, -8.5, 2.0),
+            (protocol::Kind::Hole, 0.0, 0.0),
+            (protocol::Kind::Shot, 1.2, 0.8),
+            (protocol::Kind::Shot, 14.0, 21.5),
+            (protocol::Kind::Missed, 0.0, 0.0),
+            (protocol::Kind::Shot, -2.4, -6.3),
+            (protocol::Kind::Hole, 0.0, 0.0),
+            (protocol::Kind::Shot, 5.5, 5.0),
+        ];
+        for (i, (kind, x, y)) in hits.into_iter().enumerate() {
+            let shot = protocol::Shot {
+                seq: i as u32 + 1,
+                boot: 0xDE30,
+                time_ms: 1000 * i as u32,
+                x: (x * 100.0) as i32,
+                y: (y * 100.0) as i32,
+                event: 0,
+                cal: 0,
+                sigma: protocol::SIGMA_UNKNOWN,
+                kind,
+                flags: 0,
+            };
+            if shot.scored() {
+                let score = self.card.score(shot.x_mm(), shot.y_mm());
+                self.series.push((shot, score));
+            } else {
+                self.unscored.push((self.series.len(), shot));
+            }
+        }
+        self
     }
 
     fn send(&self, c: Command) {
         let _ = self.cmd.send(c); // fails only if the BLE thread died, which shows as `fatal`
+    }
+
+    fn clear_series(&mut self) {
+        self.series.clear();
+        self.unscored.clear();
+        self.manual.clear();
+        self.resolving = None;
+        self.card_photo = None;
+    }
+
+    /// The event log's own lines (`manual`).
+    fn log_line(&mut self, text: &str) {
+        if self.save_events
+            && let Some(log) = &mut self.event_log
+            && let Err(err) = log.line(text)
+        {
+            self.log_error = Some(format!("Could not write the event log: {err}"));
+        }
+    }
+
+    /// Whether a shot of the series is on the card (not a miss counted by hand).
+    fn on_card(&self, s: &protocol::Shot) -> bool {
+        self.manual.get(&resolve::key(s)) != Some(&How::Miss)
+    }
+
+    /// Resolves the hit `key` (unscored, or resolved by hand before) as `how`; `pos` (mm)
+    /// is where it was placed. It goes into the series in its place, and into the log.
+    fn resolve_hit(&mut self, key: Key, how: How, pos: (f32, f32)) {
+        let (x, y, score) = match how {
+            How::Placed => {
+                let (x, y) = ((pos.0 * 100.0).round() as i32, (pos.1 * 100.0).round() as i32);
+                (x, y, self.card.score(x as f32 / 100.0, y as f32 / 100.0))
+            }
+            How::Same(other) => {
+                let Some((s, score)) = self.series.iter().find(|(s, _)| resolve::key(s) == other) else {
+                    return;
+                };
+                (s.x, s.y, *score)
+            }
+            How::Miss => (0, 0, resolve::MISS),
+        };
+        let i = if let Some(j) = self.unscored.iter().position(|(_, s)| resolve::key(s) == key) {
+            let mut shot = self.unscored[j].1;
+            (shot.x, shot.y) = (x, y);
+            resolve::resolve(&mut self.series, &mut self.unscored, j, shot, score)
+        } else if let Some(i) = self
+            .series
+            .iter()
+            .position(|(s, _)| resolve::key(s) == key && !s.scored())
+        {
+            (self.series[i].0.x, self.series[i].0.y) = (x, y);
+            self.series[i].1 = score;
+            i
+        } else {
+            return;
+        };
+        self.manual.insert(key, how);
+        let line = resolve::log_line(&self.series[i].0, Some(how), Some(i + 1), Some(score));
+        self.log_line(&line);
+    }
+
+    /// Puts a hit resolved by hand back to "not scored".
+    fn unresolve_hit(&mut self, key: Key) {
+        let Some(i) = self
+            .series
+            .iter()
+            .position(|(s, _)| resolve::key(s) == key && !s.scored())
+        else {
+            return;
+        };
+        let hit = resolve::unresolve(&mut self.series, &mut self.unscored, i);
+        self.manual.remove(&key);
+        if self.selected_shot == Some(key) {
+            self.selected_shot = None;
+        }
+        self.log_line(&resolve::log_line(&hit, None, None, None));
+    }
+
+    /// The sensor's own shots in the series (the ones a card photo is checked against).
+    fn measured_keys(&self) -> Vec<Key> {
+        self.series
+            .iter()
+            .filter(|(s, _)| s.scored())
+            .map(|(s, _)| resolve::key(s))
+            .collect()
     }
 
     fn log_note(&mut self, text: &str) {
@@ -833,9 +988,7 @@ impl SensorApp {
                     self.pin_supported = pin_supported;
                     self.shots_supported = shots_supported;
                     if self.series_sensor.as_deref() != Some(id.as_str()) {
-                        self.series.clear();
-                        self.unscored.clear();
-                        self.card_photo = None;
+                        self.clear_series();
                         self.series_sensor = Some(id.clone());
                     }
                     self.event_counts = EventCounts::default();
@@ -1005,7 +1158,8 @@ impl eframe::App for SensorApp {
             )
             .show(ui, |ui| self.status_bar(ui));
 
-        let on_target = matches!(self.link, Link::Connected { .. }) && self.fatal.is_none();
+        // The demo also without Bluetooth (the UI tests on CI).
+        let on_target = (matches!(self.link, Link::Connected { .. }) && self.fatal.is_none()) || self.demo_hits;
         egui::CentralPanel::default().show(ui, |ui| {
             if on_target {
                 self.target_screen(ui);
@@ -1255,6 +1409,234 @@ impl SensorApp {
                 });
             });
         }
+        self.resolve_window(ui.ctx());
+    }
+
+    /// The resolve window: an unscored hit (a hole, a missed shot) placed on the card, the
+    /// same hole as another shot, or a miss, after a look at the paper card; or a hit
+    /// resolved by hand changed or put back to "not scored". Opened from the hit's row or
+    /// the card's notice, or by selecting a shot resolved by hand.
+    fn resolve_window(&mut self, ctx: &egui::Context) {
+        if self
+            .resolving
+            .as_ref()
+            .is_some_and(|r| r.from_selection && self.selected_shot != Some(r.key))
+        {
+            self.resolving = None; // the selection moved on
+        }
+        if self.resolving.is_none()
+            && let Some(k) = self.selected_shot.filter(|k| self.manual.contains_key(k))
+        {
+            self.resolving = Some(Resolving::new(k, true));
+        }
+        let Some(key) = self.resolving.as_ref().map(|r| r.key) else {
+            return;
+        };
+        let unscored = self.unscored.iter().find(|(_, s)| resolve::key(s) == key).copied();
+        let in_series = self.series.iter().position(|(s, _)| resolve::key(s) == key);
+        let how = self.manual.get(&key).copied();
+        let (hit, title) = match (unscored, in_series) {
+            (Some((after, s)), _) => (s, format!("{} – not scored", hit_name(&s, after))),
+            (None, Some(i)) if how.is_some() => (
+                self.series[i].0,
+                format!("Shot {} – {}", i + 1, how.map_or("", how_label)),
+            ),
+            _ => {
+                self.resolving = None; // gone (the series cleared), or the sensor's own shot
+                return;
+            }
+        };
+        let decimal = self.decimal_scoring && self.card.decimal;
+        let number = |k: Key| self.series.iter().position(|(s, _)| resolve::key(s) == k).map(|i| i + 1);
+        // The shots it can have gone through: on the card, not itself.
+        let others: Vec<(usize, Key, String)> = self
+            .series
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, (s, _))| resolve::key(s) != key && self.manual.get(&resolve::key(s)) != Some(&How::Miss))
+            .map(|(i, (s, sc))| {
+                let text = format!("Shot {} · {} · {:+.2}, {:+.2} mm", i + 1, sc.text(decimal), s.x_mm(), s.y_mm());
+                (i, resolve::key(s), text)
+            })
+            .collect();
+
+        enum Act {
+            Stay,
+            To(Step),
+            Miss,
+            Confirm,
+            Undo,
+            Close,
+        }
+        let mut act = Act::Stay;
+        let mut open = true;
+        let card = &self.card;
+        let r = self.resolving.as_mut().unwrap();
+        egui::Window::new(title)
+            .id(egui::Id::unique("resolve_hit"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::RIGHT_TOP)
+            .default_pos(self.card_rect.right_top() + egui::vec2(-12.0, 56.0))
+            .default_width(330.0)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                let wrap = |ui: &mut Ui, t: &str| {
+                    ui.add(egui::Label::new(t).wrap());
+                };
+                match r.step {
+                    Step::Choose => {
+                        match (how, unscored) {
+                            (_, Some((after, s))) => {
+                                wrap(ui, &unscored_line(after, &s));
+                                wrap(ui, "Check the paper card, then:");
+                            }
+                            (Some(How::Placed), _) => {
+                                let sc = card.score(hit.x_mm(), hit.y_mm());
+                                wrap(ui, &format!(
+                                    "Placed by hand at {:+.2}, {:+.2} mm: {}.",
+                                    hit.x_mm(),
+                                    hit.y_mm(),
+                                    sc.text(decimal)
+                                ));
+                            }
+                            (Some(How::Same(o)), _) => wrap(ui, &match number(o) {
+                                Some(n) => format!("By hand: the same hole as shot {n}."),
+                                None => "By hand: the same hole as an earlier shot.".to_string(),
+                            }),
+                            (Some(How::Miss), _) => wrap(ui, "Counted as a miss by hand: 0, not on the card."),
+                            (None, None) => {}
+                        }
+                        let wide = |ui: &mut Ui, enabled: bool, t: &str| {
+                            ui.add_enabled(enabled, egui::Button::new(t).min_size(egui::vec2(ui.available_width(), 0.0)))
+                                .clicked()
+                        };
+                        if wide(ui, true, "Place it on the card…") {
+                            act = Act::To(Step::Place);
+                        }
+                        if wide(ui, !others.is_empty(), "The same hole as another shot…") {
+                            act = Act::To(Step::Same);
+                        }
+                        if wide(ui, how != Some(How::Miss), "A miss (0)") {
+                            act = Act::Miss;
+                        }
+                        if how.is_some() && wide(ui, true, "Back to not scored") {
+                            act = Act::Undo;
+                        }
+                    }
+                    Step::Place => {
+                        wrap(
+                            ui,
+                            "Click the hole on the card, then drag the shot until its ring sits on the \
+                             hole's edge. The arrow keys move it 0.05 mm (Shift: 0.5 mm). Zoom in for a \
+                             close fit.",
+                        );
+                        let mut p = r.pos.unwrap_or((0.0, 0.0));
+                        let mut changed = false;
+                        ui.horizontal(|ui| {
+                            for (label, v) in [("x", &mut p.0), ("y", &mut p.1)] {
+                                ui.label(label);
+                                changed |= ui
+                                    .add(egui::DragValue::new(v).speed(0.02).fixed_decimals(2).suffix(" mm"))
+                                    .changed();
+                            }
+                        });
+                        if changed {
+                            r.pos = Some(p);
+                        }
+                        match r.pos {
+                            Some(p) => {
+                                let sc = card.score(p.0, p.1);
+                                ui.label(RichText::new(format!("Score {}", sc.text(decimal))).strong());
+                            }
+                            None => {
+                                ui.label(RichText::new("Not placed yet.").weak());
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(r.pos.is_some(), egui::Button::new("Confirm")).clicked() {
+                                act = Act::Confirm;
+                            }
+                            if ui.button("Back").clicked() {
+                                act = Act::To(Step::Choose);
+                            }
+                        });
+                    }
+                    Step::Same => {
+                        wrap(ui, "Click the shot on the card whose hole it went through, or pick it:");
+                        let shown = r
+                            .same
+                            .and_then(|k| others.iter().find(|o| o.1 == k))
+                            .map_or("Pick a shot", |o| o.2.as_str());
+                        egui::ComboBox::from_id_salt("resolve_same")
+                            .selected_text(shown)
+                            .width(ui.available_width())
+                            .show_ui(ui, |ui| {
+                                for (_, k, text) in &others {
+                                    ui.selectable_value(&mut r.same, Some(*k), text.as_str());
+                                }
+                            });
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(r.same.is_some(), egui::Button::new("Confirm")).clicked() {
+                                act = Act::Confirm;
+                            }
+                            if ui.button("Back").clicked() {
+                                act = Act::To(Step::Choose);
+                            }
+                        });
+                    }
+                }
+            });
+        if !open {
+            act = Act::Close;
+        }
+        match act {
+            Act::Stay => {}
+            Act::To(step) => {
+                r.step = step;
+                r.grab = None;
+                if step != Step::Choose {
+                    // On the card now: the popup out of the way, and kept open when the
+                    // selection moves (a click picks the place or the shot).
+                    r.from_selection = false;
+                    self.selected_shot = None;
+                }
+                // Changing a hit resolved by hand: from where it is.
+                if step == Step::Place && r.pos.is_none() && matches!(how, Some(How::Placed | How::Same(_))) {
+                    r.pos = Some((hit.x_mm(), hit.y_mm()));
+                }
+                if step == Step::Same && r.same.is_none() {
+                    r.same = match how {
+                        Some(How::Same(o)) => Some(o),
+                        _ => None,
+                    };
+                }
+            }
+            Act::Miss => {
+                self.resolving = None;
+                self.resolve_hit(key, How::Miss, (0.0, 0.0));
+            }
+            Act::Confirm => {
+                let r = self.resolving.take().unwrap();
+                match (r.step, r.pos, r.same) {
+                    (Step::Place, Some(p), _) => self.resolve_hit(key, How::Placed, p),
+                    (Step::Same, _, Some(o)) => self.resolve_hit(key, How::Same(o), (0.0, 0.0)),
+                    _ => {}
+                }
+            }
+            Act::Undo => {
+                self.resolving = None;
+                self.unresolve_hit(key);
+            }
+            Act::Close => {
+                let r = self.resolving.take().unwrap();
+                if r.from_selection {
+                    self.selected_shot = None;
+                }
+            }
+        }
     }
 
     /// The card, `width` points wide, with every shot of the series; the newest in color.
@@ -1265,6 +1647,7 @@ impl SensorApp {
         let card_mm = self.card.size_mm();
         let base = width / card_mm.x; // points per mm at 100%
         let (rect, response) = ui.allocate_exact_size(card_mm * base, egui::Sense::click_and_drag());
+        self.card_rect = rect;
 
         // Zoom (about the pointer) and pan.
         self.view.clamp(card_mm);
@@ -1279,7 +1662,43 @@ impl SensorApp {
             // The wheel zooms the card; it mustn't also scroll the page around it.
             ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
         }
-        if response.dragged() {
+        // Resolving a hit by hand, placing it: a drag that starts on the placed shot moves it
+        // (anywhere else it moves the card, as always). It follows the pointer, held where it
+        // was grabbed (egui starts a drag only after a few points: deltas would lose them).
+        {
+            let scale = base * self.view.zoom;
+            let origin = rect.center() - self.view.centre_mm * scale;
+            let centre = self.card.to_card(0.0, 0.0);
+            if response.drag_started()
+                && let Some(r) = self.resolving.as_mut().filter(|r| r.step == Step::Place)
+            {
+                let reach = (self.card.pellet_diameter_mm / 2.0 * scale).max(10.0);
+                r.grab = match (r.pos, ui.input(|i| i.pointer.press_origin())) {
+                    (Some(p), Some(press)) => {
+                        let at = origin + self.card.to_card(p.0, p.1) * scale;
+                        (at.distance(press) <= reach).then(|| at - press)
+                    }
+                    _ => None,
+                };
+            }
+            if response.drag_stopped()
+                && let Some(r) = &mut self.resolving
+                && let Some(grab) = r.grab.take()
+                && let Some(ptr) = response.interact_pointer_pos().or(ui.input(|i| i.pointer.latest_pos()))
+            {
+                let m = (ptr + grab - origin) / scale;
+                r.pos = Some((m.x - centre.x, centre.y - m.y));
+            }
+            if let Some(r) = &mut self.resolving
+                && let Some(grab) = r.grab
+                && let Some(ptr) = response.interact_pointer_pos()
+            {
+                let m = (ptr + grab - origin) / scale;
+                r.pos = Some((m.x - centre.x, centre.y - m.y));
+            }
+        }
+        let moving = self.resolving.as_ref().is_some_and(|r| r.grab.is_some());
+        if response.dragged() && !moving {
             self.view.pan(response.drag_delta(), base, card_mm);
         }
 
@@ -1378,13 +1797,56 @@ impl SensorApp {
         let visible = self.replay.visible(len);
 
         let shot_pos = |shot: &protocol::Shot| to_screen(self.card.to_card(shot.x_mm(), shot.y_mm()));
+        // A point in the view as a shot position (mm from the centre, y up).
+        let centre_mm = self.card.to_card(0.0, 0.0);
+        let to_mm = |p: egui::Pos2| {
+            let m = (p - origin) / scale;
+            (m.x - centre_mm.x, centre_mm.y - m.y)
+        };
         for (i, (shot, _)) in self.series[..visible].iter().enumerate() {
+            if !self.on_card(shot) {
+                continue; // a miss counted by hand
+            }
             let (fill, stroke) = if i + 1 == visible {
                 (LAST_SHOT_COLOR, Stroke::new(1.5, Color32::WHITE))
             } else {
                 (Color32::from_gray(150), Stroke::new(1.0, Color32::from_gray(30)))
             };
-            painter.circle(shot_pos(shot), radius, fill, stroke);
+            if shot.scored() {
+                painter.circle(shot_pos(shot), radius, fill, stroke);
+            } else {
+                // Resolved by hand: a dashed edge, white dashes on a dark ring (seen on the
+                // card's black and white).
+                painter.circle_filled(shot_pos(shot), radius, fill);
+                painter.circle_stroke(shot_pos(shot), radius, Stroke::new(2.5, Color32::from_gray(20)));
+                dashed_circle(&painter, shot_pos(shot), radius, Stroke::new(1.5, Color32::WHITE));
+            }
+        }
+
+        // Resolving a hit: the shot being placed, or the shot whose hole it went through.
+        let step = self.resolving.as_ref().map(|r| r.step);
+        if let Some(r) = &self.resolving {
+            if r.step == Step::Place
+                && let Some(p) = r.pos
+            {
+                let c = to_screen(self.card.to_card(p.0, p.1));
+                painter.circle_filled(c, radius, LAST_SHOT_COLOR.gamma_multiply(0.45));
+                painter.circle_stroke(c, radius, Stroke::new(3.0, Color32::from_black_alpha(160)));
+                painter.circle_stroke(c, radius, Stroke::new(1.2, Color32::WHITE));
+                // A cross through its centre, to line it up with the hole's.
+                let arm = radius * 1.6 + 6.0;
+                for d in [egui::vec2(arm, 0.0), egui::vec2(0.0, arm)] {
+                    painter.line_segment([c - d, c + d], Stroke::new(2.5, Color32::from_black_alpha(160)));
+                    painter.line_segment([c - d, c + d], Stroke::new(1.0, Color32::WHITE));
+                }
+            }
+            if r.step == Step::Same
+                && let Some((s, _)) = r.same.and_then(|k| self.series.iter().find(|(s, _)| resolve::key(s) == k))
+            {
+                let c = shot_pos(s);
+                painter.circle_stroke(c, radius + 3.0, Stroke::new(3.0, Color32::BLACK));
+                painter.circle_stroke(c, radius + 3.0, Stroke::new(1.5, LAST_SHOT_COLOR));
+            }
         }
 
         // The shot under the pointer: the nearest within the hole (at least a few points
@@ -1395,13 +1857,24 @@ impl SensorApp {
                 .iter()
                 .enumerate()
                 .rev()
+                .filter(|(_, (shot, _))| self.on_card(shot))
                 .map(|(i, (shot, _))| (i, shot_pos(shot).distance(p)))
                 .filter(|&(_, d)| d <= hit_r)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| i)
         };
-        if response.dragged() && self.view.zoom > 1.0 {
+        let on_placed = |p: egui::Pos2| {
+            self.resolving
+                .as_ref()
+                .and_then(|r| r.pos.filter(|_| r.step == Step::Place))
+                .is_some_and(|q| to_screen(self.card.to_card(q.0, q.1)).distance(p) <= radius.max(10.0))
+        };
+        if moving || (response.dragged() && self.view.zoom > 1.0) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if step == Some(Step::Place) && response.hover_pos().is_some_and(on_placed) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        } else if step == Some(Step::Place) && response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         } else if response.hover_pos().and_then(shot_at).is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         } else if response.hovered() && self.view.zoom > 1.0 {
@@ -1409,11 +1882,52 @@ impl SensorApp {
         }
         if response.clicked() {
             let key = |i: usize| (self.series[i].0.boot, self.series[i].0.seq);
-            let hit = response.interact_pointer_pos().and_then(shot_at).map(key);
-            self.selected_shot = if hit == self.selected_shot { None } else { hit };
+            let at = response.interact_pointer_pos();
+            match step {
+                // Placing: the click puts the shot there (again: moves it there).
+                Some(Step::Place) => {
+                    if let (Some(r), Some(p)) = (&mut self.resolving, at) {
+                        r.pos = Some(to_mm(p));
+                    }
+                }
+                // Same hole: the click picks the shot.
+                Some(Step::Same) => {
+                    let hit = at.and_then(shot_at).map(key);
+                    if let Some(r) = &mut self.resolving
+                        && let Some(k) = hit.filter(|&k| k != r.key)
+                    {
+                        r.same = Some(k);
+                    }
+                }
+                _ => {
+                    let hit = at.and_then(shot_at).map(key);
+                    self.selected_shot = if hit == self.selected_shot { None } else { hit };
+                }
+            }
         }
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.selected_shot = None;
+            self.resolving = None;
+        }
+        // Placing: the arrow keys move the shot 0.05 mm, with Shift 0.5 mm (while no field
+        // has the keyboard).
+        if step == Some(Step::Place) && ui.memory(|m| m.focused().is_none()) {
+            let (dx, dy, shift) = ui.input(|i| {
+                let k = |key| i.num_presses(key) as f32;
+                (
+                    k(egui::Key::ArrowRight) - k(egui::Key::ArrowLeft),
+                    k(egui::Key::ArrowUp) - k(egui::Key::ArrowDown),
+                    i.modifiers.shift,
+                )
+            });
+            let step_mm = if shift { 0.5 } else { 0.05 };
+            if (dx, dy) != (0.0, 0.0)
+                && let Some(r) = &mut self.resolving
+                && let Some(p) = &mut r.pos
+            {
+                p.0 += dx * step_mm;
+                p.1 += dy * step_mm;
+            }
         }
 
         // Zoom bottom right, replay bottom left; the replay one row up if both don't fit.
@@ -1465,6 +1979,7 @@ impl SensorApp {
             .series
             .iter()
             .enumerate()
+            .filter(|(_, (s, _))| self.on_card(s))
             .filter_map(|(i, (s, _))| Some((i, self.card.higher(s.x_mm(), s.y_mm())?)))
             .filter(|(_, h)| h.gap_mm <= self.close_call_mm)
             .collect();
@@ -1496,14 +2011,15 @@ impl SensorApp {
             }
         }
 
-        // The hits with no position (protocol v3): the shooter checks the paper card.
+        // The hits with no position (protocol v3): the shooter checks the paper card, then
+        // resolves them (a click on a line).
         if !self.unscored.is_empty() {
             let lines: Vec<String> = self
                 .unscored
                 .iter()
                 .map(|(after, s)| unscored_line(*after, s))
                 .collect();
-            review_notice(
+            let (clicked, _) = review_notice(
                 ui,
                 &painter,
                 rect,
@@ -1511,8 +2027,13 @@ impl SensorApp {
                 notice_top,
                 "unscored",
                 &lines,
-                None,
+                Some("Resolve it: place it on the card, the same hole as another shot, or a miss"),
             );
+            if let Some(line) = clicked {
+                let key = resolve::key(&self.unscored[line].1);
+                self.selected_shot = None;
+                self.resolving = Some(Resolving::new(key, false));
+            }
         }
 
         // Gone when the series was cleared or replaced.
@@ -1525,9 +2046,10 @@ impl SensorApp {
         };
         let (shot, score) = &self.series[i];
         let pos = shot_pos(shot);
-        if !rect.contains(pos) || i >= visible {
-            return; // out of view, or not replayed yet; it shows again when it's back
+        if !rect.contains(pos) || i >= visible || !self.on_card(shot) {
+            return; // out of view, or not replayed yet (it shows again when it's back), or a miss
         }
+        let how = self.manual.get(&resolve::key(shot)).copied();
         // A dark and a light ring, visible on the card's black and white parts.
         painter.circle_stroke(pos, radius + 3.0, Stroke::new(3.0, Color32::BLACK));
         painter.circle_stroke(pos, radius + 3.0, Stroke::new(1.5, Color32::WHITE));
@@ -1557,8 +2079,23 @@ impl SensorApp {
                     ui.label(format!("x {:+.2} mm · y {:+.2} mm", shot.x_mm(), shot.y_mm()));
                     let off = shot.x_mm().hypot(shot.y_mm());
                     ui.label(RichText::new(format!("{off:.2} mm from the centre")).weak());
-                    if let Some(details) = shot_details(shot) {
-                        ui.label(RichText::new(details).small().weak());
+                    match how {
+                        Some(How::Same(other)) => {
+                            let n = self.series.iter().position(|(s, _)| resolve::key(s) == other);
+                            let text = match n {
+                                Some(n) => format!("By hand: the same hole as shot {}", n + 1),
+                                None => "By hand: the same hole as an earlier shot".to_string(),
+                            };
+                            ui.label(RichText::new(text).small().weak());
+                        }
+                        Some(_) => {
+                            ui.label(RichText::new("Placed by hand").small().weak());
+                        }
+                        None => {
+                            if let Some(details) = shot_details(shot) {
+                                ui.label(RichText::new(details).small().weak());
+                            }
+                        }
                     }
                     let higher = self.card.higher(shot.x_mm(), shot.y_mm());
                     if let Some(h) =
@@ -1585,6 +2122,7 @@ impl SensorApp {
                 ui.add(egui::Label::new(RichText::new(text).weak()).wrap());
                 return;
             };
+            let how = self.manual.get(&resolve::key(shot)).copied();
             ui.horizontal(|ui| {
                 ui.label(RichText::new(score.text(decimal)).size(44.0).strong());
                 ui.vertical(|ui| {
@@ -1594,8 +2132,13 @@ impl SensorApp {
                         line.push_str(" · inner ten");
                     }
                     ui.label(line);
-                    let off = shot.x_mm().hypot(shot.y_mm());
-                    ui.label(RichText::new(format!("{off:.1} mm from the centre")).weak());
+                    if how == Some(How::Miss) {
+                        ui.label(RichText::new("A miss, counted by hand").weak());
+                    } else {
+                        let off = shot.x_mm().hypot(shot.y_mm());
+                        let hand = if how.is_some() { " · placed by hand" } else { "" };
+                        ui.label(RichText::new(format!("{off:.1} mm from the centre{hand}")).weak());
+                    }
                 });
             });
         });
@@ -1614,15 +2157,22 @@ impl SensorApp {
         let mut select: Option<(u32, u32)> = None;
         let width = ui.available_width();
         // With a card photo of this series: each shot's score on the paper, its hole gauged
-        // against the printed rings (None: no hole found). Shots added since are left out.
-        let paper: Option<Vec<Option<Score>>> = self
+        // against the printed rings (Some(None): no hole found; None: a shot after the
+        // photo). A hit resolved by hand was judged on the paper: its score is the paper's.
+        let paper: Option<Vec<Option<Option<Score>>>> = self
             .card_photo
             .as_ref()
             .filter(|cp| !cp.p.shots.is_empty())
             .map(|cp| {
-                cp.p.shots
+                self.series
                     .iter()
-                    .map(|c| c.paper.map(|q| self.card.score(q.0 as f32, q.1 as f32)))
+                    .map(|(s, score)| {
+                        if !s.scored() {
+                            return Some(Some(*score));
+                        }
+                        cp.check(resolve::key(s))
+                            .map(|c| c.paper.map(|q| self.card.score(q.0 as f32, q.1 as f32)))
+                    })
                     .collect()
             });
         ui.allocate_ui(egui::vec2(width, series_h), |ui| {
@@ -1645,6 +2195,9 @@ impl SensorApp {
                     } else if inner_tens > 0 {
                         detail.push_str(&format!(" · {inner_tens}X"));
                     }
+                    if !self.manual.is_empty() {
+                        detail.push_str(&format!(" · {} by hand", self.manual.len()));
+                    }
                     if !self.unscored.is_empty() {
                         detail.push_str(&format!(" · {} not scored", self.unscored.len()));
                     }
@@ -1652,10 +2205,10 @@ impl SensorApp {
                         let differ = paper
                             .iter()
                             .zip(&self.series)
-                            .filter(|(p, (_, s))| p.is_some_and(|p| p.text(decimal) != s.text(decimal)))
+                            .filter(|(p, (_, s))| p.flatten().is_some_and(|p| p.text(decimal) != s.text(decimal)))
                             .count();
-                        let on_paper: Option<Vec<Score>> = paper.iter().copied().collect();
-                        match on_paper.filter(|p| p.len() == n) {
+                        let on_paper: Option<Vec<Score>> = paper.iter().map(|p| p.flatten()).collect();
+                        match on_paper {
                             Some(p) if decimal => {
                                 let t: u32 = p.iter().map(|s| s.tenths as u32).sum();
                                 detail.push_str(&format!(" · paper {}.{}", t / 10, t % 10));
@@ -1706,7 +2259,7 @@ impl SensorApp {
                     ui.separator();
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                         if let Some(cp) = &self.card_photo {
-                            photo_summary(ui, cp, self.series.len());
+                            photo_summary(ui, cp, &self.series);
                             ui.separator();
                         }
                         egui::ScrollArea::vertical()
@@ -1731,8 +2284,12 @@ impl SensorApp {
             });
         }
         if let Some(key) = select {
-            // A row clicked: its popup on the card (clicking it again closes it).
-            if self.selected_shot == Some(key) {
+            // A row clicked: its popup on the card (clicking it again closes it); an
+            // unscored hit's opens the resolve window.
+            if self.unscored.iter().any(|(_, s)| resolve::key(s) == key) {
+                self.selected_shot = None;
+                self.resolving = Some(Resolving::new(key, false));
+            } else if self.selected_shot == Some(key) {
                 self.selected_shot = None;
             } else {
                 self.selected_shot = Some(key);
@@ -1755,9 +2312,7 @@ impl SensorApp {
         }
         if clear {
             self.send(Command::ClearShots);
-            self.series.clear();
-            self.unscored.clear();
-            self.card_photo = None;
+            self.clear_series();
         }
         if photo {
             self.open_photo(ui.ctx());
@@ -1776,8 +2331,9 @@ impl SensorApp {
     /// The series, newest first, a hit with no score after the scored shot it followed.
     /// Without a card photo: # and the score. With one: #, the OpenSights score, the paper's
     /// (both red where they differ), and the ground truth per shot. A scored row is
-    /// clickable: returns the shot clicked, (boot, seq).
-    fn series_list(&self, ui: &mut Ui, paper: Option<&[Option<Score>]>, decimal: bool) -> Option<(u32, u32)> {
+    /// clickable: returns the shot clicked, (boot, seq). So is an unscored hit's row (it
+    /// opens the resolve window); a hit resolved by hand is marked "by hand".
+    fn series_list(&self, ui: &mut Ui, paper: Option<&[Option<Option<Score>>]>, decimal: bool) -> Option<(u32, u32)> {
         let mut clicked = None;
         let red = ui.visuals().error_fg_color;
         let text = |s: &Score, strong: bool| {
@@ -1790,17 +2346,26 @@ impl SensorApp {
             let t = RichText::new(format!("{}{x}", s.text(decimal)));
             if strong { t.strong() } else { t.weak() }
         };
-        let checks = self.card_photo.as_ref().map(|cp| &cp.p.shots);
+        let resolving = self.resolving.as_ref().map(|r| r.key);
+        let by_hand = |key: Key| self.manual.get(&key).map(|&h| how_label(h));
         let Some(paper) = paper else {
             // No photo: two columns.
             for i in (0..=self.series.len()).rev() {
                 for (_, hit) in self.unscored.iter().rev().filter(|(after, _)| *after == i) {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("·").weak());
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(RichText::new(unscored_label(hit)).weak().italics());
-                        });
-                    });
+                    let key = resolve::key(hit);
+                    let bg = ui.painter().add(egui::Shape::Noop);
+                    let row = ui
+                        .horizontal(|ui| {
+                            ui.label(RichText::new("·").weak());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(RichText::new(unscored_label(hit)).weak().italics());
+                            });
+                        })
+                        .response
+                        .rect;
+                    if row_click(ui, row, bg, key, resolving == Some(key), RESOLVE_TIP, &hit_name(hit, i)) {
+                        clicked = Some(key);
+                    }
                 }
                 let Some(i) = i.checked_sub(1) else { break };
                 let (shot, score) = &self.series[i];
@@ -1814,11 +2379,14 @@ impl SensorApp {
                             if score.inner_ten && decimal {
                                 ui.label(RichText::new("X").small().weak());
                             }
+                            if let Some(h) = by_hand(key) {
+                                ui.label(RichText::new(h).small().weak().italics());
+                            }
                         });
                     })
                     .response
                     .rect;
-                if row_click(ui, row, bg, key, self.selected_shot == Some(key)) {
+                if row_click(ui, row, bg, key, self.selected_shot == Some(key), SHOW_TIP, &format!("Shot {}", i + 1)) {
                     clicked = Some(key);
                 }
             }
@@ -1843,10 +2411,15 @@ impl SensorApp {
                 ui.end_row();
                 for i in (0..=self.series.len()).rev() {
                     for (_, hit) in self.unscored.iter().rev().filter(|(after, _)| *after == i) {
-                        ui.label(RichText::new("·").weak());
-                        ui.label(RichText::new(unscored_label(hit)).weak().italics());
+                        let key = resolve::key(hit);
+                        let bg = ui.painter().add(egui::Shape::Noop);
+                        let mut row = ui.label(RichText::new("·").weak()).rect;
+                        row = row.union(ui.label(RichText::new(unscored_label(hit)).weak().italics()).rect);
                         for _ in 0..4 {
-                            ui.label("");
+                            row = row.union(ui.label("").rect);
+                        }
+                        if row_click(ui, row, bg, key, resolving == Some(key), RESOLVE_TIP, &hit_name(hit, i)) {
+                            clicked = Some(key);
                         }
                         ui.end_row();
                     }
@@ -1854,7 +2427,7 @@ impl SensorApp {
                     let (shot, score) = &self.series[i];
                     let key = (shot.boot, shot.seq);
                     let bg = ui.painter().add(egui::Shape::Noop);
-                    let p = paper.get(i).copied();
+                    let p = paper.get(i).copied().flatten();
                     let differ = matches!(p, Some(Some(p)) if p.text(decimal) != score.text(decimal));
                     let mut row = ui.label(RichText::new(format!("{}", i + 1)).weak()).rect;
                     let mut cell = |ui: &mut Ui, t: RichText| row = row.union(ui.label(t).rect);
@@ -1866,7 +2439,15 @@ impl SensorApp {
                         Some(None) => cell(ui, RichText::new("–").weak()),
                         None => cell(ui, RichText::new("·").weak()),
                     }
-                    match checks.and_then(|c| c.get(i)) {
+                    let check = self.card_photo.as_ref().and_then(|cp| cp.check(key));
+                    match check {
+                        _ if !shot.scored() => {
+                            // Resolved by hand: no measurement to check.
+                            let h = by_hand(key).unwrap_or("by hand");
+                            cell(ui, RichText::new(h).weak().italics());
+                            cell(ui, RichText::new(""));
+                            cell(ui, RichText::new(""));
+                        }
                         Some(c) => {
                             cell(ui, RichText::new(format!("{:+.2}, {:+.2}", c.shot.0, c.shot.1)));
                             match c.diff {
@@ -1887,7 +2468,7 @@ impl SensorApp {
                             cell(ui, RichText::new(""));
                         }
                     }
-                    if row_click(ui, row, bg, key, self.selected_shot == Some(key)) {
+                    if row_click(ui, row, bg, key, self.selected_shot == Some(key), SHOW_TIP, &format!("Shot {}", i + 1)) {
                         clicked = Some(key);
                     }
                     ui.end_row();
@@ -3254,6 +3835,76 @@ fn shot_details(s: &protocol::Shot) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
+/// Resolving a hit by hand (the resolve window, `resolve`).
+struct Resolving {
+    key: Key,
+    step: Step,
+    /// Placing: where (mm from the centre, y up), once clicked or typed.
+    pos: Option<(f32, f32)>,
+    /// The same hole: the shot it went through.
+    same: Option<Key>,
+    /// A drag that started on the placed shot (moving it, not the card): the shot's
+    /// offset from the pointer, points.
+    grab: Option<Vec2>,
+    /// Opened by selecting a shot resolved by hand: closes when the selection moves on.
+    from_selection: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    Choose,
+    Place,
+    Same,
+}
+
+impl Resolving {
+    fn new(key: Key, from_selection: bool) -> Self {
+        Resolving {
+            key,
+            step: Step::Choose,
+            pos: None,
+            same: None,
+            grab: None,
+            from_selection,
+        }
+    }
+}
+
+/// An unscored hit by what it was and where it came: "A hole after shot 4".
+fn hit_name(s: &protocol::Shot, after: usize) -> String {
+    let what = match s.kind {
+        protocol::Kind::Hole => "A hole",
+        _ => "A missed shot",
+    };
+    if after == 0 {
+        format!("{what} before shot 1")
+    } else {
+        format!("{what} after shot {after}")
+    }
+}
+
+/// A circle with a dashed edge (a shot resolved by hand).
+fn dashed_circle(painter: &egui::Painter, c: egui::Pos2, r: f32, stroke: Stroke) {
+    let n = 64;
+    let pts: Vec<egui::Pos2> = (0..=n)
+        .map(|k| {
+            let a = k as f32 / n as f32 * std::f32::consts::TAU;
+            c + r * egui::vec2(a.cos(), a.sin())
+        })
+        .collect();
+    let dash = (r * std::f32::consts::TAU / 16.0).max(2.0);
+    painter.extend(egui::Shape::dashed_line(&pts, stroke, dash * 0.6, dash * 0.4));
+}
+
+/// A hit resolved by hand, in the series list.
+fn how_label(h: How) -> &'static str {
+    match h {
+        How::Placed => "placed by hand",
+        How::Same(_) => "same hole, by hand",
+        How::Miss => "miss, by hand",
+    }
+}
+
 /// A hit with no score, in the series list.
 fn unscored_label(s: &protocol::Shot) -> &'static str {
     match s.kind {
@@ -3377,12 +4028,15 @@ enum PhotoJob {
     Demo,
 }
 
+/// A photo being processed: its result, and the sensor's shots it was taken with.
+type PhotoJobRx = (mpsc::Receiver<Result<photo::Processed, String>>, Vec<Key>);
+
 /// A processed card photo of the current series (C4).
 struct CardPhoto {
     p: photo::Processed,
     texture: Option<egui::TextureHandle>,
-    /// The series' length when it was processed.
-    series_len: usize,
+    /// The sensor's shots it was checked against, in the order of `p.shots`.
+    keys: Vec<Key>,
 }
 
 impl CardPhoto {
@@ -3393,6 +4047,11 @@ impl CardPhoto {
             self.texture = Some(ctx.load_texture("card-photo", img, egui::TextureOptions::LINEAR));
         }
         self.texture.as_ref()
+    }
+
+    /// The check of the sensor's shot `key`; None for a shot after the photo.
+    fn check(&self, key: Key) -> Option<&photo::ShotCheck> {
+        self.keys.iter().position(|&k| k == key).and_then(|i| self.p.shots.get(i))
     }
 
     /// Every hole found (frame mm): the shots' and the others.
@@ -3494,14 +4153,13 @@ impl SensorApp {
         for p in received {
             self.process_photo(PhotoJob::Stored(p), ctx);
         }
-        if let Some((rx, len)) = &self.photo_job {
-            let len = *len;
+        if let Some((rx, keys)) = &self.photo_job {
             match rx.try_recv() {
                 Ok(Ok(p)) => {
                     self.card_photo = Some(CardPhoto {
                         p,
                         texture: None,
-                        series_len: len,
+                        keys: keys.clone(),
                     });
                     if self.photo_fade == 0.0 {
                         self.photo_fade = 0.6;
@@ -3531,9 +4189,11 @@ impl SensorApp {
         let Some(dir) = Self::photos_dir() else {
             return;
         };
+        // The sensor's shots only: one placed by hand isn't a measurement.
         let shots: Vec<(f64, f64)> = self
             .series
             .iter()
+            .filter(|(s, _)| s.scored())
             .map(|(s, _)| (f64::from(s.x_mm()), f64::from(s.y_mm())))
             .collect();
         let series = self.series_label();
@@ -3556,7 +4216,7 @@ impl SensorApp {
             let _ = tx.send(run());
             c.request_repaint();
         });
-        self.photo_job = Some((rx, self.series.len()));
+        self.photo_job = Some((rx, self.measured_keys()));
         self.photo_error = None;
     }
 
@@ -3645,12 +4305,26 @@ impl SensorApp {
 
 /// A row of the series list: clickable (it selects the shot), highlighted when selected.
 /// `bg`: a placeholder shape added before the row, so the highlight lies under its text.
-fn row_click(ui: &Ui, rect: egui::Rect, bg: egui::layers::ShapeIdx, key: (u32, u32), selected: bool) -> bool {
+const SHOW_TIP: &str = "Show it on the card";
+const RESOLVE_TIP: &str = "Not scored: place it on the card, mark it the same hole as another shot, or count it a miss";
+
+/// `label` names the row for screen readers (and the UI tests).
+#[allow(clippy::too_many_arguments)]
+fn row_click(
+    ui: &Ui,
+    rect: egui::Rect,
+    bg: egui::layers::ShapeIdx,
+    key: (u32, u32),
+    selected: bool,
+    tip: &str,
+    label: &str,
+) -> bool {
     let rect = rect.expand2(egui::vec2(4.0, 1.0));
     let r = ui
         .interact(rect, ui.scope_id().with(("series_row", key)), egui::Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Show it on the card");
+        .on_hover_text(tip);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     if selected || r.hovered() {
         let fill = if selected {
             ui.visuals().selection.bg_fill
@@ -3664,24 +4338,35 @@ fn row_click(ui: &Ui, rect: egui::Rect, bg: egui::layers::ShapeIdx, key: (u32, u
 
 /// The card photo's result above the series table: the sensor against the holes, warnings,
 /// and the photo's details folded away.
-fn photo_summary(ui: &mut Ui, cp: &CardPhoto, series_len: usize) {
+fn photo_summary(ui: &mut Ui, cp: &CardPhoto, series: &[(protocol::Shot, Score)]) {
     let p = &cp.p;
+    // A shot's number in the series now.
+    let number = |key: Key| series.iter().position(|(s, _)| resolve::key(s) == key).map(|i| i + 1);
     if let Some(rms) = p.rms_mm {
         let found = p.shots.iter().filter(|s| s.diff.is_some()).count();
         let mut line = format!("Card photo: {rms:.3} mm rms, the sensor against the holes, {found} of {} shots", p.shots.len());
         if let Some((i, d)) = p.worst() {
-            line.push_str(&format!(" · worst {d:.3} mm (shot {})", i + 1));
+            match cp.keys.get(i).and_then(|&k| number(k)) {
+                Some(n) => line.push_str(&format!(" · worst {d:.3} mm (shot {n})")),
+                None => line.push_str(&format!(" · worst {d:.3} mm")),
+            }
         }
         ui.add(egui::Label::new(RichText::new(line).strong()).wrap());
     } else {
         let n = p.holes.len();
         ui.label(format!("Card photo: no shots in the series, {n} hole{} found.", if n == 1 { "" } else { "s" }));
     }
-    if cp.series_len != series_len {
+    let measured: Vec<Key> = series
+        .iter()
+        .filter(|(s, _)| s.scored())
+        .map(|(s, _)| resolve::key(s))
+        .collect();
+    if cp.keys != measured {
         ui.add(
             egui::Label::new(format!(
-                "⚠ Processed with {} shots; the series has {series_len} now. Take another photo.",
-                cp.series_len
+                "⚠ Processed with {} of the sensor's shots; the series has {} now. Take another photo.",
+                cp.keys.len(),
+                measured.len()
             ))
             .wrap(),
         );
@@ -3860,6 +4545,153 @@ fn open_folder(dir: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_kittest::kittest::Queryable;
+
+    /// The resolve window driven as a user would: a hole placed on the card (a click, a
+    /// drag of the placed shot, the arrow keys, Confirm), the missed shot counted a miss,
+    /// the other hole the same hole as a shot (picked on the card), then the first one
+    /// changed and put back to "not scored". Checks the series, the order, the scores and
+    /// the log's `manual` lines. `UI_SHOTS=<dir>` saves an image of each step.
+    #[test]
+    fn resolve_hits_by_hand() {
+        let logs = std::env::temp_dir().join(format!("opensights-ui-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&logs);
+        let log_dir = logs.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(move |cc| {
+                // No BLE thread (CI has no Bluetooth; macOS would stop the test).
+                let link = (tokio::sync::mpsc::unbounded_channel().0, mpsc::channel().1);
+                let mut app = SensorApp::with_link(cc, link).demo_series();
+                app.event_log = Some(EventLog::new(log_dir));
+                app.save_events = true;
+                app
+            });
+        let shots_dir = std::env::var_os("UI_SHOTS").map(std::path::PathBuf::from);
+        let step = |h: &mut egui_kittest::Harness<SensorApp>, name: &str| {
+            h.run_steps(4);
+            if let Some(dir) = &shots_dir {
+                let img = h.render().expect("render");
+                img.save(dir.join(format!("{name}.png"))).unwrap();
+            }
+        };
+        step(&mut h, "0-start");
+        let seqs = |app: &SensorApp| app.series.iter().map(|(s, _)| s.seq).collect::<Vec<_>>();
+        assert_eq!(seqs(h.state()), [1, 2, 4, 5, 7, 9]);
+        assert_eq!(h.state().unscored.len(), 3);
+        let total = |app: &SensorApp| app.series.iter().map(|(_, s)| u32::from(s.ring)).sum::<u32>();
+        let before = total(h.state());
+
+        // A shot position (mm) on the screen, the card at 100 %.
+        let at = |app: &SensorApp, x: f32, y: f32| {
+            let r = app.card_rect;
+            r.min + app.card.to_card(x, y) * (r.width() / app.card.size_mm().x)
+        };
+        let mm_per_point = {
+            let app = h.state();
+            app.card.size_mm().x / app.card_rect.width()
+        };
+        let click = |h: &mut egui_kittest::Harness<SensorApp>, p: egui::Pos2| {
+            h.hover_at(p);
+            h.run_steps(1);
+            h.drag_at(p);
+            h.run_steps(1);
+            h.drop_at(p);
+        };
+
+        // The first hole: its row opens the window; placed by a click, dragged, nudged.
+        h.get_by_label("A hole after shot 2").click();
+        step(&mut h, "1-window");
+        h.get_by_label("Place it on the card…").click();
+        step(&mut h, "2-place");
+        let p = at(h.state(), 10.0, -5.0);
+        click(&mut h, p);
+        step(&mut h, "3-clicked");
+        let pos = h.state().resolving.as_ref().unwrap().pos.unwrap();
+        assert!((pos.0 - 10.0).abs() < mm_per_point && (pos.1 + 5.0).abs() < mm_per_point, "{pos:?}");
+        // Dragged from the placed shot: it moves 2 mm right and 2 mm up (the card stays).
+        let (from, to) = (at(h.state(), pos.0, pos.1), at(h.state(), pos.0 + 2.0, pos.1 + 2.0));
+        h.hover_at(from);
+        h.run_steps(1);
+        h.drag_at(from);
+        h.run_steps(1);
+        for k in 1..=10 {
+            h.hover_at(from + (to - from) * (k as f32 / 10.0));
+            h.run_steps(1);
+        }
+        h.drop_at(to);
+        step(&mut h, "4-dragged");
+        let moved = h.state().resolving.as_ref().unwrap().pos.unwrap();
+        assert!((moved.0 - pos.0 - 2.0).abs() < 2.0 * mm_per_point, "{moved:?}");
+        assert!((moved.1 - pos.1 - 2.0).abs() < 2.0 * mm_per_point, "{moved:?}");
+        assert_eq!(h.state().view.zoom, 1.0);
+        h.key_press(egui::Key::ArrowRight);
+        h.key_press(egui::Key::ArrowRight);
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowDown);
+        step(&mut h, "5-nudged");
+        let nudged = h.state().resolving.as_ref().unwrap().pos.unwrap();
+        assert!((nudged.0 - moved.0 - 0.1).abs() < 1e-3 && (nudged.1 - moved.1 + 0.5).abs() < 1e-3, "{nudged:?}");
+        h.get_by_label("Confirm").click();
+        step(&mut h, "6-placed");
+        let app = h.state();
+        assert!(app.resolving.is_none());
+        assert_eq!(seqs(app), [1, 2, 3, 4, 5, 7, 9]);
+        let (placed, score) = app.series[2];
+        assert_eq!((placed.x, placed.y), ((nudged.0 * 100.0).round() as i32, (nudged.1 * 100.0).round() as i32));
+        assert_eq!(score, app.card.score(placed.x_mm(), placed.y_mm()));
+        assert_eq!(app.manual.get(&(placed.boot, 3)), Some(&How::Placed));
+        let placed_ring = u32::from(score.ring);
+
+        // The missed shot: now after shot 5 (the hole is shot 3). A miss.
+        h.get_by_label("A missed shot after shot 5").click();
+        h.run_steps(2);
+        h.get_by_label("A miss (0)").click();
+        step(&mut h, "7-miss");
+        let app = h.state();
+        assert_eq!(seqs(app), [1, 2, 3, 4, 5, 6, 7, 9]);
+        assert_eq!(app.series[5].1, resolve::MISS);
+        assert_eq!(total(app), before + placed_ring);
+
+        // The other hole (after shot 7): the same hole as shot 4 (seq 4, at 1.2, 0.8 mm),
+        // picked on the card.
+        h.get_by_label("A hole after shot 7").click();
+        h.run_steps(2);
+        h.get_by_label("The same hole as another shot…").click();
+        h.run_steps(2);
+        let p = at(h.state(), 1.2, 0.8);
+        click(&mut h, p);
+        step(&mut h, "8-same");
+        assert_eq!(h.state().resolving.as_ref().unwrap().same, Some((0xDE30, 4)));
+        h.get_by_label("Confirm").click();
+        h.run_steps(2);
+        let app = h.state();
+        assert_eq!(seqs(app), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert!(app.unscored.is_empty());
+        assert_eq!((app.series[7].0.x, app.series[7].0.y), (120, 80));
+        assert_eq!(app.series[7].1, app.series[3].1);
+        assert_eq!(app.manual.get(&(0xDE30, 8)), Some(&How::Same((0xDE30, 4))));
+
+        // Shot 3 (placed by hand) selected: the window for it; back to not scored.
+        h.get_by_label("Shot 3").click();
+        step(&mut h, "9-selected");
+        assert!(h.state().resolving.as_ref().is_some_and(|r| r.from_selection));
+        h.get_by_label("Back to not scored").click();
+        step(&mut h, "10-undone");
+        let app = h.state();
+        assert_eq!(seqs(app), [1, 2, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(app.unscored.iter().map(|(a, s)| (*a, s.seq)).collect::<Vec<_>>(), [(2, 3)]);
+        assert!(!app.manual.contains_key(&(0xDE30, 3)));
+
+        // The log: one line per decision, in order.
+        let log = std::fs::read_to_string(logs.join(format!("{}.log", eventlog::utc_date()))).unwrap();
+        let lines: Vec<&str> = log.lines().filter(|l| l.starts_with("manual ")).collect();
+        assert_eq!(lines.len(), 4, "{log}");
+        assert!(lines[0].contains("seq=3 kind=hole as=place") && lines[0].contains(" shot=3 "));
+        assert!(lines[1].contains("seq=6 kind=missed as=miss shot=6 score=0.0"));
+        assert!(lines[2].contains("seq=8 kind=hole as=same same=0000DE30:4 x=1.20 y=0.80 shot=8"));
+        assert_eq!(lines[3], "manual boot=0000DE30 seq=3 kind=hole as=undo");
+        let _ = std::fs::remove_dir_all(&logs);
+    }
 
     const CARD: Vec2 = egui::vec2(170.0, 170.0);
     const BASE: f32 = 3.0; // points per mm at 100%

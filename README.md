@@ -22,7 +22,11 @@ rust-analyzer picks up `app/`.
   (about 2,000 of them) and resends the ones the app missed.
 - A shot the sensor heard but couldn't measure (a second shot too soon after another), or
   one only the light curtain saw (through an existing hole), is listed in the series as
-  "not scored", with a notice on the card: check the paper card for those.
+  "not scored", with a notice on the card: check the paper card for those. Click one (in
+  the list or on the notice) to resolve it: place it on the card (click the hole, drag the
+  shot until it fits, or type x and y), mark it the same hole as another shot, or count it a
+  miss (0). It then takes its place in the series, marked "by hand", and can be changed or
+  put back to "not scored" by selecting it.
 - The app can save every event the sensor captured (also the rejected ones) to a log file,
   one per day, in the same format as the sensor's serial log (Settings → Measurement; on by
   default). Settings also show the sensor's calibration, settings and air readings.

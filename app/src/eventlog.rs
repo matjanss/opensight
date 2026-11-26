@@ -1,6 +1,8 @@
 //! The event log (protocol v3): every event the sensor sends, written as the firmware's
 //! serial log lines (`cfg`, `rec`, `dip`), so `firmware/tools/replay` and `calibrate.py`
-//! read an app's log like a serial one. See `firmware/MODEL.md` "Log lines".
+//! read an app's log like a serial one. See `firmware/MODEL.md` "Log lines". The app adds
+//! `manual` lines: the unscored hits resolved by hand (`resolve::log_line`), which those
+//! tools pass over.
 //!
 //! One file per day (UTC) in the app's data folder, `logs/YYYY-MM-DD.log`, appended to.
 
@@ -213,6 +215,11 @@ impl EventLog {
     #[allow(dead_code)] // the tests; the wizard (5d)
     pub fn has_config(&self, id: u32) -> bool {
         self.written.contains(&(utc_date(), id))
+    }
+
+    /// A line of the app's own (`manual`, `resolve::log_line`).
+    pub fn line(&mut self, text: &str) -> std::io::Result<()> {
+        self.append(&utc_date(), text)
     }
 
     pub fn event(&mut self, e: &Event) -> std::io::Result<()> {

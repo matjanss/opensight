@@ -93,7 +93,7 @@ firmware/                     PlatformIO, pinned: pioarduino 55.03.312-1 (Arduin
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs, eventlog.rs,
                               calwizard.rs, upload.rs (card photos from the phone), photo.rs,
-                              count.rs (counting cards)
+                              count.rs (counting cards), resolve.rs (unscored hits by hand)
   cardphoto/                  card photos (workspace member): registration from the rings,
                               the holes, synthetic photos (CARDPHOTO.md)
   calib/                      the calibration crate (workspace member): the target's solver
@@ -359,7 +359,20 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   (boot, seq). The app keeps the series in memory. "Clear series" also sends a clear
   request, so the sensor forgets those shots and doesn't resend them after an app restart.
   Holes and missed shots (no position) are kept apart (`unscored`), listed in their place
-  and on a card notice, never scored.
+  and on a card notice, not scored until resolved by hand (`resolve.rs`): a click on the row
+  or the notice line opens the resolve window (`Resolving`, `resolve_window`). Place on the
+  card (a click; a drag that starts on the placed shot moves it, following the pointer; arrow
+  keys 0.05 mm, Shift 0.5 mm; x, y typed), the same hole as another shot (a click on it, or
+  the list), or a miss (0, not drawn). It goes into `series` in its place (the later shots
+  move up by one), keeps the sensor's kind (so `Shot::scored()` still tells the sensor's own
+  shots), with `manual` saying how; drawn with a dashed edge, "by hand" in the list.
+  Selecting it opens the window again: change it, or back to not scored. Each decision is a
+  `manual` line in the event log (`resolve::log_line`; no `rec n=`/`cfg id=`/`dip n=` in it,
+  so the log readers pass over it). A card photo checks only the sensor's own shots, by
+  (boot, seq) (`CardPhoto::keys`). `OPENSIGHTS_DEMO_HITS=1` shows the card with a demo
+  series (shots, two holes, a missed shot) without a sensor. The UI test
+  `resolve_hits_by_hand` drives it headless (`egui_kittest`, no BLE thread); `UI_SHOTS=<dir>
+  cargo test --bin opensights-app resolve_hits_by_hand` also saves an image of each step.
 - **Events (protocol v3):** `ble.rs` subscribes to events and Status, asks for missed events
   like shots, and reads the calibration and settings again when Status shows a new cfg ID.
   `eventlog.rs` writes them as the firmware's log lines (`cfg`, `rec`, `dip`, `MISSED`; C's

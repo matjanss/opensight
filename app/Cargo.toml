@@ -23,6 +23,10 @@ getrandom = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 nalgebra = "0.33"
 
+# UI tests: the app driven headless (clicks, keys), rendered to images (src/main.rs tests).
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }
+
 # btleplug talks to BlueZ over D-Bus. "vendored" builds libdbus from source, so building
 # doesn't need the libdbus-1-dev system package (the running D-Bus daemon is still used).
 [target.'cfg(target_os = "linux")'.dependencies]
