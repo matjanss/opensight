@@ -5352,7 +5352,7 @@
 		(descr "Gettop GTA2718B-3 / -3HA analog bottom-port MEMS mic, 2.75x1.85x1.0 mm. Origin = acoustic port centre. Land pattern from the GTA2718B-3 datasheet (LCSC C50275772), Fig. 11 and Recommended PCB Design Pattern: GND ring OD 1.45 / ID 0.95 around the port, NPTH 0.5 (0.5-0.7 recommended); pads 0.545 x 0.65 mm, 0.95 mm apart, inner edge 1.205 mm from the port centre. Seen from the top (the datasheet draws the bottom), pin 1 (VDD) is at +y with the pads at +x; the silkscreen dot and the lid marking are at that corner. Checked 2026-11-23.")
 		(tags "MEMS microphone bottom port")
 		(property "Reference" "MK1"
-			(at -2.4 0 0)
+			(at -0.25 3.75 0)
 			(layer "F.SilkS")
 			(uuid "d03a8acf-0d04-4e50-871c-ffb2c19ae457")
 			(effects
@@ -9075,8 +9075,19 @@
 			)
 		)
 	)
+	(gr_text "MIC BOARD v0.3"
+		(at 145.5 105.75 90)
+		(layer "F.SilkS")
+		(uuid "40981803-152e-4d6c-851f-423e9199791b")
+		(effects
+			(font
+				(size 0.8 0.8)
+				(thickness 0.12)
+			)
+		)
+	)
 	(gr_text "THR LO"
-		(at 114.6 102.3 0)
+		(at 119 102.5 270)
 		(layer "F.SilkS")
 		(uuid "1ba4bb14-97b6-4a8e-8f95-657ae308bdcc")
 		(effects
@@ -9088,7 +9099,7 @@
 		)
 	)
 	(gr_text "THR HI"
-		(at 125.9 102.3 0)
+		(at 130.25 102.5 270)
 		(layer "F.SilkS")
 		(uuid "6c7e0d2e-1796-49ec-bf99-1520b7eb4d2d")
 		(effects
@@ -9100,7 +9111,7 @@
 		)
 	)
 	(gr_text "GAIN"
-		(at 137.2 102.3 0)
+		(at 141.75 102.3 270)
 		(layer "F.SilkS")
 		(uuid "02c336e8-5982-4234-8c9b-4155d9bc31b5")
 		(effects
@@ -9108,17 +9119,6 @@
 				(size 0.8 0.8)
 				(thickness 0.12)
 				(bold yes)
-			)
-		)
-	)
-	(gr_text "MIC BOARD v0.3"
-		(at 145.5 105.75 90)
-		(layer "F.SilkS")
-		(uuid "40981803-152e-4d6c-851f-423e9199791b")
-		(effects
-			(font
-				(size 0.8 0.8)
-				(thickness 0.12)
 			)
 		)
 	)
