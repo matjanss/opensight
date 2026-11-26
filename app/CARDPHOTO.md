@@ -17,6 +17,7 @@ and reviews the results.
 | C4 | In the app: the photo under the shots, the ground-truth panel | the processing passes through the app's path (2026-11-23); the UI looked at and accepted (the user, 2026-11-24) |
 | C5 | Real photos: registration (no holes), then holes | first set (2026-11-25): registration passes after a fix; the holes with the gauge (torn holes): every hole found, 0.035–0.046 mm from straight above; in the app, with the camera's angle and the expected error; overlapping torn holes and the scans' truth still open (see C5) |
 | C6 | The serial number from the photo | later |
+| C7 | Counting cards: a photo apart from the series, its holes scored | built (2026-11-26): the path's test passes, every real photo of a card counted the same (card 2: a hole at the 8/9 edge); the window and the phone page to be looked at (the user) |
 
 ## The card and its coordinates
 
@@ -444,11 +445,63 @@ the one that was provided with a message that the error may be x mm").**
   needed.
 - **The calibre:** the white rims (5.2–5.7 mm) look like .22 LR; the scans of cards 1 and 3
   will tell, and then the true positions.
+- **Which way up (2026-11-26, found in C7):** the printed numbers never decide the quarter
+  turn on the real cards: margins 0.004–0.072 against the 0.1 needed (0.18 on the app's own
+  card). The real card's numbers are printed turned 90° against its corner marks, so no turn
+  of the app's card matches them. A score doesn't depend on it; the series view's card may be
+  drawn turned (and says so). A fix: the numbers' own way up, or the card's corner triangle.
 
 ## C6. The serial number
 
 Later: where and how the serial is printed (a close-up from the user), then reading its 6
 digits from the rectified card.
+
+## C7. Counting cards
+
+A card photo that has nothing to do with the series, only to count the card (the user's
+wish, 2026-11-26): its holes found, scored on the printed card, and the total. Nothing is
+sent to the sensor and the series isn't touched.
+
+- **The window:** "Count card" (a small target) in the status bar opens "Count cards", with
+  or without a sensor. Left the card (the photo under the printed card, the Card–Photo fade,
+  zoom and pan, the holes as rings; a hole clicked shows its score, x, y and distance from the
+  centre); the close-call notice on the card, as on the main card. Right: the cards in the
+  order they came ("Card 3: 92, 10 holes", "counting…", "waiting", "not counted, <why>. Take
+  it again."), each with ✕ to remove it; the total over the cards counted ("6 cards · 58
+  holes", X count or whole rings); "Show the code"; and the shown card: its score, the
+  warnings (tilt, overlapping holes), the holes best first (score, x, y, "overlaps"), holes
+  per ring, the photo's details. The view follows the newest card counted until one is
+  picked; the arrow keys flip through them. Holes aren't numbered (a photo has no order).
+- **The phone:** one link for the window's whole session (`UploadServer::offer_session`),
+  up to 20 cards. After each photo the page keeps its buttons as "Upload another card" and
+  "Choose another photo", and shows the app's line for each card, newest first, with the
+  total on top once two are counted (it asks `/p/<token>/cards` every 2 s). Over 20 the
+  upload is refused ("The app holds as many cards as it can. Remove one there, or close its
+  window and start again."); removing a card gives its place back. Closed in the app: the
+  page says the session ended. Photo files dropped on the window count the same way. The tips
+  on both pages no longer ask for a grey or coloured surface.
+- **The counting:** one worker thread, one card at a time in the order they came (1–5 s
+  each, the hole search on every core); `photo::process` without shots (the unguided gauge,
+  C5), each hole scored by the card's rule for its pellet. Stored as card photos are
+  (`photos/`, series "count", removed after 30 days with the result JSON's `holes_overlap`);
+  the photo on the card's grid saved beside it (`<photo>.grid.png`, removed with the photo),
+  so the window keeps only the card it shows in memory. The count leaves out the "which way
+  up" warning (C5, above): a score doesn't depend on it. A tilt warning now needs the expected
+  error to be at least 1.2 times the straight-down one (a clean card has no holes away from
+  the centre).
+- **Tests:** `count::tests::counts_a_dropped_photo` (the demo photo, 6 holes, through the
+  worker: each within 0.1 mm of its place, scored as the card scores it, best first, the
+  grid image saved and loaded, the phone's line); `upload::tests::session_takes_many_until_full`
+  (photo after photo up to the room, the refusal, a place given back, a dropped file's place,
+  the lines, gone when replaced). By hand: `COUNT_PHOTOS=<folder> cargo test --release
+  count::real -- --ignored --nocapture` counts every photo in a folder as the window does
+  (`COUNT_DEBUG=1`: the warnings and holes within 0.3 mm of a higher score).
+- **To look at (the user):** "Count card", scan the code, then photograph a card of each
+  folder in turn with "Upload another card". Expect card 1: 29, 5 holes; card 2: 28 or 29, 4
+  holes, with a close call (its 8 is 0.02–0.09 mm from the 9); card 3: 44, 9 holes, "2 holes
+  overlap another"; card 4: 8, 3 holes; all four: 109 or 110, 21 holes, on the phone too. A
+  photo of something else: "not counted, no card found…". Then ✕, the arrow keys, and closing
+  the window (the phone's page says so).
 
 ## Results
 
@@ -456,6 +509,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-26 | C7 | Counting cards: the window, the session link and the phone's page, the worker; run by Claude: `cargo test`, and every real photo (59 files, the 4 holed cards and the clean one) through the count's path | **Pass** (the window and the phone page not yet looked at: the user). The demo photo: 6 of 6 holes, within 0.005–0.060 mm, each scored as the card scores its true place. Real: every photo of a card counted the same: clean 0 (14 files), card 1: 29, 5 holes (12); card 3: 44, 9 holes, its pair flagged (12); card 4: 8, 3 holes (9 and the scan); card 2: 28 in 5 photos, 29 in 5: one hole 0.017–0.090 mm inside the 8 (the close call shows it), its expected error 0.06–0.15 mm. 189 s for the 59 (3.2 s each, release). **Found:** the printed numbers never decide the card's way up on real cards (margins 0.004–0.072, need 0.1; see C5, not solved). `cargo test` passes (cardphoto 10 + 4 + 10 + 7, the app 49, 2 ignored), clippy clean. |
 | 2026-11-25 | C5 | The gauge in the app (`ground_truth`, the no-shot path, the camera's angle, the expected error), the printed numbers in the expected card, the gauge's wider first round and Tukey weights; run by Claude: `cargo test`, the `c5` example with `C5_GUIDED=1` on all 61 files | **Pass** (overlapping torn holes aside). Synthetic: torn holes with shots 0.027 mm (all 8); clean holes as before or better (single holes 0.005–0.006 mm; overlapping pairs 0.058 mm, was 0.17; the 41-shot demo 0.037 mm, 2.0 s, was 1.2 s); the app's demo photo without shots within 0.05 mm. Tried and dropped: the gauge's joint fit for overlapping holes with shots (synthetic pairs up to 1.6 mm off); masking the numbers instead of modelling them (holes next to a number up to 0.09 mm off). Real: every hole found in every file with shots, single holes within 0.075 mm of the unguided gauge, card 3's pair flagged in all 12 photos, no extra holes. Spread across photos (unguided): from straight above 0.035 mm per axis in the white (54 hole positions), 0.046 mm in the black (22, the pair now included); at 12–34°: 0.120 and 0.065 mm. Card 3's pair 0.056 and 0.072 mm. Card 4 against its scans: 0.08–0.13 mm, its long hole 0.19 mm. The camera's angle within 2.5° of the earlier analysis. `cargo test` passes (cardphoto 10 + 4 + 10 + 7, the app 47), clippy clean. |
 | 2026-11-25 | C5 | The gauge (torn holes) on the first set, as above; run by Claude with the `c5` example | **Partly.** Every hole found, the same count in every file of each card: clean 0 (14 files), card 1: 5 (12), card 2: 4 (10), card 3: 9 (12), card 4: 3 (9 and both scans); before: 0–8 per photo. The circles: r 2.62–2.86 mm in the white, 2.32–2.45 mm in the black (±0.01–0.06 per hole across photos); their edge points within 0.06–0.2 mm of the circle in the white, 0.2–0.5 in the black. Spread per hole across photos, each photo's rotation fitted to the matched holes: 0.03–0.08 mm per axis for holes under 45 mm from the centre, 0.10–0.17 mm for those 50–81 mm out; card 3's overlapping pair 0.5 mm (not solved). From straight above (12 photos under 10°): 0.041 mm in the white (54 hole positions), 0.058 mm in the black (15); at 12–33° (30 photos): 0.118 and 0.228 mm. Card 4's photos (their mean) against its scans: 0.08–0.11, 0.15–0.16 (its elongated hole), 0.12 mm. Synthetic torn holes (`tests/gauge.rs`): pass, worst centre 0.038 mm, radius 0.030 mm. `cargo test` passes (cardphoto 8 + 3 + 10 + 7, the app 47), clippy clean. |
 | 2026-11-25 | C5 | The user's first set: an iPhone 14 Plus, main lens (26 mm, f/1.5), 4032 × 3024, no flash, a light wooden table, daylight; the clean card 13 photos and a 600 dpi scan; four holed cards (1: 012370, 12 photos; 2: 012373, 10; 3: 12; 4: 012371, 9 and a scan); the camera 160–370 mm above the card, tilts 2–35°, the card's corners seen at up to 53°. Two files damaged in the copy (IMG_3441, IMG_3449: a grey band at one side). Run by Claude with the `c5` example | **Registration: fail, fixed, then pass.** First: 13 photos with only 1,700–5,000 of about 7,900 edge points, rms 0.10–0.19 mm and an absurd lens (k1 up to +1.36, k2 −6.1): the outer rings lost, the first window placed from the disc alone. With the fit grown outwards (C1 4): every file 6,700–7,900 points (4,000–5,000 in two), rms 0.017–0.080 mm (the scans 0.016–0.018; about 0.02 mm from straight above, 0.05–0.08 at 20–33° of tilt), k1 −0.04 to −0.23 with k2 0.07–0.67 (the two trade off), the line offsets d_dark −0.09 to +0.03 and d_light about −0.09 mm. **Holes: partly.** The clean card: none found in 14 files (no false holes). The holes in the black found in every photo; those in the white mostly not (cards 2 and 4: 0–4 found, and those split): fitted at r 1.35–1.6 mm and rejected (see C5). Spread across photos, each photo's rotation fitted to the holes found in at least 80 % of them: card 3's three touching holes sd 0.043–0.078 mm (worst 0.17 mm, seen at 33°), card 1's two holes in the black 0.090 and 0.130 mm; without any alignment, card 1's two holes 34.353 mm apart with sd 0.095 mm, their distances from the centre sd 0.049 and 0.084 mm. Card thickness fitted 0.11 ± 0.14 mm (no effect seen). `cargo test` passes (cardphoto 10 + 7 + 5, the app 47). |

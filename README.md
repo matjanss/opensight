@@ -33,10 +33,14 @@ rust-analyzer picks up `app/`.
 - **Card photo** (under the series): a photo of the shot card, taken with a phone, shows
   under the shots, and the app compares each shot with its hole (the sensor's accuracy).
   The series list then shows each shot's score on the paper beside the sensor's.
-  Scan the QR code with the phone (on the same Wi-Fi), take the photo with the card flat on a
-  grey or coloured surface. The photo's metadata (location and the like) is removed;
+  Scan the QR code with the phone (on the same Wi-Fi), take the photo with the card flat and
+  the phone straight above it. The photo's metadata (location and the like) is removed;
   photos are kept 30 days unless marked to keep. Work in progress, see
   [app/CARDPHOTO.md](app/CARDPHOTO.md).
+- **Count card** (in the status bar, with or without a sensor): scores paper cards from
+  photos, apart from the series. Scan the code once, then photograph card after card ("Upload
+  another card", up to 20); the app counts them in turn and shows each card's holes and score,
+  and the total, on the phone too.
 - Settings also show the heartbeat (the sensor's `millis()`, every 2 s). The blue LED
   only shows the sensor's status: pairing mode, a PIN reset, a shot.
 - The sensor has a name (`OpenSights-xyz` at first) that you can change from the app.

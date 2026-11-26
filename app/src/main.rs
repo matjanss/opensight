@@ -5,6 +5,7 @@ mod agent;
 mod ble;
 mod calwizard;
 mod card;
+mod count;
 mod eventlog;
 mod photo;
 mod protocol;
@@ -683,6 +684,8 @@ struct SensorApp {
     /// The processed photo of the current series: under the shots, and its ground truth.
     card_photo: Option<CardPhoto>,
     photo_error: Option<String>,
+    /// The count window (`CARDPHOTO.md` C7), while open: cards counted apart from the series.
+    count: Option<count::CountTask>,
     /// The card view: 0 the printed card, 1 the photo.
     photo_fade: f32,
     /// (boot, seq) of the shot whose info popup is open on the card.
@@ -752,6 +755,7 @@ impl SensorApp {
             photo_job: None,
             card_photo: None,
             photo_error: None,
+            count: None,
             photo_fade: 0.0,
             selected_shot: None,
             view: CardView::default(),
@@ -1107,6 +1111,37 @@ impl eframe::App for SensorApp {
             );
         }
 
+        if let Some(task) = &mut self.count {
+            let env = count::CountEnv {
+                card: &self.card,
+                decimal: self.decimal_scoring && self.card.decimal,
+                zoom_controls: self.show_zoom_controls,
+                close_call_mm: self.show_close_calls.then_some(self.close_call_mm),
+                photos_dir: Self::photos_dir(),
+            };
+            task.poll(&env);
+            let mut close = false;
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("count"),
+                with_app_icon(
+                    egui::ViewportBuilder::default()
+                        .with_title("OpenSights · Count cards")
+                        .with_inner_size([1180.0, 800.0])
+                        .with_min_inner_size([420.0, 480.0]),
+                ),
+                |ui, _| {
+                    close = ui.input(|i| i.viewport().close_requested());
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        ui.add_space(8.0);
+                        task.ui(ui, &env);
+                    });
+                },
+            );
+            if close {
+                self.count = None; // stops the server and the worker
+            }
+        }
+
         if self.dark_mode != was_dark {
             ctx.set_theme(theme_pref(self.dark_mode));
         }
@@ -1147,6 +1182,9 @@ impl SensorApp {
                     .on_hover_text("Settings");
                 if gear.clicked() {
                     self.open_settings(ui.ctx());
+                }
+                if count_button(ui).clicked() {
+                    self.open_count(ui.ctx());
                 }
                 ui.label(
                     RichText::new(format!("Protocol v{}", protocol::PROTOCOL_VERSION))
@@ -3417,6 +3455,20 @@ impl SensorApp {
         self.photo_task = Some(task);
     }
 
+    /// Opens the count window (or brings it to the front).
+    fn open_count(&mut self, ctx: &egui::Context) {
+        if self.count.is_some() {
+            ctx.send_viewport_cmd_to(egui::ViewportId::from_hash_of("count"), egui::ViewportCommand::Focus);
+            return;
+        }
+        let Some(dir) = Self::photos_dir() else {
+            self.message = Some("No folder for the photos on this system.".into());
+            return;
+        };
+        let _ = upload::clean_up(&dir, upload::now_unix());
+        self.count = Some(count::CountTask::open(ctx, dir));
+    }
+
     /// The server's news and the processing's result.
     fn poll_photo(&mut self, ctx: &egui::Context) {
         let mut received = Vec::new();
@@ -3681,6 +3733,30 @@ fn paint_quad(painter: &egui::Painter, tex: egui::TextureId, corners: [egui::Pos
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
     painter.add(egui::Shape::mesh(mesh));
+}
+
+/// "Count card" with a small target, in the status bar: opens the count window.
+fn count_button(ui: &mut Ui) -> egui::Response {
+    let font = TextStyle::Button.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap("Count card".into(), font, Color32::PLACEHOLDER);
+    let (icon, gap, pad) = (16.0, 6.0, egui::vec2(6.0, 2.0));
+    let size = egui::vec2(icon + gap + galley.size().x, galley.size().y.max(icon)) + 2.0 * pad;
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let visuals = ui.visuals();
+    let color = visuals.widgets.style(&response).fg_stroke.color;
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
+    }
+    let c = egui::pos2(rect.left() + pad.x + icon / 2.0, rect.center().y);
+    painter.circle_stroke(c, 7.0, Stroke::new(1.2, color));
+    painter.circle_stroke(c, 4.2, Stroke::new(1.2, color));
+    painter.circle_filled(c, 1.8, color);
+    let text_at = egui::pos2(c.x + icon / 2.0 + gap, rect.center().y - galley.size().y / 2.0);
+    painter.galley(text_at, galley, color);
+    response.on_hover_text("Count a card from a photo: its holes and its score, apart from the series.")
 }
 
 /// "Card photo", under the series.

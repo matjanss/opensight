@@ -121,6 +121,8 @@ pub struct Processed {
     pub shots: Vec<ShotCheck>,
     pub rms_mm: Option<f64>,
     pub holes: Vec<(f64, f64)>,
+    /// Without shots: whether each of `holes` overlaps another (fitted together).
+    pub hole_overlap: Vec<bool>,
     /// The photo on the card's grid (as `Card::render`: the card's size, top left first).
     pub image: Option<ColorImage>,
 }
@@ -128,6 +130,12 @@ pub struct Processed {
 impl Processed {
     /// Warnings for the user: what makes this photo's truth weaker.
     pub fn warnings(&self) -> Vec<String> {
+        self.warnings_with(true)
+    }
+
+    /// The warnings; `turn`: also whether the printed numbers showed which way up the card
+    /// is (counting cards leaves it out: a score doesn't depend on it).
+    pub fn warnings_with(&self, turn: bool) -> Vec<String> {
         let mut w = Vec::new();
         if self.px_per_mm < 8.0 {
             w.push(format!(
@@ -141,7 +149,9 @@ impl Processed {
                 self.reg_rms_mm
             ));
         }
-        if self.camera_deg > TILT_OK_DEG {
+        // Tilted, when it matters for these holes (not for a clean card: no holes away from
+        // the centre).
+        if self.camera_deg > TILT_OK_DEG && self.expected_mm > 1.2 * expected_error_mm(0.0, 0.0) {
             w.push(format!(
                 "Taken {:.0}° from straight above: the holes may be off by about {:.2} mm (rms), against about \
                  {:.2} mm from straight above (a card that doesn't lie quite flat shows when seen at an angle). \
@@ -155,7 +165,8 @@ impl Processed {
             .shots
             .iter()
             .filter(|s| s.hole.is_some() && s.overlap)
-            .count();
+            .count()
+            + self.hole_overlap.iter().filter(|&&o| o).count();
         if overlapping > 0 {
             w.push(format!(
                 "{overlapping} hole{} overlap{} another: less certain than the single holes.",
@@ -163,7 +174,7 @@ impl Processed {
                 if overlapping == 1 { "s" } else { "" }
             ));
         }
-        if self.print_quarter.is_none() {
+        if turn && self.print_quarter.is_none() {
             w.push("The printed numbers didn't show which way up the card is: the app's card may be drawn turned.".into());
         }
         let missing = self.shots.iter().filter(|s| s.hole.is_none()).count();
@@ -206,6 +217,7 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
     let k = print_quarter.unwrap_or(0);
     // The holes are gauged for the card's pellet (C5: a torn hole's mark is its circle).
     let diameter = f64::from(card.pellet_diameter_mm);
+    let mut hole_overlap = Vec::new();
     let (placement, scaled, checks, rms, holes, view) = if shots.is_empty() {
         // No shots: the frame is the print's (the numbers upright).
         let view = Placement {
@@ -214,10 +226,9 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
             shift: (0.0, 0.0),
             scale: 1.0,
         };
-        let holes: Vec<(f64, f64)> = all_gauges(&rgb, &reg, diameter)
-            .iter()
-            .map(|(_, g)| view.to_frame(g.center))
-            .collect();
+        let found = all_gauges(&rgb, &reg, diameter);
+        hole_overlap = found.iter().map(|(_, g)| g.together > 1).collect();
+        let holes: Vec<(f64, f64)> = found.iter().map(|(_, g)| view.to_frame(g.center)).collect();
         (None, false, Vec::new(), None, holes, view)
     } else {
         let gt = ground_truth(&rgb, &reg, shots, diameter)?;
@@ -271,6 +282,7 @@ pub fn process(photo: Photo, card: &Card, shots: &[(f64, f64)]) -> Result<Proces
         shots: checks,
         rms_mm: rms,
         holes,
+        hole_overlap,
         image: Some(image),
     };
     p.seconds = t0.elapsed().as_secs_f64();
@@ -458,9 +470,30 @@ fn result_json(p: &Processed, card: &Card) -> String {
         "rms_mm": p.rms_mm.map(round),
         "shots": shots,
         "holes_mm": p.holes.iter().map(|h| pair(*h)).collect::<Vec<_>>(),
+        "holes_overlap": (!p.hole_overlap.is_empty()).then_some(&p.hole_overlap),
         "holes_are": if p.placement.is_some() { "unexplained, frame mm" } else { "all found, card mm (quarter turn unknown)" },
     });
     serde_json::to_string_pretty(&v).unwrap_or_default()
+}
+
+/// The photo on the card's grid, beside the photo (`<photo>.grid.png`), so a window holding
+/// many cards keeps only the one it shows in memory.
+pub fn save_grid(img: &ColorImage, photo: &std::path::Path) -> Result<PathBuf, String> {
+    let path = photo.with_extension("grid.png");
+    let raw: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+    image::RgbaImage::from_raw(img.size[0] as u32, img.size[1] as u32, raw)
+        .ok_or("bad image size")?
+        .save(&path)
+        .map_err(|e| format!("could not save the card's image: {e}"))?;
+    Ok(path)
+}
+
+pub fn load_grid(path: &std::path::Path) -> Result<ColorImage, String> {
+    let img = image::open(path).map_err(|e| e.to_string())?.to_rgba8();
+    Ok(ColorImage::from_rgba_unmultiplied(
+        [img.width() as usize, img.height() as usize],
+        img.as_raw(),
+    ))
 }
 
 fn round(v: f64) -> f64 {

@@ -1,0 +1,1073 @@
+//! Counting cards (`CARDPHOTO.md` C7): a card photo apart from any series, only to score
+//! the card. Its own window: one link for the phone takes photo after photo (up to
+//! `COUNT_MAX`), a worker thread counts them in turn (the holes found without shots, each
+//! scored on the printed card), and the window shows each card's photo with its holes as
+//! rings, its score, and the total over the cards. The photos are stored as card photos are
+//! (`photos/`, removed after 30 days); the window keeps only the card it shows in memory.
+
+use std::path::PathBuf;
+use std::sync::mpsc;
+
+use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke, Ui, Vec2};
+
+use crate::card::{Card, CardTexture, Score};
+use crate::{
+    BAR_BUTTON, BAR_PAD, CardView, PhotoJob, ZOOM_LABEL, card as panel, fade_control, notice, open_folder,
+    paint_quad, photo, qr_code, review_detail, review_notice, score_chart, title, upload, zoom_controls,
+};
+
+/// The most cards a window holds.
+pub const COUNT_MAX: usize = 20;
+/// The series name the photos are stored under.
+const SERIES: &str = "count";
+/// Below this width the card and the list stack.
+const STACK_BELOW: f32 = 760.0;
+const SIDE_WIDTH: f32 = 360.0;
+
+/// What the window needs from the app's settings.
+pub struct CountEnv<'a> {
+    pub card: &'a Card,
+    /// Decimal scores (the setting, on a card that has them).
+    pub decimal: bool,
+    pub zoom_controls: bool,
+    /// The close-call margin, mm, when the notice is on.
+    pub close_call_mm: Option<f32>,
+    pub photos_dir: Option<PathBuf>,
+}
+
+/// One hole on a counted card: mm from the card's centre (y up), its score.
+struct Hole {
+    at: (f64, f64),
+    score: Score,
+    overlap: bool,
+}
+
+/// A card counted.
+struct Count {
+    /// Best first.
+    holes: Vec<Hole>,
+    warnings: Vec<String>,
+    details: String,
+    /// The photo on the card's grid (`photo::save_grid`), or why there is none.
+    grid: Result<PathBuf, String>,
+}
+
+impl Count {
+    fn from(p: photo::Processed, grid: Result<PathBuf, String>, card: &Card) -> Count {
+        let mut holes: Vec<Hole> = p
+            .holes
+            .iter()
+            .enumerate()
+            .map(|(i, &at)| Hole {
+                at,
+                score: card.score(at.0 as f32, at.1 as f32),
+                overlap: p.hole_overlap.get(i).copied().unwrap_or(false),
+            })
+            .collect();
+        holes.sort_by(|a, b| {
+            (b.score.tenths, b.score.inner_ten)
+                .cmp(&(a.score.tenths, a.score.inner_ten))
+                .then(a.at.0.hypot(a.at.1).total_cmp(&b.at.0.hypot(b.at.1)))
+        });
+        let details = format!(
+            "{:.1} px per mm; the rings fit to {:.3} mm rms ({} of {} edge points); lens k1 {:+.3}. Taken {:.0}° \
+             from straight above: the holes expected to within about {:.2} mm (rms). Processed in {:.1} s. The \
+             photo: {}.",
+            p.px_per_mm,
+            p.reg_rms_mm,
+            p.reg_points.0,
+            p.reg_points.1,
+            p.k1,
+            p.camera_deg,
+            p.expected_mm,
+            p.seconds,
+            p.photo.meta.image
+        );
+        Count {
+            holes,
+            warnings: p.warnings_with(false),
+            details,
+            grid,
+        }
+    }
+
+    fn rings(&self) -> u32 {
+        self.holes.iter().map(|h| u32::from(h.score.ring)).sum()
+    }
+
+    fn tenths(&self) -> u32 {
+        self.holes.iter().map(|h| u32::from(h.score.tenths)).sum()
+    }
+
+    fn total(&self, decimal: bool) -> String {
+        total_text(self.rings(), self.tenths(), decimal)
+    }
+}
+
+fn total_text(rings: u32, tenths: u32, decimal: bool) -> String {
+    if decimal {
+        format!("{}.{}", tenths / 10, tenths % 10)
+    } else {
+        rings.to_string()
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+enum State {
+    Waiting,
+    Counting,
+    Done(Box<Count>),
+    /// Not counted: why (the card not found in the photo, mostly).
+    Failed(String),
+}
+
+struct Counted {
+    /// Numbered as they arrive, never renumbered (the phone shows the same numbers).
+    n: u32,
+    state: State,
+}
+
+impl Counted {
+    /// The line in the list and on the phone.
+    fn line(&self, decimal: bool) -> String {
+        match &self.state {
+            State::Waiting => format!("Card {}: waiting", self.n),
+            State::Counting => format!("Card {}: counting…", self.n),
+            State::Done(c) => format!(
+                "Card {}: {}, {}",
+                self.n,
+                c.total(decimal),
+                plural(c.holes.len(), "hole", "holes")
+            ),
+            State::Failed(e) => format!("Card {}: not counted, {e}. Take it again.", self.n),
+        }
+    }
+}
+
+/// What the worker tells the window.
+enum News {
+    Started(u32),
+    Done(
+        u32,
+        Result<(Box<photo::Processed>, Result<PathBuf, String>), String>,
+    ),
+}
+
+/// The count window, while open.
+pub struct CountTask {
+    server: Result<upload::UploadServer, String>,
+    url: Option<String>,
+    qr: Option<(usize, Vec<bool>)>,
+    status: String,
+    show_link: bool,
+    cards: Vec<Counted>,
+    next_n: u32,
+    /// The card shown; `follow`: the newest counted one, until the user picks one.
+    selected: Option<u32>,
+    follow: bool,
+    jobs: mpsc::Sender<(u32, PhotoJob)>,
+    news: mpsc::Receiver<News>,
+    /// The shown card's photo, and the card it is of.
+    texture: Option<(u32, egui::TextureHandle)>,
+    card_texture: CardTexture,
+    view: CardView,
+    fade: f32,
+    selected_hole: Option<usize>,
+    /// The lines the phone was given last.
+    lines: Vec<String>,
+    error: Option<String>,
+}
+
+impl CountTask {
+    /// The server started with a session link, the worker waiting for photos.
+    pub fn open(ctx: &egui::Context, dir: PathBuf) -> CountTask {
+        let c = ctx.clone();
+        let server = upload::UploadServer::start_lan(dir.clone(), move || c.request_repaint());
+        let (url, qr, status) = match &server {
+            Ok(s) => {
+                let url = s.offer_session(SERIES, COUNT_MAX);
+                let qr = upload::qr(&url).ok();
+                (Some(url), qr, "Waiting for the phone…".to_string())
+            }
+            Err(_) => (None, None, String::new()),
+        };
+        let (jobs, rx) = mpsc::channel::<(u32, PhotoJob)>();
+        let (tx, news) = mpsc::channel();
+        let c = ctx.clone();
+        std::thread::Builder::new()
+            .name("count-cards".into())
+            .spawn(move || worker(dir, rx, tx, c))
+            .expect("no thread for counting cards");
+        CountTask {
+            server,
+            url,
+            qr,
+            status,
+            show_link: true,
+            cards: Vec::new(),
+            next_n: 1,
+            selected: None,
+            follow: true,
+            jobs,
+            news,
+            texture: None,
+            card_texture: CardTexture::default(),
+            view: CardView::default(),
+            fade: 0.6,
+            selected_hole: None,
+            lines: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// A photo in: a place in the list, a job for the worker.
+    fn add(&mut self, job: PhotoJob) {
+        let n = self.next_n;
+        self.next_n += 1;
+        self.cards.push(Counted {
+            n,
+            state: State::Waiting,
+        });
+        let _ = self.jobs.send((n, job));
+        self.show_link = false;
+    }
+
+    /// The server's news, the worker's, and the phone's lines.
+    pub fn poll(&mut self, env: &CountEnv) {
+        let mut received = Vec::new();
+        if let Ok(s) = &self.server {
+            while let Some(e) = s.try_recv() {
+                match e {
+                    upload::UploadEvent::Opened { .. } => self.status = "The phone opened the page.".into(),
+                    upload::UploadEvent::Refused { reason, .. } => self.status = format!("Refused: {reason}"),
+                    upload::UploadEvent::Received(p) => {
+                        self.status = format!("Received a photo ({:.1} MB).", p.meta.bytes as f64 / 1e6);
+                        received.push(p);
+                    }
+                }
+            }
+        }
+        for p in received {
+            self.add(PhotoJob::Stored(p));
+        }
+        while let Ok(news) = self.news.try_recv() {
+            match news {
+                News::Started(n) => {
+                    if let Some(c) = self.cards.iter_mut().find(|c| c.n == n) {
+                        c.state = State::Counting;
+                    }
+                }
+                News::Done(n, r) => {
+                    // Gone when removed meanwhile.
+                    let Some(c) = self.cards.iter_mut().find(|c| c.n == n) else {
+                        continue;
+                    };
+                    c.state = match r {
+                        Ok((p, grid)) => State::Done(Box::new(Count::from(*p, grid, env.card))),
+                        Err(e) => State::Failed(e),
+                    };
+                    if self.follow {
+                        self.select(Some(n));
+                    }
+                }
+            }
+        }
+        let mut lines: Vec<String> = self.cards.iter().map(|c| c.line(env.decimal)).collect();
+        if self.done().count() >= 2 {
+            // Last: the phone shows the newest first, so the total on top.
+            lines.push(format!("All: {}", self.total_line(env.decimal)));
+        }
+        if lines != self.lines {
+            if let Ok(s) = &self.server {
+                s.set_lines(lines.clone());
+            }
+            self.lines = lines;
+        }
+    }
+
+    fn done(&self) -> impl Iterator<Item = &Count> {
+        self.cards.iter().filter_map(|c| match &c.state {
+            State::Done(d) => Some(d.as_ref()),
+            _ => None,
+        })
+    }
+
+    /// "548, 6 cards, 58 holes".
+    fn total_line(&self, decimal: bool) -> String {
+        let (rings, tenths, holes, cards) = self.done().fold((0, 0, 0, 0), |a, c| {
+            (a.0 + c.rings(), a.1 + c.tenths(), a.2 + c.holes.len(), a.3 + 1)
+        });
+        format!(
+            "{}, {}, {}",
+            total_text(rings, tenths, decimal),
+            plural(cards, "card", "cards"),
+            plural(holes, "hole", "holes")
+        )
+    }
+
+    fn select(&mut self, n: Option<u32>) {
+        if n != self.selected {
+            self.selected_hole = None;
+        }
+        self.selected = n;
+    }
+
+    fn remove(&mut self, n: u32) {
+        self.cards.retain(|c| c.n != n);
+        if let Ok(s) = &self.server {
+            s.free_slot();
+        }
+        if self.selected == Some(n) {
+            self.select(None);
+            self.follow = true;
+        }
+        if self.texture.as_ref().is_some_and(|t| t.0 == n) {
+            self.texture = None;
+        }
+    }
+
+    /// The window's contents.
+    pub fn ui(&mut self, ui: &mut Ui, env: &CountEnv) {
+        // Photo files dropped on the window: counted like the phone's, within the limit.
+        let dropped: Vec<Vec<u8>> = ui.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.bytes().ok())
+                .collect()
+        });
+        for b in dropped {
+            let room = match &self.server {
+                Ok(s) => s.take_slot(),
+                Err(_) => self.cards.len() < COUNT_MAX,
+            };
+            if room {
+                self.add(PhotoJob::Bytes(b));
+            } else {
+                self.error = Some(format!(
+                    "The window holds {COUNT_MAX} cards, its most. Remove one, or close the window and start again."
+                ));
+            }
+        }
+        // Up and down (or left and right) flip through the cards.
+        let step = ui.input(|i| {
+            if i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::ArrowRight) {
+                1
+            } else if i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::ArrowLeft) {
+                -1
+            } else {
+                0
+            }
+        });
+        if step != 0 && !self.cards.is_empty() {
+            let at = self.cards.iter().position(|c| Some(c.n) == self.selected);
+            let i = match at {
+                Some(i) => (i as i64 + step).clamp(0, self.cards.len() as i64 - 1) as usize,
+                None => self.cards.len() - 1,
+            };
+            self.follow = false;
+            self.select(Some(self.cards[i].n));
+        }
+
+        let avail = ui.available_size();
+        let gap = 16.0;
+        let aspect = env.card.size_mm().y / env.card.size_mm().x;
+        if avail.x >= STACK_BELOW {
+            let card_w = (avail.x - SIDE_WIDTH - gap).min(avail.y / aspect).max(160.0);
+            let side_w = (avail.x - card_w - gap).max(SIDE_WIDTH);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                self.card_view(ui, card_w, env);
+                ui.vertical(|ui| {
+                    ui.set_width(side_w);
+                    egui::ScrollArea::vertical()
+                        .id_salt("count_side")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.side(ui, env));
+                });
+            });
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("count_stacked")
+                .show(ui, |ui| {
+                    let width = ui.available_width();
+                    self.card_view(ui, width, env);
+                    ui.add_space(6.0);
+                    self.side(ui, env);
+                });
+        }
+    }
+
+    /// The list of cards, the total, the link, and the shown card's holes.
+    fn side(&mut self, ui: &mut Ui, env: &CountEnv) {
+        title(
+            ui,
+            "Count cards",
+            "A card's holes and score from a photo, apart from the series",
+        );
+        ui.add_space(10.0);
+        if let Some(e) = self.error.clone()
+            && notice(ui, &e)
+        {
+            self.error = None;
+        }
+        let decimal = env.decimal;
+        let (mut pick, mut remove, mut toggle_link) = (None, None, false);
+        panel(ui, "Cards", |ui| {
+            if self.cards.is_empty() {
+                ui.label(RichText::new("No cards yet.").weak());
+            }
+            for c in &self.cards {
+                ui.horizontal(|ui| {
+                    let busy = matches!(c.state, State::Waiting | State::Counting);
+                    if busy {
+                        ui.spinner();
+                    }
+                    let mut text = RichText::new(c.line(decimal));
+                    if matches!(c.state, State::Failed(_)) {
+                        text = text.color(ui.visuals().error_fg_color);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new("✕").frame(false))
+                            .on_hover_text("Remove this card (the photo file stays)")
+                            .clicked()
+                        {
+                            remove = Some(c.n);
+                        }
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            let r = ui.add(egui::Button::selectable(self.selected == Some(c.n), text).wrap());
+                            if r.clicked() {
+                                pick = Some(c.n);
+                            }
+                        });
+                    });
+                });
+            }
+            if self.done().count() > 0 {
+                ui.separator();
+                let (rings, tenths) = self
+                    .done()
+                    .fold((0, 0), |a, c| (a.0 + c.rings(), a.1 + c.tenths()));
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(total_text(rings, tenths, decimal))
+                            .size(28.0)
+                            .strong(),
+                    );
+                    let holes: usize = self.done().map(|c| c.holes.len()).sum();
+                    let mut detail = format!(
+                        "{} · {}",
+                        plural(self.done().count(), "card", "cards"),
+                        plural(holes, "hole", "holes")
+                    );
+                    let x: usize = self
+                        .done()
+                        .map(|c| c.holes.iter().filter(|h| h.score.inner_ten).count())
+                        .sum();
+                    if decimal {
+                        detail.push_str(&format!(" · {rings} in whole rings"));
+                    } else if x > 0 {
+                        detail.push_str(&format!(" · {x}X"));
+                    }
+                    ui.label(RichText::new(detail).weak());
+                });
+            }
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                let label = if self.show_link || self.cards.is_empty() {
+                    "Hide the code"
+                } else {
+                    "Show the code"
+                };
+                if !self.cards.is_empty() {
+                    toggle_link = ui.add(egui::Button::new(label).frame(false)).clicked();
+                }
+                if let Some(dir) = &env.photos_dir
+                    && ui
+                        .add(egui::Button::new("Open the folder").frame(false))
+                        .clicked()
+                {
+                    open_folder(dir);
+                }
+            });
+        });
+        if self.show_link || self.cards.is_empty() {
+            panel(ui, "From the phone", |ui| {
+                match &self.server {
+                    Err(e) => {
+                        ui.label(format!("No link for the phone: {e}."));
+                    }
+                    Ok(_) => {
+                        ui.add(
+                            egui::Label::new(format!(
+                                "Scan the code with the phone's camera, then take a photo of each card in turn \
+                                 (\"Upload another card\"); up to {COUNT_MAX}. The phone must be on the same Wi-Fi \
+                                 as this computer."
+                            ))
+                            .wrap(),
+                        );
+                        ui.add_space(8.0);
+                        if let Some((w, m)) = &self.qr {
+                            qr_code(ui, *w, m, 230.0);
+                        }
+                        if let Some(u) = &self.url {
+                            ui.label(RichText::new(u).small().weak());
+                        }
+                    }
+                }
+                ui.add_space(4.0);
+                ui.label(RichText::new("Or drop photo files on this window.").weak());
+            });
+        }
+        if !self.status.is_empty() {
+            ui.add(egui::Label::new(RichText::new(&self.status).small().weak()).wrap());
+        }
+        if toggle_link {
+            self.show_link = !self.show_link;
+        }
+        if let Some(n) = pick {
+            self.follow = false;
+            self.select(Some(n));
+        }
+        if let Some(n) = remove {
+            self.remove(n);
+        }
+
+        // The shown card.
+        let Some(c) = self.selected.and_then(|n| self.cards.iter().find(|c| c.n == n)) else {
+            return;
+        };
+        let mut hole_pick = None;
+        panel(ui, &format!("Card {}", c.n), |ui| match &c.state {
+            State::Waiting | State::Counting => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Finding the rings and the holes (a few seconds)…");
+                });
+            }
+            State::Failed(e) => {
+                ui.add(egui::Label::new(format!("Not counted: {e}.")).wrap());
+                ui.add(
+                    egui::Label::new(RichText::new("Remove it with ✕ and take the photo again.").weak())
+                        .wrap(),
+                );
+            }
+            State::Done(d) => {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(d.total(decimal)).size(28.0).strong());
+                    let mut detail = plural(d.holes.len(), "hole", "holes");
+                    let x = d.holes.iter().filter(|h| h.score.inner_ten).count();
+                    if !decimal && x > 0 {
+                        detail.push_str(&format!(" · {x}X"));
+                    }
+                    ui.label(RichText::new(detail).weak());
+                });
+                for w in &d.warnings {
+                    ui.add(egui::Label::new(format!("⚠ {w}")).wrap());
+                }
+                if let Err(e) = &d.grid {
+                    ui.add(egui::Label::new(format!("⚠ The photo can't be shown: {e}")).wrap());
+                }
+                if !d.holes.is_empty() {
+                    ui.separator();
+                    egui::Grid::new(("count_holes", c.n))
+                        .num_columns(4)
+                        .spacing([18.0, 4.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for t in ["Score", "x mm", "y mm", ""] {
+                                ui.label(RichText::new(t).small().weak());
+                            }
+                            ui.end_row();
+                            for (i, h) in d.holes.iter().enumerate() {
+                                let mut s = RichText::new(h.score.text(decimal)).strong();
+                                if self.selected_hole == Some(i) {
+                                    s = s.underline();
+                                }
+                                if ui
+                                    .add(egui::Label::new(s).sense(egui::Sense::click()))
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .clicked()
+                                {
+                                    hole_pick = Some(i);
+                                }
+                                ui.label(format!("{:+.2}", h.at.0));
+                                ui.label(format!("{:+.2}", h.at.1));
+                                if h.overlap {
+                                    ui.label("⚠ overlaps").on_hover_text(
+                                        "Fitted together with the hole it overlaps: less certain than a single hole.",
+                                    );
+                                } else {
+                                    ui.label("");
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(if decimal {
+                            "Holes per score"
+                        } else {
+                            "Holes per ring"
+                        })
+                        .small()
+                        .weak(),
+                    );
+                    ui.allocate_ui(egui::vec2(ui.available_width(), 130.0), |ui| {
+                        let scores: Vec<Score> = d.holes.iter().map(|h| h.score).collect();
+                        score_chart(ui, &scores, decimal);
+                    });
+                }
+                egui::CollapsingHeader::new(RichText::new("The photo's details").small().weak())
+                    .id_salt(("count_details", c.n))
+                    .show(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(&d.details).small().weak()).wrap());
+                    });
+            }
+        });
+        if let Some(i) = hole_pick {
+            self.selected_hole = if self.selected_hole == Some(i) {
+                None
+            } else {
+                Some(i)
+            };
+        }
+    }
+
+    /// The shown card's photo under the printed card, its holes as rings; zoom and pan as on
+    /// the main card, a hole clicked shows its score.
+    fn card_view(&mut self, ui: &mut Ui, width: f32, env: &CountEnv) {
+        let card = env.card;
+        let card_mm = card.size_mm();
+        let base = width / card_mm.x;
+        let (rect, response) = ui.allocate_exact_size(card_mm * base, egui::Sense::click_and_drag());
+        self.view.clamp(card_mm);
+        let view_before = self.view;
+        if response.hovered() {
+            let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+            let factor = pinch * (scroll / 200.0).exp();
+            if factor != 1.0 {
+                let anchor = response.hover_pos().map_or(Vec2::ZERO, |p| p - rect.center());
+                self.view.zoom_by(factor, anchor, base, card_mm);
+            }
+            ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+        }
+        if response.dragged() {
+            self.view.pan(response.drag_delta(), base, card_mm);
+        }
+        let scale = base * self.view.zoom;
+        let origin = rect.center() - self.view.centre_mm * scale;
+        let to_screen = |mm: Vec2| origin + mm * scale;
+        let painter = ui.painter_at(rect);
+        let ppp = ui.ctx().pixels_per_point();
+        let quad = |mm: egui::Rect| {
+            [mm.left_top(), mm.right_top(), mm.right_bottom(), mm.left_bottom()]
+                .map(|c| to_screen(c.to_vec2()))
+        };
+        if let Some(tex) = self.card_texture.get(ui.ctx(), card, width * ppp) {
+            paint_quad(
+                &painter,
+                tex.id(),
+                quad(egui::Rect::from_min_size(egui::Pos2::ZERO, card_mm)),
+            );
+        }
+        if self.view.zoom > 1.0 {
+            let visible = egui::Rect::from_center_size(self.view.centre_mm.to_pos2(), rect.size() / scale);
+            let px = [
+                (visible.width() * scale * ppp).round() as u32,
+                (visible.height() * scale * ppp).round() as u32,
+            ];
+            let settled = self.view == view_before && !response.dragged();
+            if let Some((tex, mm)) = self.card_texture.detail(ui.ctx(), card, visible, px, settled) {
+                paint_quad(&painter, tex.id(), quad(mm));
+            }
+            if !settled {
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // The shown card's photo, loaded when it changes (one in memory at a time).
+        let shown = self.selected.and_then(|n| {
+            self.cards.iter().find(|c| c.n == n).and_then(|c| match &c.state {
+                State::Done(d) => Some((n, d.as_ref())),
+                _ => None,
+            })
+        });
+        if let Some((n, d)) = shown
+            && self.texture.as_ref().is_none_or(|t| t.0 != n)
+        {
+            self.texture = None;
+            if let Ok(path) = &d.grid {
+                match photo::load_grid(path) {
+                    Ok(img) => {
+                        let tex = ui
+                            .ctx()
+                            .load_texture("count-photo", img, egui::TextureOptions::LINEAR);
+                        self.texture = Some((n, tex));
+                    }
+                    Err(e) => self.error = Some(format!("Card {n}'s photo can't be shown: {e}.")),
+                }
+            }
+        }
+        let radius = card.pellet_diameter_mm / 2.0 * scale;
+        let holes: &[Hole] = shown.map_or(&[], |(_, d)| &d.holes);
+        if let Some((n, tex)) = &self.texture
+            && shown.is_some_and(|s| s.0 == *n)
+            && self.fade > 0.0
+        {
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(
+                tex.id(),
+                egui::Rect::from_min_size(origin, card_mm * scale),
+                uv,
+                Color32::WHITE.gamma_multiply(self.fade),
+            );
+        }
+        let pos = |h: &Hole| to_screen(card.to_card(h.at.0 as f32, h.at.1 as f32));
+        for h in holes {
+            let c = pos(h);
+            painter.circle_stroke(c, radius, Stroke::new(3.0, Color32::from_black_alpha(150)));
+            painter.circle_stroke(c, radius, Stroke::new(1.2, Color32::WHITE));
+        }
+
+        let hit_r = radius.max(6.0);
+        let hole_at = |p: egui::Pos2| {
+            holes
+                .iter()
+                .enumerate()
+                .map(|(i, h)| (i, pos(h).distance(p)))
+                .filter(|&(_, d)| d <= hit_r)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        };
+        if response.dragged() && self.view.zoom > 1.0 {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if response.hover_pos().and_then(hole_at).is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        } else if response.hovered() && self.view.zoom > 1.0 {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        let mut hole_pick = self.selected_hole;
+        if response.clicked() {
+            let hit = response.interact_pointer_pos().and_then(hole_at);
+            hole_pick = if hit == self.selected_hole { None } else { hit };
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            hole_pick = None;
+        }
+
+        // Zoom bottom right, the photo's fade top right (as on the main card).
+        let margin = 10.0;
+        let height = BAR_BUTTON + 2.0 * BAR_PAD;
+        if env.zoom_controls {
+            let zoom_w = 2.0 * BAR_BUTTON + ZOOM_LABEL + 2.0 * BAR_PAD;
+            let bar = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - margin - zoom_w, rect.bottom() - margin - height),
+                egui::vec2(zoom_w, height),
+            );
+            if let Some(zoom) = zoom_controls(ui, &painter, bar, self.view.zoom) {
+                self.view.zoom = zoom;
+                self.view.clamp(card_mm);
+                ui.ctx().request_repaint();
+            }
+        }
+        if self.texture.is_some() && shown.is_some() {
+            let w = 210.0;
+            let bar = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - margin - w, rect.top() + margin),
+                egui::vec2(w, height),
+            );
+            if let Some(f) = fade_control(ui, &painter, bar, self.fade) {
+                self.fade = f;
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // The close calls: holes that nearly scored higher, worth a look at the paper.
+        if let Some(margin_mm) = env.close_call_mm {
+            let close: Vec<(usize, crate::card::Higher)> = holes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| Some((i, card.higher(h.at.0 as f32, h.at.1 as f32)?)))
+                .filter(|(_, h)| h.gap_mm <= margin_mm)
+                .collect();
+            if !close.is_empty() {
+                let lines: Vec<String> = close
+                    .iter()
+                    .map(|&(i, h)| format!("{} · {}", holes[i].score.text(env.decimal), review_detail(h)))
+                    .collect();
+                let (clicked, _) = review_notice(
+                    ui,
+                    &painter,
+                    rect,
+                    "Close Call - Manual review recommended",
+                    0.0,
+                    "count_close_calls",
+                    &lines,
+                    Some("Show this hole"),
+                );
+                if let Some(line) = clicked {
+                    hole_pick = Some(close[line].0);
+                }
+            }
+        }
+
+        // The picked hole: marked, its score beside it.
+        let picked = hole_pick.and_then(|i| holes.get(i).map(|h| (i, h)));
+        if let Some((_, h)) = picked {
+            let p = pos(h);
+            if rect.contains(p) {
+                painter.circle_stroke(p, radius + 3.0, Stroke::new(3.0, Color32::BLACK));
+                painter.circle_stroke(p, radius + 3.0, Stroke::new(1.5, Color32::WHITE));
+                let gap = radius + 8.0;
+                let (offset, pivot) = if p.x > rect.center().x {
+                    (egui::vec2(-gap, -gap), egui::Align2::RIGHT_BOTTOM)
+                } else {
+                    (egui::vec2(gap, -gap), egui::Align2::LEFT_BOTTOM)
+                };
+                egui::Area::new(egui::Id::unique("count_hole_info"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(p + offset)
+                    .pivot(pivot)
+                    .constrain(true)
+                    .interactable(false)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.horizontal(|ui| {
+                                ui.label("Score:");
+                                ui.label(RichText::new(h.score.text(env.decimal)).size(20.0).strong());
+                            });
+                            ui.label(format!("x {:+.2} mm · y {:+.2} mm", h.at.0, h.at.1));
+                            let off = h.at.0.hypot(h.at.1);
+                            ui.label(RichText::new(format!("{off:.2} mm from the centre")).weak());
+                            if h.overlap {
+                                ui.label(RichText::new("Overlaps another hole: less certain.").small());
+                            }
+                            if let Some(hi) = card
+                                .higher(h.at.0 as f32, h.at.1 as f32)
+                                .filter(|hi| env.close_call_mm.is_some_and(|m| hi.gap_mm <= m))
+                            {
+                                let text =
+                                    format!("⚠ Close call: {}, manual review recommended", review_detail(hi));
+                                ui.label(RichText::new(text).small());
+                            }
+                        });
+                    });
+            }
+        }
+        self.selected_hole = hole_pick;
+    }
+}
+
+/// Counts the photos one at a time, in the order they came: stored (a dropped file), the
+/// holes found and placed on the printed card, the photo on the card's grid saved beside it.
+fn worker(dir: PathBuf, jobs: mpsc::Receiver<(u32, PhotoJob)>, news: mpsc::Sender<News>, ctx: egui::Context) {
+    let card = crate::card::air_pistol();
+    // Ends when the window closes (the sender dropped).
+    while let Ok((n, job)) = jobs.recv() {
+        if news.send(News::Started(n)).is_err() {
+            return;
+        }
+        ctx.request_repaint();
+        let run = || -> Result<(Box<photo::Processed>, Result<PathBuf, String>), String> {
+            let stored = match job {
+                PhotoJob::Stored(p) => p,
+                PhotoJob::Bytes(b) => upload::store(&dir, SERIES, &b, upload::now_unix())?,
+                PhotoJob::Demo => return Err("no demo here".into()),
+            };
+            let mut p = photo::process(stored, &card, &[])?;
+            let grid = match p.image.take() {
+                Some(img) => photo::save_grid(&img, &p.photo.image),
+                None => Err("no image".into()),
+            };
+            Ok((Box::new(p), grid))
+        };
+        if news.send(News::Done(n, run())).is_err() {
+            return;
+        }
+        ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cardphoto::holes::Placement;
+
+    /// A synthetic photo (dropped, as a file) through the worker: every hole found where it
+    /// is on the card, scored as the card scores it; the photo on the card's grid saved and
+    /// loaded again; the phone's lines and the total.
+    #[test]
+    fn counts_a_dropped_photo() {
+        let card = crate::card::air_pistol();
+        let dir = std::env::temp_dir().join(format!("opensights-count-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The shots as demo_photo places them on the card (its placement, no error).
+        let shots = [
+            (1.0, 2.0),
+            (-9.0, 14.0),
+            (22.0, -6.0),
+            (-30.0, -25.0),
+            (40.0, 35.0),
+            (5.0, -48.0),
+        ];
+        let place = Placement {
+            angle: 90.5f64.to_radians(),
+            quarter: 1,
+            shift: (0.7, -0.4),
+            scale: 1.0,
+        };
+        let truth: Vec<(f64, f64)> = shots.iter().map(|s| place.apply(*s)).collect();
+        let bytes = photo::demo_photo(&card, &shots, 0.0, 3).unwrap();
+        let (jobs, rx) = mpsc::channel();
+        let (tx, news) = mpsc::channel();
+        jobs.send((1, PhotoJob::Bytes(bytes))).unwrap();
+        drop(jobs);
+        worker(dir.clone(), rx, tx, egui::Context::default());
+        assert!(matches!(news.recv().unwrap(), News::Started(1)));
+        let News::Done(1, r) = news.recv().unwrap() else {
+            panic!("no result")
+        };
+        let (p, grid) = r.unwrap();
+        let grid_file = grid.clone().unwrap();
+        let img = photo::load_grid(&grid_file).unwrap();
+        assert!(img.size[0] > 1000, "{:?}", img.size);
+        let c = Count::from(*p, grid, &card);
+        assert_eq!(
+            c.holes.len(),
+            truth.len(),
+            "{:?}",
+            c.holes.iter().map(|h| h.at).collect::<Vec<_>>()
+        );
+        let mut want: u32 = 0;
+        for t in &truth {
+            let h = c
+                .holes
+                .iter()
+                .min_by(|a, b| {
+                    let d = |h: &Hole| (h.at.0 - t.0).hypot(h.at.1 - t.1);
+                    d(a).total_cmp(&d(b))
+                })
+                .unwrap();
+            let off = (h.at.0 - t.0).hypot(h.at.1 - t.1);
+            println!("{t:?}: off {off:.3} mm, score {}", h.score.text(true));
+            assert!(off < 0.1, "{t:?}: {off}");
+            assert_eq!(h.score, card.score(t.0 as f32, t.1 as f32), "{t:?}");
+            want += u32::from(h.score.ring);
+        }
+        assert_eq!(c.rings(), want);
+        // Best first.
+        assert!(c.holes.windows(2).all(|w| w[0].score.tenths >= w[1].score.tenths));
+        let line = Counted {
+            n: 1,
+            state: State::Done(Box::new(c)),
+        }
+        .line(false);
+        assert_eq!(line, format!("Card 1: {want}, 6 holes"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// The real photos (`COUNT_PHOTOS=<folder>`, every JPEG and PNG in it, its subfolders too):
+/// each counted as the window counts it, a line per photo. Ignored: run by hand.
+#[cfg(test)]
+mod real {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn counts_real_photos() {
+        let Some(dir) = std::env::var_os("COUNT_PHOTOS") else {
+            return;
+        };
+        let mut files = Vec::new();
+        let mut todo = vec![PathBuf::from(dir)];
+        while let Some(d) = todo.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    todo.push(p);
+                } else if p.extension().is_some_and(|x| {
+                    ["jpg", "jpeg", "png"].contains(&x.to_ascii_lowercase().to_str().unwrap_or(""))
+                }) {
+                    files.push(p);
+                }
+            }
+        }
+        files.sort();
+        let card = crate::card::air_pistol();
+        let out = std::env::temp_dir().join(format!("opensights-count-real-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        let (jobs, rx) = mpsc::channel();
+        let (tx, news) = mpsc::channel();
+        for (i, f) in files.iter().enumerate() {
+            jobs.send((i as u32 + 1, PhotoJob::Bytes(std::fs::read(f).unwrap())))
+                .unwrap();
+        }
+        drop(jobs);
+        let t0 = std::time::Instant::now();
+        worker(out.clone(), rx, tx, egui::Context::default());
+        for news in news.try_iter() {
+            if let News::Done(n, r) = news {
+                let name = files[n as usize - 1]
+                    .strip_prefix(std::env::var_os("COUNT_PHOTOS").unwrap())
+                    .unwrap();
+                let state = match r {
+                    Ok((p, grid)) => {
+                        if std::env::var_os("COUNT_DEBUG").is_some() {
+                            println!(
+                                "  print quarter {:?}, margin {:.3}",
+                                p.print_quarter, p.print_margin
+                            );
+                        }
+                        State::Done(Box::new(Count::from(*p, grid, &card)))
+                    }
+                    Err(e) => State::Failed(e),
+                };
+                let c = Counted { n, state };
+                let extra = match &c.state {
+                    State::Done(d) => format!(
+                        " · {} · {}",
+                        d.holes
+                            .iter()
+                            .map(|h| h.score.text(false))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        d.warnings.len()
+                    ),
+                    _ => String::new(),
+                };
+                println!("{}: {}{extra}", name.display(), c.line(false));
+                if std::env::var_os("COUNT_DEBUG").is_some()
+                    && let State::Done(d) = &c.state
+                {
+                    for w in &d.warnings {
+                        println!("    ⚠ {w}");
+                    }
+                    for h in &d.holes {
+                        if let Some(hi) = card
+                            .higher(h.at.0 as f32, h.at.1 as f32)
+                            .filter(|hi| hi.gap_mm < 0.3)
+                        {
+                            println!(
+                                "    {} at ({:+.2}, {:+.2}): {:.3} mm from {}",
+                                h.score.text(false),
+                                h.at.0,
+                                h.at.1,
+                                hi.gap_mm,
+                                hi.ring
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        println!("{} photos in {:.0} s", files.len(), t0.elapsed().as_secs_f64());
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+}

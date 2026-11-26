@@ -63,7 +63,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Host board (`hardware/host-board/`) | v0.3 ready to order: the J5 (BME280) and U4-supply changes on the board, the south half laid out again and the board routed again (2026-11-24, 76 × 132 mm, 0.4/0.6/0.8 mm tracks, DRC and ERC clean); firmware already on its pin map | The user's look in KiCad, then order and assemble; MEASUREMENT step 1 tests 3 and 14 on the real board |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner moved out along the diagonal by d = 25 mm, to (122.68, 122.68) (PLAN D1's update; principle in `hardware/frame/top-right-holder.svg`), plus bottom-middle and right-middle mics; the user designs and prints the holders. The firmware defaults, the simulator and `model.py` use it from 2026-11-24 (MEASUREMENT 7-0b) |
 | IR curtain | Designed (receiver on the host board, emitter board); firmware built and passing simulated (step 4b, on GPIO 13) | Its bench test (summary, PLAN phase 1.6), then the real gate |
-| App (`app/`) | v0.1.3, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay; protocol v3 (step 5c, merged to `main`): unscored holes and missed shots, the event log, a read-only Measurement section; the calibration wizard and the field check with the Rust fit (step 5d, merged to `main`); card photos C1–C4 (PLAN D13, merged to `main` 2026-11-24; the series panel with the photo's results, and the holes made fast, 41 shots 85 s → 1.2 s, merged 2026-11-24): registration, holes, the upload from the phone, the photo under the shots and the ground-truth panel, passing their synthetic and HTTP tests, the phone test and the user's look at the UI (2026-11-24) | Card photos C5: the user's real photos (a clean card, then one with holes); a settings editor; the shot store in flash (PLAN D6) |
+| App (`app/`) | v0.1.3, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay; protocol v3 (step 5c, merged to `main`): unscored holes and missed shots, the event log, a read-only Measurement section; the calibration wizard and the field check with the Rust fit (step 5d, merged to `main`); card photos C1–C4 (PLAN D13, merged to `main` 2026-11-24; the series panel with the photo's results, and the holes made fast, 41 shots 85 s → 1.2 s, merged 2026-11-24): registration, holes, the upload from the phone, the photo under the shots and the ground-truth panel, passing their synthetic and HTTP tests, the phone test and the user's look at the UI (2026-11-24) | Card photos C5: the user's real photos (a clean card, then one with holes); counting cards (C7, branch `count-card`, 2026-11-26): the user's look at the window and the phone page; a settings editor; the shot store in flash (PLAN D6) |
 | Range server, MQTT, management, wasm viewer | Not started (wasm parked) | FUTURE_ARCHITECTURE step 2, PLAN phase 4 |
 
 ## Repository
@@ -92,7 +92,8 @@ firmware/                     PlatformIO, pinned: pioarduino 55.03.312-1 (Arduin
   tools/layout_study.py       mic layout study behind PLAN D1/D2 (numpy)
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs, eventlog.rs,
-                              calwizard.rs, upload.rs (card photos from the phone)
+                              calwizard.rs, upload.rs (card photos from the phone), photo.rs,
+                              count.rs (counting cards)
   cardphoto/                  card photos (workspace member): registration from the rings,
                               the holes, synthetic photos (CARDPHOTO.md)
   calib/                      the calibration crate (workspace member): the target's solver
@@ -390,6 +391,15 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   through the pose). Clicking a scored row of the series list opens that shot's popup on
   the card (`selected_shot`, as clicking the shot; again closes it).
   `OPENSIGHTS_DEMO_PHOTO=1` adds a synthetic photo of the series (`photo::demo_photo`).
+- **Counting cards (`count.rs`, CARDPHOTO.md C7):** "Count card" in the status bar opens its own
+  window, with or without a sensor: a card photo apart from the series, only scored. One
+  session link (`UploadServer::offer_session`) takes up to 20 photos; the phone's page keeps
+  "Upload another card" and polls `/p/<token>/cards` for the app's line per card and the
+  total. A worker thread counts them in turn (`photo::process` without shots, the photo on the
+  card's grid saved as `<photo>.grid.png`, only the shown card's in memory). The window: the
+  card (photo, fade, zoom, holes as rings, close calls), the cards with ✕ and the total, the
+  shown card's holes best first. `COUNT_PHOTOS=<folder> cargo test --release count::real --
+  --ignored --nocapture` counts a folder of real photos as the window does.
 - **Calibration (step 5d):** `calwizard.rs` holds the wizard and the field check as state
   machines (events, Status and Calibration in; actions out: calibration mode, the template
   point, the record), run by the calibration window (`CalTask`) or the probe. The fit is

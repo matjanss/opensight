@@ -1,7 +1,8 @@
 //! The card photo's way from the phone to the app (`CARDPHOTO.md` C3, PLAN D13): while the
 //! dialog is open, a small HTTP server on the local network; the app shows a QR code with a
 //! link holding a random single-use token; the phone's page takes the photo and sends it
-//! as it is. The photo is stored next to the event logs, `photos/`, with its metadata (EXIF,
+//! as it is. Counting cards (`CARDPHOTO.md` C7) uses a session link instead: it takes photo
+//! after photo, up to the app's limit, and the page shows the app's word on each card. The photo is stored next to the event logs, `photos/`, with its metadata (EXIF,
 //! GPS) dropped from the file (`cardphoto::meta`, the image untouched), and a JSON file
 //! beside it. Originals older than 30 days are removed unless marked to keep; the JSON
 //! stays.
@@ -79,11 +80,25 @@ pub enum UploadEvent {
 
 type Notify = Arc<dyn Fn() + Send + Sync>;
 
+/// A live link.
+struct Offer {
+    series: String,
+    /// A session link (counting cards): many photos, `room` more; else one.
+    many: bool,
+    room: usize,
+    /// What the session's page shows, one line per card (the app's words).
+    lines: Vec<String>,
+}
+
+/// What the phone hears when the session holds the most cards it may.
+pub const SESSION_FULL: &str =
+    "The app holds as many cards as it can. Remove one there, or close its window and start again.";
+
 struct Shared {
     dir: PathBuf,
     max_bytes: usize,
-    /// Live tokens and their series. At most one: a new link ends the old one.
-    offers: Mutex<HashMap<String, String>>,
+    /// Live tokens. At most one: a new link ends the old one.
+    offers: Mutex<HashMap<String, Offer>>,
     events: Mutex<Sender<UploadEvent>>,
     notify: Notify,
 }
@@ -175,8 +190,59 @@ impl UploadServer {
         let token = new_token();
         let mut offers = self.shared.offers.lock().unwrap();
         offers.clear();
-        offers.insert(token.clone(), series.to_string());
+        offers.insert(
+            token.clone(),
+            Offer {
+                series: series.to_string(),
+                many: false,
+                room: 1,
+                lines: Vec::new(),
+            },
+        );
         format!("http://{}/p/{token}", SocketAddr::new(self.host, self.port))
+    }
+
+    /// A session link (counting cards): it takes up to `room` photos, until dropped or
+    /// replaced; any earlier link stops working.
+    pub fn offer_session(&self, series: &str, room: usize) -> String {
+        let token = new_token();
+        let mut offers = self.shared.offers.lock().unwrap();
+        offers.clear();
+        offers.insert(
+            token.clone(),
+            Offer {
+                series: series.to_string(),
+                many: true,
+                room,
+                lines: Vec::new(),
+            },
+        );
+        format!("http://{}/p/{token}", SocketAddr::new(self.host, self.port))
+    }
+
+    /// The session's lines for the phone's page.
+    pub fn set_lines(&self, lines: Vec<String>) {
+        for o in self.shared.offers.lock().unwrap().values_mut() {
+            o.lines = lines.clone();
+        }
+    }
+
+    /// Takes a place in the session for a photo that came another way (a dropped file):
+    /// false when it is full (or there is no session).
+    pub fn take_slot(&self) -> bool {
+        let mut offers = self.shared.offers.lock().unwrap();
+        let Some(o) = offers.values_mut().find(|o| o.many && o.room > 0) else {
+            return false;
+        };
+        o.room -= 1;
+        true
+    }
+
+    /// Gives a place back (a card removed in the app).
+    pub fn free_slot(&self) {
+        for o in self.shared.offers.lock().unwrap().values_mut().filter(|o| o.many) {
+            o.room += 1;
+        }
     }
 
     /// The next thing that happened, if any.
@@ -246,23 +312,39 @@ fn drain(req: &mut Request) {
 
 fn handle(shared: &Shared, mut req: Request) {
     let url = req.url().to_string();
-    let token = url.strip_prefix("/p/").unwrap_or("");
-    let series = shared.offers.lock().unwrap().get(token).cloned();
-    let Some(series) = series.filter(|_| !token.is_empty()) else {
+    let path = url.strip_prefix("/p/").unwrap_or("");
+    // A session's page asks for its lines at /p/<token>/cards.
+    let (token, cards) = match path.strip_suffix("/cards") {
+        Some(t) => (t, true),
+        None => (path, false),
+    };
+    let found = shared
+        .offers
+        .lock()
+        .unwrap()
+        .get(token)
+        .map(|o| (o.series.clone(), o.many, o.lines.clone()));
+    let Some((series, many, lines)) = found.filter(|f| !token.is_empty() && (f.1 || !cards)) else {
         let msg = "This link has been used or has expired. Scan the code in the app again.";
-        return if *req.method() == Method::Get {
-            respond(req, 404, "text/html; charset=utf-8", page(None, msg))
+        return if *req.method() == Method::Get && !cards {
+            respond(req, 404, "text/html; charset=utf-8", page(Page::Gone, msg))
         } else {
             respond(req, 404, TEXT, msg)
         };
     };
     match req.method() {
+        Method::Get if cards => {
+            let body = serde_json::json!({ "lines": lines }).to_string();
+            respond(req, 200, "application/json", body);
+        }
         Method::Get => {
             shared.send(UploadEvent::Opened {
                 series: series.clone(),
             });
-            respond(req, 200, "text/html; charset=utf-8", page(Some(&series), ""));
+            let kind = if many { Page::Session } else { Page::Single(&series) };
+            respond(req, 200, "text/html; charset=utf-8", page(kind, ""));
         }
+        Method::Post if cards => respond(req, 405, TEXT, "Only GET here."),
         Method::Post => {
             let refuse = |req: Request, code: u16, reason: String| {
                 shared.send(UploadEvent::Refused {
@@ -293,16 +375,43 @@ fn handle(shared: &Shared, mut req: Request) {
                 drain(&mut req);
                 return refuse(req, 413, too_large);
             }
+            // A place for it: a session may be full (another upload may have taken the last).
+            {
+                let mut offers = shared.offers.lock().unwrap();
+                match offers.get_mut(token) {
+                    Some(o) if o.room > 0 => o.room -= 1,
+                    Some(_) => {
+                        drop(offers);
+                        return refuse(req, 409, SESSION_FULL.into());
+                    }
+                    None => {
+                        drop(offers);
+                        return respond(req, 404, TEXT, "This link has expired. Scan the code in the app again.");
+                    }
+                }
+            }
             match store(&shared.dir, &series, &body, now_unix()) {
                 Ok(photo) => {
-                    // Used: the link works once.
-                    shared.offers.lock().unwrap().remove(token);
+                    if !many {
+                        // Used: the link works once.
+                        shared.offers.lock().unwrap().remove(token);
+                    }
                     // The app first, then the phone: whoever hears "received" can count on
                     // the app having the photo (a test reads the event right after the answer).
                     shared.send(UploadEvent::Received(photo));
-                    respond(req, 200, TEXT, "Received. You can close this page.");
+                    let answer = if many {
+                        "Received."
+                    } else {
+                        "Received. You can close this page."
+                    };
+                    respond(req, 200, TEXT, answer);
                 }
-                Err(e) => refuse(req, 415, e),
+                Err(e) => {
+                    if let Some(o) = shared.offers.lock().unwrap().get_mut(token) {
+                        o.room += 1;
+                    }
+                    refuse(req, 415, e)
+                }
             }
         }
         _ => respond(req, 405, TEXT, "Only GET and POST."),
@@ -400,7 +509,7 @@ pub fn set_keep(meta_file: &Path, keep: bool) -> std::io::Result<()> {
 }
 
 /// Removes the originals received more than `KEEP_DAYS` days before `now` and not marked to
-/// keep; their JSON stays (marked `removed`), and so do any results files. Returns the images
+/// keep, with their images on the card's grid; their JSON stays (marked `removed`), and so do any results files. Returns the images
 /// removed.
 pub fn clean_up(dir: &Path, now: u64) -> std::io::Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
@@ -422,6 +531,8 @@ pub fn clean_up(dir: &Path, now: u64) -> std::io::Result<Vec<PathBuf>> {
             continue;
         }
         let image = dir.join(&meta.image);
+        // The photo on the card's grid (`photo::save_grid`), when there is one.
+        let _ = std::fs::remove_file(image.with_extension("grid.png"));
         match std::fs::remove_file(&image) {
             Ok(()) => removed.push(image),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -433,41 +544,87 @@ pub fn clean_up(dir: &Path, now: u64) -> std::io::Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
-/// The phone's page. `series` None: the link is no good (`msg` says so).
-fn page(series: Option<&str>, msg: &str) -> String {
-    let body = match series {
-        None => format!("<p class=msg>{}</p>", html_escape(msg)),
-        Some(s) => format!(
-            r#"<p>A photo of the card for <b>{}</b>.</p>
-<ul>
-<li>Lay the card flat on a grey or coloured surface (not black, not white).</li>
+/// Which page the phone gets.
+enum Page<'a> {
+    /// The link is no good (the message says so).
+    Gone,
+    /// One photo of this series' card.
+    Single(&'a str),
+    /// Counting cards: photo after photo, the app's word on each below.
+    Session,
+}
+
+/// How to take the photo, on both pages.
+const TIPS: &str = r#"<ul>
+<li>Lay the card flat.</li>
 <li>Hold the phone straight above it; the whole card in the picture, as large as fits.</li>
 <li>Even light, no shadow of the phone on the card.</li>
 </ul>
-<label class=btn>Take photo<input id=cam type=file accept="image/*" capture=environment hidden></label>
-<label class="btn alt">Choose a photo<input id=pick type=file accept="image/*" hidden></label>
+<label class=btn><span id=cam-text>Take photo</span><input id=cam type=file accept="image/*" capture=environment hidden></label>
+<label class="btn alt"><span id=pick-text>Choose a photo</span><input id=pick type=file accept="image/*" hidden></label>
 <progress id=bar max=1 value=0 hidden></progress>
-<p id=msg class=msg></p>
-<script>
-const msg = document.getElementById('msg'), bar = document.getElementById('bar');
-function send(f) {{
+<p id=msg class=msg></p>"#;
+
+/// The upload, on both pages; `done(ok)` after each.
+const SEND_JS: &str = r#"const msg = document.getElementById('msg'), bar = document.getElementById('bar');
+function send(f, done) {
   if (!f) return;
   const x = new XMLHttpRequest();
   x.open('POST', location.pathname);
   x.setRequestHeader('Content-Type', f.type || 'application/octet-stream');
   bar.hidden = false; bar.value = 0; msg.textContent = 'Sending...';
-  x.upload.onprogress = e => {{ if (e.lengthComputable) bar.value = e.loaded / e.total; }};
-  x.onload = () => {{
-    bar.hidden = true; msg.textContent = x.responseText;
-    if (x.status == 200) document.querySelectorAll('.btn').forEach(b => b.hidden = true);
-  }};
-  x.onerror = () => {{ bar.hidden = true; msg.textContent = 'The upload failed. Is the phone on the same Wi-Fi as the app? Try again.'; }};
+  x.upload.onprogress = e => { if (e.lengthComputable) bar.value = e.loaded / e.total; };
+  x.onload = () => { bar.hidden = true; msg.textContent = x.responseText; done(x.status == 200); };
+  x.onerror = () => { bar.hidden = true; msg.textContent = 'The upload failed. Is the phone on the same Wi-Fi as the app? Try again.'; done(false); };
   x.send(f);
-}}
+}
 for (const id of ['cam', 'pick'])
-  document.getElementById(id).onchange = e => send(e.target.files[0]);
+  document.getElementById(id).onchange = e => { send(e.target.files[0], ok => after(ok)); e.target.value = ''; };"#;
+
+/// The phone's page.
+fn page(kind: Page, msg: &str) -> String {
+    let body = match kind {
+        Page::Gone => format!("<p class=msg>{}</p>", html_escape(msg)),
+        Page::Single(s) => format!(
+            r#"<p>A photo of the card for <b>{}</b>.</p>
+{TIPS}
+<script>
+{SEND_JS}
+function after(ok) {{ if (ok) document.querySelectorAll('.btn').forEach(b => b.hidden = true); }}
 </script>"#,
             html_escape(s)
+        ),
+        Page::Session => format!(
+            r#"<p>Count cards: send a photo of each card. The app counts them in turn.</p>
+{TIPS}
+<ul id=cards class=cards></ul>
+<script>
+{SEND_JS}
+function after(ok) {{
+  if (!ok) return;
+  document.getElementById('cam-text').textContent = 'Upload another card';
+  document.getElementById('pick-text').textContent = 'Choose another photo';
+  poll();
+}}
+const list = document.getElementById('cards');
+let timer = null;
+function poll() {{
+  clearTimeout(timer);
+  fetch(location.pathname + '/cards', {{ cache: 'no-store' }}).then(r => {{
+    if (r.status == 404) {{
+      document.querySelectorAll('.btn').forEach(b => b.hidden = true);
+      msg.textContent = 'The app closed this session. Scan the code in the app again for a new one.';
+      return null;
+    }}
+    return r.json();
+  }}).then(j => {{
+    if (!j) return;
+    list.replaceChildren(...j.lines.slice().reverse().map(t => {{ const li = document.createElement('li'); li.textContent = t; return li; }}));
+    timer = setTimeout(poll, 2000);
+  }}).catch(() => {{ timer = setTimeout(poll, 4000); }});
+}}
+poll();
+</script>"#
         ),
     };
     format!(
@@ -482,6 +639,8 @@ h1 {{ font-size: 1.3em; }}
 .btn[hidden] {{ display: none; }}
 progress {{ width: 100%; height: 1.2em; }}
 .msg {{ font-weight: 600; }}
+.cards {{ padding-left: 1.2em; }}
+.cards li {{ margin: .3em 0; }}
 </style></head><body>
 <h1>OpenSights card photo</h1>
 {body}
@@ -612,6 +771,47 @@ mod tests {
         let (code, page) = http(srv.port, "GET", &path, b"", None);
         assert_eq!(code, 404);
         assert!(page.contains("Scan the code"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A session link (counting cards): photo after photo up to its room, the page's lines,
+    /// a place given back, and gone once replaced.
+    #[test]
+    fn session_takes_many_until_full() {
+        let dir = temp_dir("session");
+        let (srv, _) = server(&dir, MAX_BYTES);
+        let path = path_of(&srv.offer_session("count", 2));
+        let (code, page) = http(srv.port, "GET", &path, b"", None);
+        assert_eq!(code, 200);
+        assert!(page.contains("Upload another card") && page.contains("/cards"));
+        assert!(matches!(srv.try_recv(), Some(UploadEvent::Opened { .. })));
+        let (sent, _) = phone_photo();
+        for _ in 0..2 {
+            let (code, body) = http(srv.port, "POST", &path, &sent, Some(sent.len()));
+            assert_eq!((code, body.as_str()), (200, "Received."));
+            assert!(matches!(srv.try_recv(), Some(UploadEvent::Received(_))));
+        }
+        // Full: refused, the app told.
+        let (code, body) = http(srv.port, "POST", &path, &sent, Some(sent.len()));
+        assert_eq!((code, body.as_str()), (409, SESSION_FULL));
+        assert!(matches!(srv.try_recv(), Some(UploadEvent::Refused { .. })));
+        // A card removed in the app: one more fits; a dropped file takes the last place.
+        srv.free_slot();
+        srv.free_slot();
+        let (code, _) = http(srv.port, "POST", &path, &sent, Some(sent.len()));
+        assert_eq!(code, 200);
+        assert!(srv.take_slot());
+        assert!(!srv.take_slot());
+        srv.set_lines(vec!["Card 1: 92, 10 holes".into(), "Card 2: counting…".into()]);
+        let (code, body) = http(srv.port, "GET", &format!("{path}/cards"), b"", None);
+        assert_eq!(code, 200);
+        let j: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(j["lines"][1], "Card 2: counting…");
+        // A single-use link has no lines; a replaced session is gone.
+        let single = path_of(&srv.offer("A"));
+        assert_eq!(http(srv.port, "GET", &format!("{single}/cards"), b"", None).0, 404);
+        assert_eq!(http(srv.port, "GET", &format!("{path}/cards"), b"", None).0, 404);
+        assert_eq!(http(srv.port, "POST", &path, &sent, Some(sent.len())).0, 404);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
