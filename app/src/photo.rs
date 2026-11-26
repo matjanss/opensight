@@ -349,67 +349,180 @@ fn on_grid(rgb: &Rgb, reg: &Registration, view: &Placement, card: &Card) -> Colo
     ColorImage::new([w, h], px)
 }
 
+/// The printed numbers' digits, each cropped to its ink and scaled, the same in x and y, so
+/// its longer side spans this grid (`DIGIT_N` × `DIGIT_N`, the ink centred): a card printed in
+/// another font or size still compares, and a digit read sideways stays wide.
+const DIGIT_N: usize = 20;
+/// Around each number: a square of ±2.4 mm (the app's digits are 3.2 mm tall, real cards'
+/// about 2 mm), clear of the ring lines 4 mm either side. The axes are the print's (the
+/// registration takes them from the numbers), so the digits sit in the middle.
+const DIGIT_HALF_MM: f64 = 2.4;
+const DIGIT_STEP_MM: f64 = 0.1;
+/// Ink: this far from the window's background towards the ink, of the paper–ink contrast.
+const DIGIT_INK: f64 = 0.35;
+/// Inside this radius the numbers are light on the black.
+const BLACK_MM: f64 = 29.75;
+
+/// A digit's shape: `lum(u, v)` the luminance at (u, v) mm from the number's place (print
+/// axes, y up), `range` the paper–ink contrast in those units; 1 = ink. The background is the
+/// window's median (the digit is a small part of it). None when there is no clear ink.
+fn digit_shape(lum: impl Fn(f64, f64) -> Option<f64>, light_ink: bool, range: f64) -> Option<Vec<f64>> {
+    let n = (2.0 * DIGIT_HALF_MM / DIGIT_STEP_MM).round() as usize + 1;
+    let at = |i: usize| -DIGIT_HALF_MM + i as f64 * DIGIT_STEP_MM;
+    let mut v = Vec::with_capacity(n * n);
+    for j in 0..n {
+        for i in 0..n {
+            v.push(lum(at(i), at(n - 1 - j))?); // row 0 at the top
+        }
+    }
+    let mut sorted = v.clone();
+    sorted.sort_by(f64::total_cmp);
+    let bg = sorted[n * n / 2];
+    let ink: Vec<f64> = v
+        .iter()
+        .map(|&x| {
+            let d = if light_ink { x - bg } else { bg - x };
+            (d / range.max(1e-6) / DIGIT_INK).clamp(0.0, 1.0)
+        })
+        .collect();
+    // The ink's box: the pixels clearly ink, and connected to the ink nearest the middle (a
+    // hole's edge or a pen mark further out stays out).
+    let solid = |k: usize| ink[k] >= 1.0;
+    let mid = (n / 2) as f64;
+    let seed = (0..n * n)
+        .filter(|&k| solid(k))
+        .min_by(|&a, &b| {
+            let d = |k: usize| ((k % n) as f64 - mid).hypot((k / n) as f64 - mid);
+            d(a).total_cmp(&d(b))
+        })?;
+    if ((seed % n) as f64 - mid).hypot((seed / n) as f64 - mid) > 1.2 / DIGIT_STEP_MM {
+        return None;
+    }
+    let mut seen = vec![false; n * n];
+    let mut stack = vec![seed];
+    seen[seed] = true;
+    let (mut x0, mut x1, mut y0, mut y1, mut count) = (n, 0, n, 0, 0);
+    while let Some(k) = stack.pop() {
+        let (i, j) = (k % n, k / n);
+        (x0, x1, y0, y1) = (x0.min(i), x1.max(i), y0.min(j), y1.max(j));
+        count += 1;
+        // 8-connected, and one pixel's gap bridged (thin strokes, a little blur).
+        for dj in -2i64..=2 {
+            for di in -2i64..=2 {
+                let (a, b) = (i as i64 + di, j as i64 + dj);
+                if a < 0 || b < 0 || a >= n as i64 || b >= n as i64 {
+                    continue;
+                }
+                let q = b as usize * n + a as usize;
+                if !seen[q] && solid(q) {
+                    seen[q] = true;
+                    stack.push(q);
+                }
+            }
+        }
+    }
+    if count < 10 {
+        return None;
+    }
+    // The box, its longer side onto the grid, sampled bilinearly (outside: no ink).
+    let (cx, cy) = ((x0 + x1) as f64 / 2.0, (y0 + y1) as f64 / 2.0);
+    let side = ((x1 - x0).max(y1 - y0) + 1) as f64;
+    let get = |x: f64, y: f64| {
+        if x < 0.0 || y < 0.0 || x > (n - 1) as f64 || y > (n - 1) as f64 {
+            return 0.0;
+        }
+        let (xi, yi) = (x.floor().min((n - 2) as f64), y.floor().min((n - 2) as f64));
+        let (fx, fy) = (x - xi, y - yi);
+        let (xi, yi) = (xi as usize, yi as usize);
+        let p = |a: usize, b: usize| ink[b * n + a];
+        (p(xi, yi) * (1.0 - fx) + p(xi + 1, yi) * fx) * (1.0 - fy)
+            + (p(xi, yi + 1) * (1.0 - fx) + p(xi + 1, yi + 1) * fx) * fy
+    };
+    let mut out = Vec::with_capacity(DIGIT_N * DIGIT_N);
+    for j in 0..DIGIT_N {
+        for i in 0..DIGIT_N {
+            let x = cx + ((i as f64 + 0.5) / DIGIT_N as f64 - 0.5) * side;
+            let y = cy + ((j as f64 + 0.5) / DIGIT_N as f64 - 0.5) * side;
+            out.push(get(x, y));
+        }
+    }
+    Some(out)
+}
+
+fn ncc(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len() as f64;
+    let (ma, mb) = (a.iter().sum::<f64>() / n, b.iter().sum::<f64>() / n);
+    let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        sab += (x - ma) * (y - mb);
+        saa += (x - ma) * (x - ma);
+        sbb += (y - mb) * (y - mb);
+    }
+    sab / (saa * sbb).sqrt().max(1e-12)
+}
+
 /// The print's quarter turn k in the registration's axes (its mm = R(k·90°) print), and the
-/// margin it won by: the photo's luminance in strips along the four axes (where the numbers
-/// are, 31–80 mm out, 6 mm wide) against the app's card turned each way, by normalised
-/// cross-correlation. The rings are the same at every turn; the numbers are not.
+/// margin it won by. The numbers are printed upright on all four axes: each one in the photo,
+/// read as if the card were turned k, against the app's card's digit (both cropped to their
+/// ink and scaled alike, `digit_shape`), by normalised cross-correlation, averaged over every
+/// number found; the best turn against the next. A wrong turn shows the digits sideways or
+/// upside down. Needs the print's axes (`Registration::axes`); without them, (0, 0).
 fn print_quarter(rgb: &Rgb, reg: &Registration, card: &Card) -> (u8, f64) {
-    let ppm = 4.0f32;
+    if !reg.axes_known() {
+        return (0, 0.0);
+    }
+    let ppm = 12.0f32;
     let Some(printed) = card.render((card.size_mm().x * ppm).round() as u32) else {
         return (0, 0.0);
     };
-    let lum = |c: Color32| 0.299 * f64::from(c.r()) + 0.587 * f64::from(c.g()) + 0.114 * f64::from(c.b());
-    let mut pts = Vec::new();
-    for i in 0..196 {
-        let along = 31.0 + f64::from(i) * 0.25;
-        for j in -12..=12 {
-            let across = f64::from(j) * 0.25;
-            pts.extend([
-                (along, across),
-                (-along, across),
-                (across, along),
-                (across, -along),
-            ]);
-        }
-    }
-    let a: Vec<f64> = pts
+    let lum8 = |c: Color32| (0.299 * f64::from(c.r()) + 0.587 * f64::from(c.g()) + 0.114 * f64::from(c.b())) / 255.0;
+    let radii = cardphoto::card::issf_air_pistol().number_radii_mm;
+    let range = f64::from(reg.contrast.range());
+    // The app's digits, from the number on the right of the centre at each radius.
+    let templates: Vec<Option<Vec<f64>>> = radii
         .iter()
-        .map(|p| {
-            let at = card.to_card(p.0 as f32, p.1 as f32) * ppm;
-            lum(printed.pixels[at.y as usize * printed.size[0] + at.x as usize])
+        .map(|&r| {
+            digit_shape(
+                |u, v| {
+                    let at = card.to_card((r + u) as f32, v as f32) * ppm;
+                    let (x, y) = (at.x as usize, at.y as usize);
+                    (x < printed.size[0] && y < printed.size[1]).then(|| lum8(printed.pixels[y * printed.size[0] + x]))
+                },
+                r < BLACK_MM,
+                0.8,
+            )
         })
         .collect();
-    let ncc = |b: &[Option<f64>]| -> f64 {
-        let pairs: Vec<(f64, f64)> = a.iter().zip(b).filter_map(|(x, y)| y.map(|y| (*x, y))).collect();
-        let n = pairs.len().max(1) as f64;
-        let (ma, mb) = (
-            pairs.iter().map(|p| p.0).sum::<f64>() / n,
-            pairs.iter().map(|p| p.1).sum::<f64>() / n,
-        );
-        let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
-        for (x, y) in &pairs {
-            sab += (x - ma) * (y - mb);
-            saa += (x - ma) * (x - ma);
-            sbb += (y - mb) * (y - mb);
-        }
-        sab / (saa * sbb).sqrt().max(1e-12)
-    };
     let mut scores: Vec<(f64, u8)> = (0..4u8)
         .map(|k| {
             let (sn, cs) = (f64::from(k) * std::f64::consts::FRAC_PI_2).sin_cos();
-            let b: Vec<Option<f64>> = pts
-                .iter()
-                .map(|p| {
-                    let q = (cs * p.0 - sn * p.1, sn * p.0 + cs * p.1);
-                    rgb.sample_at(&reg.map, q).map(|c| {
-                        255.0 * (0.299 * f64::from(c[0]) + 0.587 * f64::from(c[1]) + 0.114 * f64::from(c[2]))
-                    })
-                })
-                .collect();
-            (ncc(&b), k)
+            let (mut sum, mut count) = (0.0, 0);
+            for (r, t) in radii.iter().zip(&templates) {
+                let Some(t) = t else { continue };
+                for (ax, ay) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                    let shape = digit_shape(
+                        |u, v| {
+                            let p = (ax * r + u, ay * r + v);
+                            let q = (cs * p.0 - sn * p.1, sn * p.0 + cs * p.1);
+                            rgb.sample_at(&reg.map, q)
+                                .map(|c| 0.299 * f64::from(c[0]) + 0.587 * f64::from(c[1]) + 0.114 * f64::from(c[2]))
+                        },
+                        *r < BLACK_MM,
+                        range,
+                    );
+                    if let Some(sh) = shape {
+                        sum += ncc(&sh, t);
+                        count += 1;
+                    }
+                }
+            }
+            (if count > 0 { sum / f64::from(count) } else { 0.0 }, k)
         })
         .collect();
     scores.sort_by(|x, y| y.0.total_cmp(&x.0));
+    if std::env::var_os("COUNT_DEBUG").is_some() {
+        eprintln!("  print quarter scores {scores:.3?}");
+    }
     (scores[0].1, scores[0].0 - scores[1].0)
 }
 

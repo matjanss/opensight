@@ -40,11 +40,11 @@ fn run(name: &str, p: &Params) -> (Registration, f64) {
     let reg = register(&img, &issf_air_pistol()).unwrap_or_else(|e| panic!("{name}: {e}"));
     let (worst, k) = worst_error(&reg, &truth);
     println!(
-        "{name}: worst {worst:.4} mm (quarter turn {k}), rms {:.4} mm, {} of {} points kept, outline {}, d {:+.3} / {:+.3} mm, k1 {:+.4} (true {:+.4}), contrast {:.2}-{:.2}",
+        "{name}: worst {worst:.4} mm (quarter turn {k}), rms {:.4} mm, {} of {} points kept, axes {:?}, d {:+.3} / {:+.3} mm, k1 {:+.4} (true {:+.4}), contrast {:.2}-{:.2}",
         reg.rms_mm,
         reg.kept,
         reg.points,
-        reg.rotation_from_outline,
+        reg.axes,
         reg.d_dark,
         reg.d_light,
         reg.map.lens.k1,
@@ -83,7 +83,7 @@ fn easy() {
         ..Params::default()
     };
     let (reg, worst) = run("easy", &p);
-    assert!(reg.rotation_from_outline);
+    assert!(reg.axes_known());
     assert!(worst < 0.02, "{worst}");
 }
 
@@ -105,7 +105,7 @@ fn hard() {
         ..Params::default()
     };
     let (reg, worst) = run("hard", &p);
-    assert!(reg.rotation_from_outline);
+    assert!(reg.axes_known());
     assert!(worst < 0.02, "{worst}");
     assert!((reg.map.lens.k1 - p.k1).abs() < 0.01, "k1 {}", reg.map.lens.k1);
 }

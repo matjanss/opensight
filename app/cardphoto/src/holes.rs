@@ -63,13 +63,22 @@ pub struct Expected {
 /// A ring's number as the photo shows it: the same digit, upright, on the card's four axes;
 /// per point around it the median of the four copies (a hole on one copy doesn't move it).
 struct NumberPatch {
-    centres: [(f64, f64); 4],
+    /// The copies that matched (those that didn't keep the rings' profile).
+    centres: Vec<(f64, f64)>,
     grid: Vec<[f32; 3]>,
 }
 
 /// A number's patch: ±this around its centre, mm, on a grid of this step.
 const NUMBER_HALF_MM: f64 = 2.6;
 const NUMBER_STEP_MM: f64 = 0.05;
+/// How far a copy may sit from its place on the axis, mm, either way: real cards print the
+/// numbers on the horizontal axis about 0.6 mm off those on the vertical one (C7).
+const NUMBER_SEARCH_MM: f64 = 1.0;
+/// A copy is left out when it differs from the others' median by more than this many times
+/// the second best copy's difference (mean per pixel, normalised grey), and more than the
+/// floor.
+const NUMBER_FIT_FACTOR: f32 = 2.0;
+const NUMBER_FIT_MIN: f32 = 0.03;
 
 impl NumberPatch {
     fn n() -> usize {
@@ -94,6 +103,175 @@ impl NumberPatch {
                 (a[k] * (1.0 - tx) + b[k] * tx) * (1.0 - ty) + (c2[k] * (1.0 - tx) + d[k] * tx) * ty
             }),
         )
+    }
+}
+
+impl Expected {
+    /// A ring's number at radius `m`: its four copies, each found within
+    /// `NUMBER_SEARCH_MM` of its place on the axis by matching it to the others (the absolute
+    /// difference, each pixel's capped, so a hole on one copy doesn't pull it), and the
+    /// median of the copies so aligned.
+    fn number_patch(&self, rgb: &Rgb, map: &Mapping, m: f64) -> NumberPatch {
+        let n = NumberPatch::n();
+        let s = (NUMBER_SEARCH_MM / NUMBER_STEP_MM).round() as i64;
+        let nb = n + 2 * s as usize;
+        let places = [(m, 0.0), (-m, 0.0), (0.0, m), (0.0, -m)];
+        // Each copy over its patch and the search around it.
+        let big: Vec<Vec<Option<[f32; 3]>>> = places
+            .iter()
+            .map(|c| {
+                let mut v = Vec::with_capacity(nb * nb);
+                for j in 0..nb {
+                    for i in 0..nb {
+                        let q = (
+                            c.0 - NUMBER_HALF_MM - NUMBER_SEARCH_MM + i as f64 * NUMBER_STEP_MM,
+                            c.1 - NUMBER_HALF_MM - NUMBER_SEARCH_MM + j as f64 * NUMBER_STEP_MM,
+                        );
+                        v.push(rgb.sample_at(map, q).map(|c| self.normalize(c, q)));
+                    }
+                }
+                v
+            })
+            .collect();
+        // Copy c's value at patch pixel (i, j), shifted by d steps.
+        let at = |c: usize, d: (i64, i64), i: usize, j: usize| -> Option<[f32; 3]> {
+            let (x, y) = (i as i64 + s + d.0, j as i64 + s + d.1);
+            big[c][y as usize * nb + x as usize]
+        };
+        let median = |v: &mut Vec<f32>| -> f32 {
+            v.sort_by(f32::total_cmp);
+            match v.len() {
+                0 => 1.0,
+                l if l % 2 == 1 => v[l / 2],
+                l => 0.5 * (v[l / 2 - 1] + v[l / 2]),
+            }
+        };
+        let grey = |c: [f32; 3]| (c[0] + c[1] + c[2]) / 3.0;
+        // Copy c shifted by d against a reference (per patch pixel, None: not in the photo).
+        let cost = |c: usize, d: (i64, i64), reference: &dyn Fn(usize, usize) -> Option<f32>, stride: usize| -> f32 {
+            let mut sum = 0.0;
+            for j in (0..n).step_by(stride) {
+                for i in (0..n).step_by(stride) {
+                    sum += match (at(c, d, i, j), reference(i, j)) {
+                        (Some(x), Some(r)) => (grey(x) - r).abs().min(0.5),
+                        _ => 0.25,
+                    };
+                }
+            }
+            sum
+        };
+        // The best shift of copy c within `reach` steps of `from`.
+        let search = |c: usize, from: (i64, i64), reach: i64, stride: usize, reference: &dyn Fn(usize, usize) -> Option<f32>| {
+            let mut best = (f32::INFINITY, from);
+            for dy in (-reach..=reach).step_by(stride) {
+                for dx in (-reach..=reach).step_by(stride) {
+                    let d = (from.0 + dx, from.1 + dy);
+                    if d.0.abs() > s || d.1.abs() > s {
+                        continue;
+                    }
+                    let k = cost(c, d, reference, stride);
+                    if k < best.0 {
+                        best = (k, d);
+                    }
+                }
+            }
+            best
+        };
+        // First against one copy: each copy in turn the reference (a hole on it leads astray),
+        // the others found coarsely then finely; the reference the others fit best is kept.
+        let mut shift = [(0i64, 0i64); 4];
+        let mut best_total = f32::INFINITY;
+        for r in 0..4 {
+            let reference = |i: usize, j: usize| at(r, (0, 0), i, j).map(grey);
+            let mut sh = [(0i64, 0i64); 4];
+            let mut total = 0.0;
+            for c in (0..4).filter(|&c| c != r) {
+                let coarse = search(c, (0, 0), s, 2, &reference).1;
+                let (k, d) = search(c, coarse, 2, 1, &reference);
+                sh[c] = d;
+                total += k;
+            }
+            if total < best_total {
+                best_total = total;
+                shift = sh;
+            }
+        }
+        // Then each against the median of the copies so aligned.
+        for _ in 0..2 {
+            let mut med = vec![0.0f32; n * n];
+            let mut v = Vec::with_capacity(4);
+            for j in 0..n {
+                for i in 0..n {
+                    v.clear();
+                    v.extend((0..4).filter_map(|c| at(c, shift[c], i, j)).map(grey));
+                    med[j * n + i] = median(&mut v);
+                }
+            }
+            let reference = |i: usize, j: usize| Some(med[j * n + i]);
+            for (c, sh) in shift.iter_mut().enumerate() {
+                *sh = search(c, *sh, 2, 1, &reference).1;
+            }
+        }
+        // Each copy against the median of the others: one that doesn't match (a hole on it,
+        // out of the photo, or found only at the search's edge) is left out, there the
+        // expected card is the rings' profile alone.
+        let fit: Vec<f32> = (0..4)
+            .map(|c| {
+                let reference = |i: usize, j: usize| {
+                    let mut v: Vec<f32> =
+                        (0..4).filter(|&o| o != c).filter_map(|o| at(o, shift[o], i, j)).map(grey).collect();
+                    Some(median(&mut v))
+                };
+                cost(c, shift[c], &reference, 1) / (n * n) as f32
+            })
+            .collect();
+        let mut sorted = fit.clone();
+        sorted.sort_by(f32::total_cmp);
+        let good: Vec<usize> = (0..4)
+            .filter(|&c| {
+                fit[c] <= (NUMBER_FIT_FACTOR * sorted[1]).max(NUMBER_FIT_MIN)
+                    && shift[c].0.abs() < s
+                    && shift[c].1.abs() < s
+            })
+            .collect();
+        let mut grid = vec![[0.0f32; 3]; n * n];
+        let mut v = Vec::with_capacity(4);
+        for j in 0..n {
+            for i in 0..n {
+                for k in 0..3 {
+                    v.clear();
+                    v.extend(good.iter().filter_map(|&c| at(c, shift[c], i, j)).map(|x| x[k]));
+                    grid[j * n + i][k] = median(&mut v);
+                }
+            }
+        }
+        let centres = if good.len() >= 2 {
+            good.iter()
+                .map(|&c| {
+                    (
+                        places[c].0 + shift[c].0 as f64 * NUMBER_STEP_MM,
+                        places[c].1 + shift[c].1 as f64 * NUMBER_STEP_MM,
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if std::env::var_os("CARDPHOTO_DEBUG").is_some() {
+            let mm: Vec<String> = (0..4)
+                .map(|c| {
+                    format!(
+                        "{:+.2},{:+.2} ({:.3}{})",
+                        shift[c].0 as f64 * NUMBER_STEP_MM,
+                        shift[c].1 as f64 * NUMBER_STEP_MM,
+                        fit[c],
+                        if good.contains(&c) { "" } else { " out" }
+                    )
+                })
+                .collect();
+            eprintln!("number at {m}: copies off by {}", mm.join(" "));
+        }
+        NumberPatch { centres, grid }
     }
 }
 
@@ -195,41 +373,10 @@ impl Expected {
             slot
         });
         e.profile = profile;
-        // The numbers, where the card's axes are known (the outline fixed them).
-        if reg.rotation_from_outline {
+        // The numbers, where the card's axes are known (the numbers or the outline fixed them).
+        if reg.axes_known() {
             let radii = crate::card::issf_air_pistol().number_radii_mm;
-            let n = NumberPatch::n();
-            e.numbers = crate::par_map(&radii, |&m| {
-                let centres = [(m, 0.0), (-m, 0.0), (0.0, m), (0.0, -m)];
-                let mut grid = vec![[0.0f32; 3]; n * n];
-                for j in 0..n {
-                    for i in 0..n {
-                        let o = (
-                            -NUMBER_HALF_MM + i as f64 * NUMBER_STEP_MM,
-                            -NUMBER_HALF_MM + j as f64 * NUMBER_STEP_MM,
-                        );
-                        let mut v: Vec<[f32; 3]> = centres
-                            .iter()
-                            .filter_map(|c| {
-                                let q = (c.0 + o.0, c.1 + o.1);
-                                rgb.sample_at(map, q).map(|c| e.normalize(c, q))
-                            })
-                            .collect();
-                        let mut out = [0.0f32; 3];
-                        for (k, slot) in out.iter_mut().enumerate() {
-                            v.sort_by(|a, b| a[k].total_cmp(&b[k]));
-                            // The median (of four: the middle two's mean).
-                            *slot = match v.len() {
-                                0 => 1.0,
-                                l if l % 2 == 1 => v[l / 2][k],
-                                l => 0.5 * (v[l / 2 - 1][k] + v[l / 2][k]),
-                            };
-                        }
-                        grid[j * n + i] = out;
-                    }
-                }
-                NumberPatch { centres, grid }
-            });
+            e.numbers = crate::par_map(&radii, |&m| e.number_patch(rgb, map, m));
         }
         e
     }

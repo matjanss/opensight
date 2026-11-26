@@ -99,7 +99,7 @@ fn one(path: &str) -> serde_json::Value {
         "k2": reg.map.lens.k2,
         "lens": [reg.map.lens.cx, reg.map.lens.cy, reg.map.lens.norm],
         "H": hm,
-        "outline": reg.rotation_from_outline,
+        "axes": format!("{:?}", reg.axes),
         "view": view,
         "contrast": [reg.contrast.paper, reg.contrast.ink],
         "holes": holes.iter().map(|f| json!({

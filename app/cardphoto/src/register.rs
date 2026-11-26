@@ -1,7 +1,8 @@
 //! The registration: one fit over the printed circles' edge points gives the homography and
 //! the lens's radial distortion (`app/CARDPHOTO.md` C1). Circles fix everything but the card's
-//! rotation about its centre; the card's outline fixes that modulo 90° (C2's match with the
-//! shots settles the quarter turn).
+//! rotation about its centre; the printed numbers fix that modulo 90° (the print's axes), or,
+//! where they don't show, the card's outline (C2's match with the shots, or the numbers' shapes
+//! in the app, settle the quarter turn).
 //!
 //! Each edge point's residual: its distance from the centre on the card (through the mapping)
 //! minus its circle's radius, plus an offset per kind of printed line (where on the line the
@@ -11,7 +12,7 @@
 use nalgebra::{DMatrix, DVector, Matrix3};
 
 use crate::card::{CardModel, Kind};
-use crate::detect::{Contrast, RingPoint, coarse, contrast, outline_rotation, ring_points};
+use crate::detect::{Contrast, RingPoint, coarse, contrast, numbers_rotation, outline_rotation, ring_points};
 use crate::{Gray, Lens, Mapping};
 
 /// The registration's result.
@@ -28,9 +29,25 @@ pub struct Registration {
     pub kept: usize,
     /// Edge points per printed circle (`CardModel::features`' order).
     pub per_feature: Vec<usize>,
-    /// Whether the card's outline fixed its rotation (modulo 90°); else it is arbitrary.
-    pub rotation_from_outline: bool,
+    /// What fixed the card's axes (its rotation modulo 90°); None: the rotation is arbitrary.
+    pub axes: Option<Axes>,
     pub contrast: Contrast,
+}
+
+/// What fixed the card's axes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axes {
+    /// The ring numbers, printed on the axes: the print's own axes.
+    Numbers,
+    /// The paper's square outline (cards are cut up to about 1° off the print).
+    Outline,
+}
+
+impl Registration {
+    /// Whether the card's axes are known (modulo 90°).
+    pub fn axes_known(&self) -> bool {
+        self.axes.is_some()
+    }
 }
 
 /// The parameters: h11 h12 h13 h21 h22 h23 h31 h32 (h33 = 1), k1, k2, d_dark, d_light.
@@ -217,7 +234,7 @@ fn fit(
 }
 
 /// Registers a photo: coarse find, then edge points and the fit three times, each with a
-/// narrower window, then the outline's rotation.
+/// narrower window, then the axes (the numbers', else the outline's rotation).
 pub fn register(img: &Gray, model: &CardModel) -> Result<Registration, String> {
     let mut map = coarse(img, model)?;
     let con = contrast(img, &map, model).ok_or("too little contrast between the paper and the black")?;
@@ -285,8 +302,11 @@ pub fn register(img: &Gray, model: &CardModel) -> Result<Registration, String> {
             per_feature[p.feature] += 1;
         }
     }
-    let rot = outline_rotation(img, &map, model, con);
-    if let Some(a) = rot {
+    let axes = match numbers_rotation(img, &map, model, con) {
+        Some((a, _)) => Some((a, Axes::Numbers)),
+        None => outline_rotation(img, &map, model, con).map(|a| (a, Axes::Outline)),
+    };
+    if let Some((a, _)) = axes {
         map = map.rotated(a);
     }
     Ok(Registration {
@@ -297,7 +317,7 @@ pub fn register(img: &Gray, model: &CardModel) -> Result<Registration, String> {
         points: pts.len(),
         kept,
         per_feature,
-        rotation_from_outline: rot.is_some(),
+        axes: axes.map(|(_, f)| f),
         contrast: con,
     })
 }

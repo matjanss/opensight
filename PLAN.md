@@ -408,8 +408,9 @@ app's shots. Steps, tests and results: `app/CARDPHOTO.md`.
 - **The surface under the card:** a hole shows it. Mid-grey or coloured, not black (a black
   table hides the holes in the black) and not white (C2).
 - **Rotation:** circles say nothing about the card's rotation in its plane, and the card may
-  be turned by 90°, 180° or 270°, plus a small angle in its holder. The card's square outline
-  gives the rotation modulo 90°; the quarter turn and the small angle come from matching the
+  be turned by 90°, 180° or 270°, plus a small angle in its holder. The printed ring numbers (on the
+  print's four axes) give the rotation modulo 90°, the card's square outline where they don't
+  show (CARDPHOTO C1); the quarter turn and the small angle come from matching the
   holes to the measured shots (all four tried). Without shots, the printed text and serial
   break the symmetry.
 - **The holes:** searched near each measured shot, a 4.5 mm circle fitted to each edge,

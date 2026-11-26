@@ -52,8 +52,13 @@ Builds, in a library crate `app/cardphoto/` (pure Rust, workspace member, `cargo
    held, each in a ±2 mm window about the last fit; then all circles with the lens free, in
    windows of ±2, 0.8 and 0.5 mm. (From the disc alone, the outer rings of a close, tilted
    photo can be off by more than the window, or by a whole ring.) Circles fix everything but the card's rotation
-   about its centre: that is fixed here by the card's square outline where it is in the photo
-   (else arbitrary), and settled in C2 by the shots.
+   about its centre. That is fixed here modulo 90° by the printed ring numbers, which sit on
+   the print's four axes (C7, `detect::numbers_rotation`): the ink in each number's band
+   against the angle, folded modulo 90°, peaks at the axes; then each copy's ink centroid by
+   angle, the two copies on an axis averaged, the bands weighted by r². Where the numbers
+   don't show, the card's square outline fixes it (cards are cut up to about 1° off the
+   print); else it is arbitrary (`Registration::axes`). The quarter turn is settled in C2 by
+   the shots, or by the numbers' shapes (C4).
 5. **Diagnostics:** the rms residual of the edge points, in mm on the card; how many points,
    per ring; a warning above a limit (to be set from real photos).
 6. **Rectified images** from the fit: any region of the card in card mm at a chosen
@@ -241,10 +246,14 @@ Builds (`src/photo.rs`, the window in `main.rs`):
   differ. The sensor's scores, total and chart stay the sensor's. The results file holds
   each shot's `paper_mm`, `paper_score` and `sensor_score`.
 - **Which way up the card was printed** (needed to draw the app's card turned like the real
-  one): the photo's luminance in strips along the four axes, 31–80 mm out, where the numbers
-  are, against the app's card at each quarter turn (normalised cross-correlation; the rings
-  are the same at every turn, the numbers are not). The best turn must win by 0.1, else a
-  warning and the card drawn upright. Without shots the view is the print's frame: the photo
+  one): each ring number in the photo (±2.4 mm about its place on the registration's axes,
+  which are the print's, C1) read as if the card were turned by each quarter turn, against the
+  app's card's digit; both cropped to their ink (the ink connected to the middle, measured
+  from the window's background against the paper–ink contrast) and scaled alike so the longer
+  side spans the grid, so a smaller digit in another font still compares and a sideways one
+  stays wide; normalised cross-correlation averaged over the numbers found (C7; before, strips
+  along the axes against the app's card, which never decided on real cards). The best turn
+  must win by 0.1, else a warning and the card drawn upright. Without shots the view is the print's frame: the photo
   with its numbers upright, the holes in printed mm.
 - **The ground-truth panel** in the photo window: the rms of the sensor against the holes,
   the worst shot; warnings (the card small in the photo, the rings fitting badly, shots with
@@ -415,7 +424,10 @@ the one that was provided with a message that the error may be x mm").**
 - **The printed numbers** are in the expected card now (`holes::Expected`): each ring's number
   is the same upright digit on the card's four axes, so where a number is, the expected look
   is the median of its four copies in the photo (a hole on one copy doesn't move it); only
-  when the outline fixed the card's axes. Before, a hole next to a number was pulled towards
+  when the card's axes are known. Each copy is found within 1 mm of its place first (C7: real
+  cards print the numbers on the horizontal axis about 0.6 mm off those on the vertical one),
+  matched to the others; a copy that doesn't match (a hole on it) is left out, and there the
+  expected card is the rings' profile. Before, a hole next to a number was pulled towards
   it (0.06 mm) and the numbers were found as holes by the unguided gauge.
 - **The camera's angle** (`cardphoto::view`): the camera's centre from the homography (the
   focal length from it too when the photo is tilted more than 8°: within 4 % of the phone's
@@ -445,11 +457,12 @@ the one that was provided with a message that the error may be x mm").**
   needed.
 - **The calibre:** the white rims (5.2–5.7 mm) look like .22 LR; the scans of cards 1 and 3
   will tell, and then the true positions.
-- **Which way up (2026-11-26, found in C7):** the printed numbers never decide the quarter
-  turn on the real cards: margins 0.004–0.072 against the 0.1 needed (0.18 on the app's own
-  card). The real card's numbers are printed turned 90° against its corner marks, so no turn
-  of the app's card matches them. A score doesn't depend on it; the series view's card may be
-  drawn turned (and says so). A fix: the numbers' own way up, or the card's corner triangle.
+- **Which way up:** solved in C7 (2026-11-26, see its results). The cause was not the real
+  card's print: the outline was never found on a real photo, so the registration's axes were
+  arbitrary and the numbers were looked for where they aren't.
+- **False holes on ring 1's line** (C7): on two of the counting photos of 2026-11-26 the
+  unguided search reports a hole on the outermost ring line (77–78.5 mm) where the paper is
+  whole; which photo it hits changes with the registration's axes. Not looked into yet.
 
 ## C6. The serial number
 
@@ -509,6 +522,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-26 | C7 | Counting cards drawn turned by random angles (the user's 9 photos of 2026-11-26), and the numbers never deciding the way up; run by Claude: every real photo (the 9 and the 59 earlier) through the count's path against the committed code, the saved card images looked at, `cargo test` | **Pass.** The cause: the card's outline was found on none of the photos (paper on a light table, the lens's fit bending the edges beyond the rings), so the angle was whatever the ring fit gave (seen 1–36° off a right angle), and the quarter-turn match sampled the numbers' places on those arbitrary axes. Now the axes come from the printed numbers (C1, found on all 68 photos, all 8 bands agreeing) and the quarter turn from the digits cropped and scaled alike (C4): decided on all 68, margins 0.22–0.38 (need 0.1; the demo 0.51, was 0.18). **Every saved card image upright**, looked at (the serial top right, the ISSF mark bottom left, the maker bottom right), scans included. Synthetic registration within 0.012–0.014 mm (C1's outline 0.013–0.016). Holes against the committed code: 241 of 242 matched on the 59, radius change median 0.002 mm, 95 % 0.022 mm; card 1's hole below the 5 in one photo 0.24 mm, now nearer its median over 12 photos; card 2's close-call hole (on the −x 7) ±0.081 mm over its 10 photos, was ±0.066 (tilted photos; from straight above 24.08 mm both). The counts as in C7 but card 2's IMG_3463: 30, was 29 (its close-call hole 24.002 → 23.983 mm, across the 8's edge at 24.0 mm). Found on the way: the number patch in the expected card (C5) assumed the four copies at their places; real cards print the horizontal axis's 0.6 mm off, which split a hole on the 3 into two: each copy is now aligned first. On the 9: the counts 10, 22, 28, 11, 9, 8, 44, 29, 29; a false hole on ring 1's line on card 4 gone, one on card 6 (77.25 mm) still there (see C5, not solved). `cargo test` passes (cardphoto 3 + 2 + 10 + 4 + 10 + 7, the app 49), clippy clean. |
 | 2026-11-26 | C7 | Counting cards: the window, the session link and the phone's page, the worker; run by Claude: `cargo test`, and every real photo (59 files, the 4 holed cards and the clean one) through the count's path | **Pass** (the window and the phone page not yet looked at: the user). The demo photo: 6 of 6 holes, within 0.005–0.060 mm, each scored as the card scores its true place. Real: every photo of a card counted the same: clean 0 (14 files), card 1: 29, 5 holes (12); card 3: 44, 9 holes, its pair flagged (12); card 4: 8, 3 holes (9 and the scan); card 2: 28 in 5 photos, 29 in 5: one hole 0.017–0.090 mm inside the 8 (the close call shows it), its expected error 0.06–0.15 mm. 189 s for the 59 (3.2 s each, release). **Found:** the printed numbers never decide the card's way up on real cards (margins 0.004–0.072, need 0.1; see C5, not solved). `cargo test` passes (cardphoto 10 + 4 + 10 + 7, the app 49, 2 ignored), clippy clean. |
 | 2026-11-25 | C5 | The gauge in the app (`ground_truth`, the no-shot path, the camera's angle, the expected error), the printed numbers in the expected card, the gauge's wider first round and Tukey weights; run by Claude: `cargo test`, the `c5` example with `C5_GUIDED=1` on all 61 files | **Pass** (overlapping torn holes aside). Synthetic: torn holes with shots 0.027 mm (all 8); clean holes as before or better (single holes 0.005–0.006 mm; overlapping pairs 0.058 mm, was 0.17; the 41-shot demo 0.037 mm, 2.0 s, was 1.2 s); the app's demo photo without shots within 0.05 mm. Tried and dropped: the gauge's joint fit for overlapping holes with shots (synthetic pairs up to 1.6 mm off); masking the numbers instead of modelling them (holes next to a number up to 0.09 mm off). Real: every hole found in every file with shots, single holes within 0.075 mm of the unguided gauge, card 3's pair flagged in all 12 photos, no extra holes. Spread across photos (unguided): from straight above 0.035 mm per axis in the white (54 hole positions), 0.046 mm in the black (22, the pair now included); at 12–34°: 0.120 and 0.065 mm. Card 3's pair 0.056 and 0.072 mm. Card 4 against its scans: 0.08–0.13 mm, its long hole 0.19 mm. The camera's angle within 2.5° of the earlier analysis. `cargo test` passes (cardphoto 10 + 4 + 10 + 7, the app 47), clippy clean. |
 | 2026-11-25 | C5 | The gauge (torn holes) on the first set, as above; run by Claude with the `c5` example | **Partly.** Every hole found, the same count in every file of each card: clean 0 (14 files), card 1: 5 (12), card 2: 4 (10), card 3: 9 (12), card 4: 3 (9 and both scans); before: 0–8 per photo. The circles: r 2.62–2.86 mm in the white, 2.32–2.45 mm in the black (±0.01–0.06 per hole across photos); their edge points within 0.06–0.2 mm of the circle in the white, 0.2–0.5 in the black. Spread per hole across photos, each photo's rotation fitted to the matched holes: 0.03–0.08 mm per axis for holes under 45 mm from the centre, 0.10–0.17 mm for those 50–81 mm out; card 3's overlapping pair 0.5 mm (not solved). From straight above (12 photos under 10°): 0.041 mm in the white (54 hole positions), 0.058 mm in the black (15); at 12–33° (30 photos): 0.118 and 0.228 mm. Card 4's photos (their mean) against its scans: 0.08–0.11, 0.15–0.16 (its elongated hole), 0.12 mm. Synthetic torn holes (`tests/gauge.rs`): pass, worst centre 0.038 mm, radius 0.030 mm. `cargo test` passes (cardphoto 8 + 3 + 10 + 7, the app 47), clippy clean. |

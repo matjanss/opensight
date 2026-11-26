@@ -1001,7 +1001,11 @@ mod real {
         }
         files.sort();
         let card = crate::card::air_pistol();
-        let out = std::env::temp_dir().join(format!("opensights-count-real-{}", std::process::id()));
+        // COUNT_OUT=<folder>: keep the cards' images there (`<photo>.grid.png`) to look at.
+        let keep = std::env::var_os("COUNT_OUT").map(std::path::PathBuf::from);
+        let out = keep
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join(format!("opensights-count-real-{}", std::process::id())));
         std::fs::create_dir_all(&out).unwrap();
         let (jobs, rx) = mpsc::channel();
         let (tx, news) = mpsc::channel();
@@ -1068,6 +1072,9 @@ mod real {
             }
         }
         println!("{} photos in {:.0} s", files.len(), t0.elapsed().as_secs_f64());
-        std::fs::remove_dir_all(&out).unwrap();
+        if keep.is_none() {
+            std::fs::remove_dir_all(&out).unwrap();
+        }
     }
 }
+

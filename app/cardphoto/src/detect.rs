@@ -382,3 +382,149 @@ pub fn outline_rotation(img: &Gray, map: &Mapping, model: &CardModel, contrast: 
         .count();
     (inliers >= n_angles / 4).then_some(a)
 }
+
+/// Half a digit's width and more, mm: the window for a copy's centroid by angle.
+const NUMBER_HALF_W_MM: f64 = 2.0;
+
+/// The print's axes in `map`'s card coordinates, modulo 90° (radians, in -45°..45°), from the
+/// ring numbers: they are printed on the card's four axes, so the ink in each number band,
+/// against the angle and folded modulo 90°, peaks where the axes are. Each band's four copies
+/// count by their second weakest (a hole or a pen mark on one axis doesn't move it). This is
+/// the print's own angle, whatever the table, the cut of the paper (often 1° off the print)
+/// or the lens beyond the rings. Also the peak's strength (ink, 0–1, summed over the bands).
+/// None if the numbers don't stand out.
+pub fn numbers_rotation(img: &Gray, map: &Mapping, model: &CardModel, contrast: Contrast) -> Option<(f64, f64)> {
+    const BINS: usize = 1800; // 0.05° per bin over 90°
+    const HALF_H: f64 = 1.8; // the band sampled: ±1.8 mm about the numbers' centres
+    const DR: f64 = 0.2;
+    let range = contrast.range().max(1e-3);
+    let quarter = std::f64::consts::FRAC_PI_2;
+    let mut total = vec![0.0f64; BINS];
+    let mut bands = Vec::new();
+    let mut raw: Vec<(f64, Vec<f64>, f64)> = Vec::new(); // radius, ink by angle, its median
+    for &m in &model.number_radii_mm {
+        let light_ink = m < model.black_radius_mm;
+        let nr = (2.0 * HALF_H / DR).round() as usize + 1;
+        let mut ink = vec![0.0f64; 4 * BINS];
+        for (b, slot) in ink.iter_mut().enumerate() {
+            let phi = (b as f64 + 0.5) / BINS as f64 * quarter;
+            let (s, c) = phi.sin_cos();
+            let (mut sum, mut n) = (0.0, 0);
+            for i in 0..nr {
+                let r = m - HALF_H + i as f64 * DR;
+                if let Some(v) = img.sample_at(map, (r * c, r * s)) {
+                    let t = if light_ink {
+                        (v - contrast.ink) / range
+                    } else {
+                        (contrast.paper - v) / range
+                    };
+                    sum += f64::from(t.clamp(0.0, 1.5));
+                    n += 1;
+                }
+            }
+            *slot = if n > nr / 2 { sum / n as f64 } else { f64::NAN };
+        }
+        // Against the band's own level (the paper's or the black's, lit unevenly).
+        let mut sorted: Vec<f64> = ink.iter().copied().filter(|v| v.is_finite()).collect();
+        if sorted.len() < 2 * BINS {
+            continue;
+        }
+        sorted.sort_by(f64::total_cmp);
+        let base = sorted[sorted.len() / 2];
+        let mut band = vec![0.0f64; BINS];
+        for (b, slot) in band.iter_mut().enumerate() {
+            let mut four = [0.0f64; 4];
+            for (k, f) in four.iter_mut().enumerate() {
+                let v = ink[k * BINS + b];
+                *f = if v.is_finite() { (v - base).max(0.0) } else { 0.0 };
+            }
+            four.sort_by(f64::total_cmp);
+            *slot = four[1];
+        }
+        for (t, v) in total.iter_mut().zip(&band) {
+            *t += v;
+        }
+        bands.push(band);
+        raw.push((m, ink, base));
+    }
+    if bands.len() < 4 {
+        return None;
+    }
+    let (best, peak) = total
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, v)| (i, *v))?;
+    let mut sorted = total.clone();
+    sorted.sort_by(f64::total_cmp);
+    let level = sorted[BINS / 2];
+    // The bands that have their number there (a band's ink well above its median).
+    let agree = bands
+        .iter()
+        .filter(|b| {
+            let mut s = (*b).clone();
+            s.sort_by(f64::total_cmp);
+            let near = (0..=40).map(|d| b[(best + BINS + d - 20) % BINS]).fold(0.0, f64::max);
+            near > s[BINS / 2] + 0.08
+        })
+        .count();
+    if std::env::var_os("CARDPHOTO_DEBUG").is_some() {
+        eprintln!(
+            "numbers: peak {:.3} at {:.2}°, level {level:.3}, bands {agree} of {}",
+            peak,
+            (best as f64 + 0.5) * 90.0 / BINS as f64,
+            bands.len()
+        );
+    }
+    if agree < 4 || peak < level + 0.3 {
+        return None;
+    }
+    // Refined: each copy's ink centroid by angle near the peak, against its place; the two
+    // copies on an axis averaged (a digit's offset from its place, the same on every copy in
+    // print, turns them opposite ways and cancels, and so does a print that sets one axis's
+    // numbers off as a pair), the bands weighted by r² (an angle's error in mm grows with r).
+    let bin = quarter / BINS as f64;
+    let mut est: Vec<(f64, f64)> = Vec::new(); // (angle offset, weight)
+    for (m, ink, base) in &raw {
+        let w = (NUMBER_HALF_W_MM / m / bin).ceil() as i64;
+        let offset = |k: usize| -> Option<f64> {
+            let (mut sw, mut sa) = (0.0, 0.0);
+            for d in -w..=w {
+                let g = (k as i64 * BINS as i64 + best as i64 + d).rem_euclid(4 * BINS as i64) as usize;
+                let v = ink[g];
+                if !v.is_finite() {
+                    return None;
+                }
+                let v = (v - base).max(0.0);
+                sw += v;
+                sa += v * d as f64;
+            }
+            (sw > 1e-9).then(|| sa / sw * bin)
+        };
+        let o: Vec<Option<f64>> = (0..4).map(offset).collect();
+        let pairs: Vec<f64> = [(0, 2), (1, 3)]
+            .iter()
+            .filter_map(|&(a, b)| Some(0.5 * (o[a]? + o[b]?)))
+            .collect();
+        if !pairs.is_empty() {
+            est.push((pairs.iter().sum::<f64>() / pairs.len() as f64, m * m));
+        }
+    }
+    if est.is_empty() {
+        return None;
+    }
+    // Bands far from the others' median (a hole on a copy) are left out.
+    let mut offs: Vec<f64> = est.iter().map(|e| e.0).collect();
+    offs.sort_by(f64::total_cmp);
+    let med = offs[offs.len() / 2];
+    let (mut sw, mut sa) = (0.0, 0.0);
+    for &(o, w) in &est {
+        if (o - med).abs() < 0.3f64.to_radians() {
+            sw += w;
+            sa += w * o;
+        }
+    }
+    let a = (best as f64 + 0.5) * bin + sa / sw.max(1e-12);
+    let a = (a + quarter / 2.0).rem_euclid(quarter) - quarter / 2.0;
+    Some((a, peak))
+}
