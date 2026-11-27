@@ -407,7 +407,7 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   the dialog is open (port 8710, a single-use token per link, shown as a QR code); the phone's
   page sends the photo as it is, and its "Finished" (`POST /p/<token>/finished`, either
   page) ends the link and tells the app (`UploadEvent::Finished`), which closes the photo
-  window, or stops the count's server until its "New link"; `cardphoto::meta` drops EXIF/GPS/XMP from the file without
+  window, or stops the count's server until its "New QR code"; `cardphoto::meta` drops EXIF/GPS/XMP from the file without
   re-encoding; stored in `photos/` next to `logs/` with a JSON beside it; originals removed
   after 30 days unless marked to keep. The registration and the holes are in `cardphoto/`: the hole fit with direct derivatives,
   big groups and the groups themselves on the cores (`par_map`), holes not pinned down

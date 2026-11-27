@@ -10,6 +10,9 @@ use cardphoto::card::issf_air_pistol;
 use cardphoto::holes::{GroundTruth, HoleFit, Placement, all_gauges, ground_truth};
 use cardphoto::register::{Registration, register};
 use cardphoto::view::{TILT_OK_DEG, expected_error_mm};
+
+/// The rings' registration over this rms (mm) is called poor: well above what real photos give.
+const REG_RMS_WARN_MM: f64 = 0.12;
 use cardphoto::{Gray, Rgb};
 use eframe::egui::{Color32, ColorImage};
 
@@ -143,9 +146,12 @@ impl Processed {
                 self.px_per_mm
             ));
         }
-        if self.reg_rms_mm > 0.03 {
+        // Real photos fit to 0.02 mm rms from straight above and 0.05–0.08 mm at 20–33° of
+        // tilt (CARDPHOTO.md C5), so only a gross misfit is worth a word; the tilt has its own.
+        if self.reg_rms_mm > REG_RMS_WARN_MM {
             w.push(format!(
-                "The rings fit with {:.3} mm rms: the card may not lie flat, or the photo is blurred.",
+                "The printed rings fit the photo poorly ({:.2} mm rms; real photos give 0.02–0.08): the card may \
+                 be bent or partly hidden, or the photo blurred. The holes may be less exact than usual.",
                 self.reg_rms_mm
             ));
         }

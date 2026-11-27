@@ -236,7 +236,7 @@ enum News {
 /// The count, from the first switch to count mode until the app closes.
 pub struct CountTask {
     server: Result<upload::UploadServer, String>,
-    /// The phone pressed "Finished": the server stopped until "New link".
+    /// The phone pressed "Finished": the server stopped until "New QR code".
     phone_done: bool,
     /// For a new server: its folder, and the context it wakes.
     dir: PathBuf,
@@ -713,7 +713,7 @@ impl CountTask {
             panel(ui, "From the phone", |ui| {
                 ui.add(egui::Label::new("The phone pressed \"Finished\": the link is closed.").wrap());
                 new_link = ui
-                    .button("New link")
+                    .button("New QR code")
                     .on_hover_text("Start the link again, for more cards from the phone")
                     .clicked();
                 ui.label(RichText::new("Or drop photo files on this window.").weak());
@@ -1263,7 +1263,8 @@ impl CountTask {
 
         // The picked hole: marked, its score beside it.
         let picked = hole_pick.and_then(|i| holes.get(i).map(|h| (i, h)));
-        if let Some((_, h)) = picked {
+        let mut restore_hole = None;
+        if let Some((i, h)) = picked {
             let p = pos(h);
             if rect.contains(p) {
                 painter.circle_stroke(p, radius + 3.0, Stroke::new(3.0, Color32::BLACK));
@@ -1279,7 +1280,6 @@ impl CountTask {
                     .fixed_pos(p + offset)
                     .pivot(pivot)
                     .constrain(true)
-                    .interactable(false)
                     .show(ui.ctx(), |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
@@ -1310,6 +1310,17 @@ impl CountTask {
                                     format!("⚠ Close call: {}, manual review recommended", review_detail(hi));
                                 ui.label(RichText::new(text).small());
                             }
+                            // Not a hole, or one counted twice: away with it (also the
+                            // Delete key, and × in the list).
+                            if h.by == By::Removed {
+                                restore_hole = ui.button("Restore this hole").clicked().then_some(i);
+                            } else if ui
+                                .button("Remove this hole")
+                                .on_hover_text("Not a hole, or one hole counted twice (Delete)")
+                                .clicked()
+                            {
+                                remove_hole = Some(i);
+                            }
                         });
                     });
             }
@@ -1317,6 +1328,9 @@ impl CountTask {
         self.selected_hole = hole_pick;
         if let Some(i) = remove_hole {
             self.edit(HoleEdit::Remove(i), card);
+        }
+        if let Some(i) = restore_hole {
+            self.edit(HoleEdit::Restore(i), card);
         }
     }
 }
@@ -1518,6 +1532,18 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(rings(h.state()), (rings0, 4));
+        let at = |t: &CountTask, x: f32, y: f32| {
+            let r = t.card_rect;
+            r.min + card.to_card(x, y) * (r.width() / card.size_mm().x)
+        };
+        let click = |h: &mut egui_kittest::Harness<CountTask>, p: egui::Pos2| {
+            h.hover_at(p);
+            h.run_steps(1);
+            h.drag_at(p);
+            h.run_steps(1);
+            h.drop_at(p);
+            h.run_steps(2);
+        };
         let false_score = card.score(60.0, 60.0);
         // The false hole, the worst, is the last row: its × (the card list's × comes first).
         let crosses = h.get_all_by_label("×").count();
@@ -1534,22 +1560,23 @@ mod tests {
         h.run_steps(3);
         let base = rings(h.state()).0;
 
+        // The same from the card: a click on the hole shows its popup, with the button.
+        let spot = d(h.state()).last().unwrap().at;
+        let p = at(h.state(), spot.0 as f32, spot.1 as f32);
+        click(&mut h, p);
+        step(&mut h, "1b-popup");
+        h.get_by_label("Restore this hole").click();
+        h.run_steps(3);
+        assert_eq!(rings(h.state()), (rings0, 4));
+        h.get_by_label("Remove this hole").click();
+        h.run_steps(3);
+        assert_eq!(d(h.state()).last().unwrap().by, By::Removed);
+        assert_eq!(rings(h.state()).0, base);
+
         // The missed hole at (-20, 15): placed by a click near it, dragged, nudged, confirmed.
         h.get_by_label("Add a hole…").click();
         h.run_steps(3);
         assert!(h.state().placing.is_some());
-        let at = |t: &CountTask, x: f32, y: f32| {
-            let r = t.card_rect;
-            r.min + card.to_card(x, y) * (r.width() / card.size_mm().x)
-        };
-        let click = |h: &mut egui_kittest::Harness<CountTask>, p: egui::Pos2| {
-            h.hover_at(p);
-            h.run_steps(1);
-            h.drag_at(p);
-            h.run_steps(1);
-            h.drop_at(p);
-            h.run_steps(2);
-        };
         let p = at(h.state(), -21.0, 15.0);
         click(&mut h, p);
         let placed = h.state().placing.as_ref().unwrap().at.unwrap();

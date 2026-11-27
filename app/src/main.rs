@@ -4882,7 +4882,7 @@ impl SensorApp {
                         ui.add_space(4.0);
                         ui.add(egui::Label::new(RichText::new(&t.status).strong()).wrap());
                         new_link = ui
-                            .add(egui::Button::new("New link").frame(false))
+                            .add(egui::Button::new("New QR code").frame(false))
                             .on_hover_text("The old link stops working.")
                             .clicked();
                     }
