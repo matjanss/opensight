@@ -26,19 +26,6 @@ status and settings are in (step 5c).
 - **Calibration templates.** The wizard has the 4 × 4 grid built in
   (`assets/templates/grid-4x4.json`); choosing another template file, and the sparks per
   point, in the window.
-- **Fit from a log file.** `calib::logline` reads the firmware's and the app's logs: a
-  "Calibrate from a log…" button would fit sparks recorded earlier (as `calibrate.py` does).
-
-## The card
-
-- **Overlapping shots: click shows them all.** Clicking on the card opens the info popup
-  of one shot: the nearest within the hit radius, the newest when several are equally
-  near (`shot_at` in `main.rs`). When several shots overlap under the pointer (a tight
-  group, two shots through the same hole), the click should list all of them: shot
-  number, score and position for each, newest first. Picking one from the list opens its
-  info as now. A single shot under the pointer opens its popup directly, as now.
-  (Asked for 2026-11-22.) Include the hits resolved by hand: a "same hole" one lies exactly
-  on its shot.
 
 ## The solver: Huber weights and mic health (to discuss again)
 

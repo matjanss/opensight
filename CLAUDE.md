@@ -447,7 +447,8 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
     when decimal; painted by hand in `score_chart`).
   - **On the card:**
     - the newest shot is in the UI's only colour; clicking a shot opens a small info
-      popup;
+      popup; clicking overlapping shots lists them, newest first, and the one picked opens
+      its popup (`overlap_list`; the UI test `overlapping_shots_listed`);
     - zoom with the wheel or the zoom bar (bottom right), drag to pan;
     - the replay bar (bottom left) shows the series again shot by shot; both bars can be
       hidden in settings;

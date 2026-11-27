@@ -711,6 +711,8 @@ struct SensorApp {
     photo_fade: f32,
     /// (boot, seq) of the shot whose info popup is open on the card.
     selected_shot: Option<(u32, u32)>,
+    /// A click on overlapping shots: their list, open where the click was (app TODO).
+    overlap: Option<Overlap>,
     view: CardView,
     replay: Replay,
     show_zoom_controls: bool,
@@ -797,6 +799,7 @@ impl SensorApp {
             count: None,
             photo_fade: 0.0,
             selected_shot: None,
+            overlap: None,
             view: CardView::default(),
             replay: Replay {
                 delay_s: replay_delay_s,
@@ -892,6 +895,7 @@ impl SensorApp {
         self.unscored.clear();
         self.manual.clear();
         self.resolving = None;
+        self.overlap = None;
         self.card_photo = None;
     }
 
@@ -1893,6 +1897,13 @@ impl SensorApp {
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| i)
         };
+        // Every shot under the pointer, newest first (they overlap: a list to pick from).
+        let shots_at = |p: egui::Pos2| -> Vec<usize> {
+            (0..visible)
+                .rev()
+                .filter(|&i| self.on_card(&self.series[i].0) && shot_pos(&self.series[i].0).distance(p) <= hit_r)
+                .collect()
+        };
         let on_placed = |p: egui::Pos2| {
             self.resolving
                 .as_ref()
@@ -1930,13 +1941,25 @@ impl SensorApp {
                     }
                 }
                 _ => {
-                    let hit = at.and_then(shot_at).map(key);
-                    self.selected_shot = if hit == self.selected_shot { None } else { hit };
+                    let under = at.map(shots_at).unwrap_or_default();
+                    if under.len() > 1 {
+                        // Overlapping shots: the list, the popup closed until one is picked.
+                        self.overlap = at.map(|p| Overlap {
+                            keys: under.iter().map(|&i| key(i)).collect(),
+                            at_mm: to_mm(p),
+                        });
+                        self.selected_shot = None;
+                    } else {
+                        let hit = at.and_then(shot_at).map(key);
+                        self.overlap = None;
+                        self.selected_shot = if hit == self.selected_shot { None } else { hit };
+                    }
                 }
             }
         }
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.selected_shot = None;
+            self.overlap = None;
             self.resolving = None;
         }
         // Placing: the arrow keys move the shot 0.05 mm, with Shift 0.5 mm (while no field
@@ -2066,6 +2089,16 @@ impl SensorApp {
             }
         }
 
+        let anchor = self.overlap.as_ref().map(|o| to_screen(self.card.to_card(o.at_mm.0, o.at_mm.1)));
+        match self.overlap_list(ui, rect, anchor) {
+            OverlapPick::Shot(k) => {
+                self.selected_shot = Some(k);
+                self.overlap = None;
+            }
+            OverlapPick::Gone => self.overlap = None,
+            OverlapPick::None => {}
+        }
+
         // Gone when the series was cleared or replaced.
         let Some(i) = self
             .selected_shot
@@ -2136,6 +2169,59 @@ impl SensorApp {
                     }
                 });
             });
+    }
+
+    /// The overlapping shots under the last click, newest first, beside it: number, score,
+    /// position (and "by hand"). Picking one opens its popup, as clicking a single shot does.
+    fn overlap_list(&self, ui: &mut Ui, rect: egui::Rect, anchor: Option<egui::Pos2>) -> OverlapPick {
+        let (Some(o), Some(at)) = (&self.overlap, anchor) else {
+            return OverlapPick::None;
+        };
+        let rows: Vec<(usize, Key)> = o
+            .keys
+            .iter()
+            .filter_map(|k| self.series.iter().position(|(s, _)| resolve::key(s) == *k).map(|i| (i, *k)))
+            .collect();
+        if rows.len() < 2 {
+            return OverlapPick::Gone; // the series changed under it
+        }
+        if !rect.contains(at) {
+            return OverlapPick::None; // panned out of view: back when it's in view again
+        }
+        let decimal = self.decimal_scoring && self.card.decimal;
+        let gap = 12.0;
+        let (offset, pivot) = if at.x > rect.center().x {
+            (egui::vec2(-gap, -gap), egui::Align2::RIGHT_BOTTOM)
+        } else {
+            (egui::vec2(gap, -gap), egui::Align2::LEFT_BOTTOM)
+        };
+        let mut picked = None;
+        egui::Area::new(egui::Id::unique("overlap_list"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(at + offset)
+            .pivot(pivot)
+            .constrain(true)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new(format!("{} shots here", rows.len())).strong());
+                    for &(i, k) in &rows {
+                        let (shot, score) = &self.series[i];
+                        let hand = if self.manual.contains_key(&k) { " · by hand" } else { "" };
+                        let text = format!(
+                            "Shot {} · {} · x {:+.2} y {:+.2} mm{hand}",
+                            i + 1,
+                            score.text(decimal),
+                            shot.x_mm(),
+                            shot.y_mm()
+                        );
+                        if ui.add(egui::Button::new(text).frame(false)).clicked() {
+                            picked = Some(k);
+                        }
+                    }
+                });
+            });
+        picked.map_or(OverlapPick::None, OverlapPick::Shot)
     }
 
     /// Last shot and the series list with the total. The series card fills the rest of
@@ -3916,6 +4002,21 @@ fn shot_details(s: &protocol::Shot) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
+/// Several shots under one click (a tight group, two shots through one hole): the list to
+/// pick from, newest first, shown at the click (mm on the card, so it follows zoom and pan).
+struct Overlap {
+    keys: Vec<Key>,
+    at_mm: (f32, f32),
+}
+
+/// What the overlap list did this frame.
+enum OverlapPick {
+    None,
+    Shot(Key),
+    /// Fewer than two of its shots left in the series: close it.
+    Gone,
+}
+
 /// Resolving a hit by hand (the resolve window, `resolve`).
 struct Resolving {
     key: Key,
@@ -4655,6 +4756,77 @@ fn open_folder(dir: &std::path::Path) {
 mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
+
+    /// Overlapping shots (app TODO): a click on three shots in one place (shot 4, the hole
+    /// resolved as its same hole, and the other hole placed 0.05 mm away) lists them newest
+    /// first; picking one opens its popup; a click on a lone shot opens its popup directly;
+    /// Escape closes the list. `UI_SHOTS=<dir>` saves an image of each step.
+    #[test]
+    fn overlapping_shots_listed() {
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .build_eframe(|cc| {
+                install_fonts(&cc.egui_ctx);
+                let link = (tokio::sync::mpsc::unbounded_channel().0, mpsc::channel().1);
+                let mut app = SensorApp::with_link(cc, link).demo_series();
+                app.event_log = None;
+                let boot = 0xDE30;
+                app.resolve_hit((boot, 3), How::Same((boot, 4)), (0.0, 0.0));
+                app.resolve_hit((boot, 8), How::Placed, (1.25, 0.8));
+                app
+            });
+        let shots_dir = std::env::var_os("UI_SHOTS").map(std::path::PathBuf::from);
+        let step = |h: &mut egui_kittest::Harness<SensorApp>, name: &str| {
+            h.run_steps(4);
+            if let Some(dir) = &shots_dir {
+                h.render().expect("render").save(dir.join(format!("overlap-{name}.png"))).unwrap();
+            }
+        };
+        step(&mut h, "0-start");
+        let at = |app: &SensorApp, x: f32, y: f32| {
+            let r = app.card_rect;
+            r.min + app.card.to_card(x, y) * (r.width() / app.card.size_mm().x)
+        };
+        let click = |h: &mut egui_kittest::Harness<SensorApp>, p: egui::Pos2| {
+            h.hover_at(p);
+            h.run_steps(1);
+            h.drag_at(p);
+            h.run_steps(1);
+            h.drop_at(p);
+        };
+        let seq_of = |app: &SensorApp, k: Key| app.series.iter().position(|(s, _)| resolve::key(s) == k);
+
+        // The three in one place: the list, newest first (seq 8, 4, 3), no popup.
+        let p = at(h.state(), 1.2, 0.8);
+        click(&mut h, p);
+        step(&mut h, "1-list");
+        let keys = h.state().overlap.as_ref().expect("the list").keys.clone();
+        assert_eq!(keys, [(0xDE30, 8), (0xDE30, 4), (0xDE30, 3)]);
+        assert_eq!(h.state().selected_shot, None);
+        h.get_by_label("3 shots here");
+        // Picking the middle one (shot 4's row) opens its popup and closes the list.
+        let n4 = seq_of(h.state(), (0xDE30, 4)).unwrap() + 1;
+        h.get_by_label_contains(&format!("Shot {n4} · ")).click();
+        step(&mut h, "2-picked");
+        assert_eq!(h.state().selected_shot, Some((0xDE30, 4)));
+        assert!(h.state().overlap.is_none());
+
+        // A lone shot: its popup directly, no list.
+        let p = at(h.state(), 14.0, 21.5);
+        click(&mut h, p);
+        step(&mut h, "3-lone");
+        assert_eq!(h.state().selected_shot, Some((0xDE30, 5)));
+        assert!(h.state().overlap.is_none());
+
+        // The list again, then Escape closes it.
+        let p = at(h.state(), 1.2, 0.8);
+        click(&mut h, p);
+        h.run_steps(2);
+        assert!(h.state().overlap.is_some());
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        assert!(h.state().overlap.is_none() && h.state().selected_shot.is_none());
+    }
 
     /// MEASUREMENT 5f-3 to 5f-5: the app against a real sensor running the simulator, through
     /// the app's own BLE thread (ignored: it needs a bonded sensor advertising, a bare board).
