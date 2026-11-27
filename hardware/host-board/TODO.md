@@ -1,8 +1,8 @@
 # Host board: to do
 
 Changes to make in the design before the v0.3 board is ordered. The details are in
-[README.md](README.md#changes-before-ordering-done). All done (2026-11-24): the board is
-ready to order.
+[README.md](README.md#changes-before-ordering-done). All done (2026-11-24); the board was
+ordered on 2026-11-27.
 
 ## Before ordering
 
