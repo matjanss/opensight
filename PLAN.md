@@ -506,7 +506,17 @@ recovered as +1.99 °C. Left for the parts: the DS18B20 and BME280 tests (3a-3, 
 2. Other lanes firing: false triggers per hour, counted separately for the acoustic checks
    and the curtain (D9).
 3. Shots through existing holes: reported, not lost.
-4. Rapid fire, as fast as the discipline allows: the dead time.
+4. Rapid fire, as fast as the discipline allows: the dead time. The 30 ms default was never
+   derived (it was the first capture code's starting value). The muzzle blast arrives at
+   d/c and opens an event; the pellet's crack at the paper arrives at d/v. With the
+   event window (about 1.6 ms) and the dead time after the blast's event, the pellet
+   is caught only if d · (1/v − 1/c) > window + dead time. With c = 343 m/s and a dead
+   time of 30 ms: v = 150 m/s needs d > 8.4 m, v = 170 m/s needs d > 10.5 m, v = 120 m/s
+   needs d > 5.9 m. So at 10 m a fast pellet can land inside the blast's dead time and
+   be reported `MISSED`. (This is a calculation, not a bench result.) To test: real shots at 10 m
+   and 25 m with the pellet speeds in use, counting `MISSED` hits against the cards, then
+   the shortest dead time that still rejects ringing and echoes. Also the other direction:
+   how many 30 ms dead times other lanes' blasts cost.
 5. The high-pass corner (20, 25 or 30 kHz) and the thresholds, tuned from the logged
    events (summary open questions).
 6. A full range day on the power bank.

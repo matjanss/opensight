@@ -1824,4 +1824,5 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 - Sample rate: 10 MHz to start; 20 MHz with a bigger ring if 100 ns turns out too coarse
   on the loudest channel (t2 − t1 ≈ 0.3 µs).
-- Dead time vs rapid-fire disciplines.
+- Dead time vs rapid-fire disciplines. 30 ms was a starting value, not derived. A fast pellet at
+  10 m can land inside the muzzle blast's dead time (PLAN phase 2, item 4, with the numbers).
