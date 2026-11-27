@@ -2,10 +2,12 @@
 //!
 //! A hole shows whatever is under the card. Where it is is found against what the card should
 //! look like there, taken from the photo itself: the print is rings, so at each radius it
-//! looks the same all round. Per 5° sector, the median colour at each radius is the expected
-//! card (a hole is too small to move a median; the sector follows uneven light). The
-//! difference from it, normalised by the paper–ink contrast, is high in a hole whatever the
-//! table's colour, unless the table matches both the ink and the paper there.
+//! looks the same all round. The light is smooth surfaces (paper and ink), the print the
+//! median normalised colour at each radius over the full circle (a hole is too small to move a
+//! median), with each printed circle where the photo has it (`Warp`: a card not quite flat
+//! bends them). The difference from it, normalised by the paper–ink contrast, is high in a
+//! hole whatever the table's colour, unless the table matches both the ink and the paper
+//! there.
 //!
 //! Each hole is a circle fitted to that difference (a soft edge, the radius shared by the
 //! holes of a group); holes closer than about a diameter are fitted together. The shots settle
@@ -55,6 +57,8 @@ pub struct Expected {
     ink: [[f64; 6]; 3],
     rho_step: f64,
     profile: Vec<[f32; 3]>,
+    /// Where the printed circles really lie in the photo, against the registration's circles.
+    warp: Warp,
     /// The printed numbers (when the card's axes are known): per ring's number, its four
     /// copies' centres and their median look on a grid around them.
     numbers: Vec<NumberPatch>,
@@ -106,6 +110,132 @@ impl NumberPatch {
     }
 }
 
+/// How far the printed circles lie off the registration's circles in the photo, by angle: a
+/// card not quite flat bends them (a wave around the card, up to 0.55 mm near an edge), and
+/// a print compared at the wrong place shows a line's strip as damage. Per printed circle and
+/// per angle (`WARP_ANGLES`), its measured point (`detect::ring_points`) less that circle's
+/// median all round, smoothed: points more than 0.15 mm off the median over ±8 mm of arc are
+/// dropped (a hole on the line), then the median over ±2.5 mm. Between circles linear in the
+/// radius, between angles linear in the angle.
+struct Warp {
+    /// Per printed circle, from the centre outwards: its radius and its offset per angle (mm).
+    rings: Vec<(f64, Vec<f64>)>,
+}
+
+/// The angles of `Warp` (as `ring_points` is asked for).
+const WARP_ANGLES: usize = 720;
+/// How far from the registration's circle a printed circle is looked for, mm (seen: 0.55 mm
+/// near a card's edge; the circles are 3.25 mm apart or more).
+const WARP_WINDOW_MM: f64 = 1.0;
+
+impl Warp {
+    fn measure(rgb: &Rgb, reg: &Registration) -> Warp {
+        let model = crate::card::issf_air_pistol();
+        let h = &reg.map.h;
+        let ppm = (h[(0, 0)] * h[(1, 1)] - h[(0, 1)] * h[(1, 0)]).abs().sqrt();
+        let step = (0.2 / ppm).min(0.05);
+        let gray = rgb.to_gray();
+        let pts = crate::detect::ring_points(
+            &gray,
+            &reg.map,
+            &model,
+            reg.contrast,
+            WARP_ANGLES,
+            WARP_WINDOW_MM,
+            step,
+        );
+        let n = model.features.len();
+        let mut raw: Vec<Vec<Option<f64>>> = vec![vec![None; WARP_ANGLES]; n];
+        for p in &pts {
+            if let Some(c) = reg.map.to_card(p.p) {
+                let phi = c.1.atan2(c.0).rem_euclid(std::f64::consts::TAU);
+                let k = (phi / std::f64::consts::TAU * WARP_ANGLES as f64).round() as usize % WARP_ANGLES;
+                raw[p.feature][k] = Some(c.0.hypot(c.1) - model.features[p.feature].radius_mm);
+            }
+        }
+        let median = |v: &mut Vec<f64>| -> Option<f64> {
+            if v.len() < 3 {
+                return None;
+            }
+            v.sort_by(f64::total_cmp);
+            Some(v[v.len() / 2])
+        };
+        // The median over ±`half` angles around each angle, of the values `keep` lets through.
+        let smooth = |vals: &[Option<f64>], half: usize, keep: &dyn Fn(usize, f64) -> bool| {
+            (0..WARP_ANGLES)
+                .map(|k| {
+                    let mut w: Vec<f64> = (0..=2 * half)
+                        .filter_map(|d| {
+                            let j = (k + WARP_ANGLES + d - half) % WARP_ANGLES;
+                            vals[j].filter(|&v| keep(j, v))
+                        })
+                        .collect();
+                    median(&mut w)
+                })
+                .collect::<Vec<Option<f64>>>()
+        };
+        let mut rings = Vec::new();
+        for (f, vals) in model.features.iter().zip(raw) {
+            let mut all: Vec<f64> = vals.iter().flatten().copied().collect();
+            if all.len() < WARP_ANGLES / 4 {
+                continue;
+            }
+            let m = median(&mut all).unwrap();
+            let arc = f.radius_mm * std::f64::consts::TAU / WARP_ANGLES as f64;
+            let bins = |mm: f64| ((mm / arc).ceil() as usize).clamp(2, WARP_ANGLES / 4);
+            let wide = smooth(&vals, bins(8.0), &|_, _| true);
+            let near = smooth(&vals, bins(2.5), &|j, v| {
+                wide[j].is_some_and(|w| (v - w).abs() <= 0.15)
+            });
+            // An angle with nothing near (a hole, a number) takes the nearest known on each side.
+            let off: Vec<f64> = (0..WARP_ANGLES)
+                .map(|k| {
+                    let found = (0..WARP_ANGLES).find_map(|d| {
+                        let v: Vec<f64> = [
+                            near[(k + d) % WARP_ANGLES],
+                            near[(k + WARP_ANGLES - d) % WARP_ANGLES],
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                        (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
+                    });
+                    (found.unwrap_or(m) - m).clamp(-WARP_WINDOW_MM, WARP_WINDOW_MM)
+                })
+                .collect();
+            rings.push((f.radius_mm, off));
+        }
+        rings.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Warp { rings }
+    }
+
+    /// The offset at a card point: where the print's circle through it lies off the
+    /// registration's, mm (outwards positive).
+    fn at(&self, q: Pt) -> f64 {
+        if self.rings.is_empty() {
+            return 0.0;
+        }
+        let rho = q.0.hypot(q.1);
+        let x = q.1.atan2(q.0).rem_euclid(std::f64::consts::TAU) / std::f64::consts::TAU * WARP_ANGLES as f64;
+        let b0 = x.floor();
+        let t = x - b0;
+        let b0 = (b0 as usize) % WARP_ANGLES;
+        let b1 = (b0 + 1) % WARP_ANGLES;
+        let ring = |k: usize| self.rings[k].1[b0] * (1.0 - t) + self.rings[k].1[b1] * t;
+        let last = self.rings.len() - 1;
+        if rho <= self.rings[0].0 {
+            return ring(0) * rho / self.rings[0].0;
+        }
+        if rho >= self.rings[last].0 {
+            return ring(last);
+        }
+        let k = self.rings.iter().position(|r| r.0 > rho).unwrap();
+        let (r0, r1) = (self.rings[k - 1].0, self.rings[k].0);
+        let u = (rho - r0) / (r1 - r0);
+        ring(k - 1) * (1.0 - u) + ring(k) * u
+    }
+}
+
 impl Expected {
     /// A ring's number at radius `m`: its four copies, each found within
     /// `NUMBER_SEARCH_MM` of its place on the axis by matching it to the others (the absolute
@@ -148,7 +278,11 @@ impl Expected {
         };
         let grey = |c: [f32; 3]| (c[0] + c[1] + c[2]) / 3.0;
         // Copy c shifted by d against a reference (per patch pixel, None: not in the photo).
-        let cost = |c: usize, d: (i64, i64), reference: &dyn Fn(usize, usize) -> Option<f32>, stride: usize| -> f32 {
+        let cost = |c: usize,
+                    d: (i64, i64),
+                    reference: &dyn Fn(usize, usize) -> Option<f32>,
+                    stride: usize|
+         -> f32 {
             let mut sum = 0.0;
             for j in (0..n).step_by(stride) {
                 for i in (0..n).step_by(stride) {
@@ -161,7 +295,11 @@ impl Expected {
             sum
         };
         // The best shift of copy c within `reach` steps of `from`.
-        let search = |c: usize, from: (i64, i64), reach: i64, stride: usize, reference: &dyn Fn(usize, usize) -> Option<f32>| {
+        let search = |c: usize,
+                      from: (i64, i64),
+                      reach: i64,
+                      stride: usize,
+                      reference: &dyn Fn(usize, usize) -> Option<f32>| {
             let mut best = (f32::INFINITY, from);
             for dy in (-reach..=reach).step_by(stride) {
                 for dx in (-reach..=reach).step_by(stride) {
@@ -218,8 +356,11 @@ impl Expected {
         let fit: Vec<f32> = (0..4)
             .map(|c| {
                 let reference = |i: usize, j: usize| {
-                    let mut v: Vec<f32> =
-                        (0..4).filter(|&o| o != c).filter_map(|o| at(o, shift[o], i, j)).map(grey).collect();
+                    let mut v: Vec<f32> = (0..4)
+                        .filter(|&o| o != c)
+                        .filter_map(|o| at(o, shift[o], i, j))
+                        .map(grey)
+                        .collect();
                     Some(median(&mut v))
                 };
                 cost(c, shift[c], &reference, 1) / (n * n) as f32
@@ -340,6 +481,7 @@ impl Expected {
             ink,
             rho_step: 0.1,
             profile: Vec::new(),
+            warp: Warp::measure(rgb, reg),
             numbers: Vec::new(),
         };
         // The print by radius: the median over the full circle (a hole is a small part of it).
@@ -355,7 +497,10 @@ impl Expected {
             let n = 720;
             for j in 0..n {
                 let phi = j as f64 / n as f64 * std::f64::consts::TAU;
-                let q = (rho * phi.cos(), rho * phi.sin());
+                let q0 = (rho * phi.cos(), rho * phi.sin());
+                // Where this radius of the print lies in the photo (the warp).
+                let r = rho + e.warp.at(q0);
+                let q = (r * phi.cos(), r * phi.sin());
                 if let Some(c) = rgb.sample_at(map, q) {
                     let v = e.normalize(c, q);
                     for k in 0..3 {
@@ -396,7 +541,8 @@ impl Expected {
         if let Some(v) = self.numbers.iter().find_map(|p| p.at(q)) {
             return v;
         }
-        let f = (q.0.hypot(q.1) / self.rho_step).min((self.profile.len() - 1) as f64 - 1e-9);
+        let rho = (q.0.hypot(q.1) - self.warp.at(q)).max(0.0);
+        let f = (rho / self.rho_step).min((self.profile.len() - 1) as f64 - 1e-9);
         let i = f.floor() as usize;
         let t = (f - i as f64) as f32;
         let (a, b) = (self.profile[i], self.profile[i + 1]);

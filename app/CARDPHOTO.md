@@ -97,6 +97,14 @@ Builds (in `cardphoto`, `src/holes.rs`):
   as one profile by radius, the median over the full circle (a hole is a small part of a
   circle from 1.5 mm out; inside 2 mm the card is plain black). The difference from it is
   high in a hole.
+- **The print where the photo has it** (`holes::Warp`, 2026-11-28): a card not quite flat
+  bends its circles off the registration's, in a wave around the card (±0.1–0.3 mm on the
+  outer rings, up to 0.55 mm near a card's edge). A line compared at the wrong place shows its
+  strip as damage, and on ring 1 the gauge fitted circles to it (false holes). So each printed
+  circle is measured again at 720 angles (within ±1 mm), smoothed (points more than 0.15 mm
+  off the median over ±8 mm of arc dropped, then the median over ±2.5 mm), and the expected
+  card's profile is built and read with the circles there (linear between circles and
+  angles). The holes' positions still come from the registration's mapping.
 - **Each hole is a circle** fitted to the normalised colours: inside, the table's colour
   (one unknown colour); outside, the card as expected at each point; a soft edge; the radius
   shared within a group; holes closer than about a diameter fitted together; robust (Huber).
@@ -470,14 +478,17 @@ the one that was provided with a message that the error may be x mm").**
   card's print: the outline was never found on a real photo, so the registration's axes were
   arbitrary and the numbers were looked for where they aren't.
 - **A radial wave in the photos** (2026-11-27): with one line offset, the rings of most phone
-  photos still lie ±0.03–0.05 mm off their circles in a pattern no mapping in the model
-  follows (rings 2–3 and 8–9 too far in, 4–5 too far out, the disc's edge up to 0.06 mm in).
-  The scans don't have it. A card not lying flat would do it (0.4 mm of bow at 250 mm from
-  the camera is 0.1 mm); a photo of a card under glass beside the same card loose would tell.
-  It is most of the holes' spread across photos (0.05–0.12 mm per hole).
-- **False holes on ring 1's line** (C7): on two of the counting photos of 2026-11-26 the
-  unguided search reports a hole on the outermost ring line (77–78.5 mm) where the paper is
-  whole; which photo it hits changes with the registration's axes. Not looked into yet.
+  photos still lie off their circles in a pattern no mapping in the model follows. Measured
+  per angle since (`holes::Warp`, 2026-11-28): ±0.1–0.3 mm on the outer rings, in two or three
+  waves around the card, up to 0.55 mm near a card's edge. The scans don't have it. A card not
+  lying flat would do it (0.4 mm of bow at 250 mm from the camera is 0.1 mm); a photo of a
+  card under glass beside the same card loose would tell. It is most of the holes' spread
+  across photos (0.05–0.12 mm per hole). The expected card follows it now; the holes'
+  positions don't yet (the warp could correct them too: a hole's place on the print, not on
+  the registration's circles).
+- **False holes on ring 1's line** (C7): solved 2026-11-28. The outer rings bend off the
+  registration's circles (a card not flat, see above), and the line's shifted strip was taken
+  for damage. The expected card now follows each circle (`holes::Warp`).
 
 ## C6. The serial number
 
@@ -555,6 +566,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-28 | C2, C7 | Hole detection in the black seemed worse after the ring-line fix (the user: two holes added by hand on the last card of 2026-11-27). Run by Claude: the 9 counting photos of 2026-11-27, the 27 of 2026-11-26 and the 45 with holes in `~/dev/opensights-photos/` through `count::real` against the commit before, each card looked at; every hole's position (`c5`) on 54 photos; `cargo test` | **Found:** not the fix: the two holes added by hand (one in the black with ring 8's line across it, one half on the disc's edge) were missed before it too (and on 11-26's code). What the fix did change: a false hole on ring 1 on card 2 (photo 22:23). Cause: near the card's edges the printed circles lie up to 0.26 mm (ring 1 at the bottom: 0.55 mm) off the registration's, the line's strip showed as damage and the gauge fitted a circle there (damage 0.16–0.20 against the 0.15 needed, rough 0.71–0.74). Before, the free dark-line offset hid part of that bend. **Fixed:** the expected card built with each circle where the photo has it (`holes::Warp`, above). Tried and dropped: matching the rings' print within ±0.3 mm anywhere (scores moved on 3 of 5 cards: a hole's rim near a line was lost) and only for finding holes and their damage (an overlapping pair in the black became one circle: a hole's light inside matches a light line). **Pass.** Every change makes a photo agree with the others of its card: 11-27 card 2's false 1 gone (21, 3 holes); 11-26 card 24's false 1 gone, card 17's false 6 gone and its 9 → 8 (28 as its three siblings), card 18's missed 3 found (29 as its siblings), card 26's 1 → 0 (as its sibling); card-holes2's IMG_3458/3461/3463 → 29 (its 10 photos 29 ×7, 28 ×3; were 28 ×5, 29 ×4, 30); every other count as before, the hole counts all as before but those. Ring 1's line at the bottom of 11-27 card 1: 0.20–0.26 mm off before, within 0.04 mm now (the largest difference 1.47 → 0.30). Holes' positions against the commit before (278 holes): median 0.014 mm, 90 % 0.085 mm, largest 0.37 mm (card 3's pair); each hole's spread across photos of its card median 0.070 → 0.067 mm, mean 0.091 → 0.087 mm. Still missed: a hole with a ring line across it in the black, and one half on the disc's edge (11-27 card 9, card 2's fourth; and 11-26 card 11's third). `cargo test` passes (cardphoto 10 + 4 + 10 + 7, calib 3 + 2, the app 63), clippy clean. |
 | 2026-11-27 | C1, C4 | The photo's 10 and inner ten looked smaller than the app's card, and its rings in the black didn't match (the user). Run by Claude: every ring's line measured again after the registration (`examples/ringcheck.rs`, all 94 real photos and both scans), the counts of every real photo against `main` (`count::real`), each hole's distance from the centre across photos (`c5`), `cargo test` | **Found:** the app's SVG drew each ring line centred on its stated radius, the print has its outer edge there: on the scans every line's centre 0.09 mm inside (dark and light alike), so the photo's rings 0.1 mm inside the app's (inner ten 2.40 against 2.50 mm). And the fit's dark-line offset (−0.09 on the scans) ranged −0.09 to +0.03 on phone photos, moving rings 1–6 out together to hide a radial misfit. **Fixed:** the SVG's lines drawn 0.1 mm inside their radius; one offset for all the card's lines (`CardModel::line_groups`). **Pass.** The offset: −0.063 to −0.113 mm on the 94 photos, −0.090 and −0.092 on the scans, −0.103 on the synthetic photos (now a test: within 0.01 of −0.1); the synthetic registration's worst error 0.015–0.017 mm (was 0.013–0.016); rms up to 0.081 mm (all under the 0.12 warning). Every count as before, file by file (card 2's split 28/29/30 too). Holes in the white moved in by 0.09–0.15 mm on the photos with the dark-line offset furthest off (IMG_3455, today's 15:48), 0.03–0.05 mm on others, in the black 0.01–0.07 mm. Card 4's photos against its scan (3 holes): the mean difference +0.059 → +0.007 mm (per hole +0.162/+0.058/−0.043 → +0.108/+0.003/−0.090); each hole's spread across photos about as before (0.024–0.114 mm, some better, some worse): the radial wave (C5) is left. `cargo test` passes (cardphoto 10 + 4 + 10 + 7, calib 3 + 2, the app 63). |
 | 2026-11-27 | C1, C7 | Removing a hole from the card's popup; "New QR code"; the rings-fit warning; run by Claude: `cargo test` (the app 61, 3 ignored; `holes_changed_by_hand` extended), clippy | **Pass.** A click on a hole shows its popup with "Remove this hole" (or "Restore this hole"), as × in the list and Delete do. The warning "the rings fit with … mm rms" came above 0.03 mm, but real photos give 0.017–0.080 mm (0.02 from straight above, 0.05–0.08 at 20–33° of tilt, C5): it fired on every tilted photo, changed no number, and the tilt has its own warning. Now only above 0.12 mm (a gross misfit; the first C5 registration failures gave 0.10–0.19), worded with the usual range. |
 | 2026-11-27 | C3, C7 | "Finished" on the phone's pages; run by Claude: `cargo test` (the app 61, 3 ignored; the new test `finished_closes_the_link`), clippy | **Pass** for the server: on a session and a single link, GET of `/finished` refused (405), POST answers "Finished: …", the app gets `Finished`, then the page and a second "Finished" are 404. The app's side (the photo window closing, the count's "New QR code") and the page on a phone not yet tried: the user. |
