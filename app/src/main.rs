@@ -51,6 +51,13 @@ const KEY_CLOSE_CALLS: &str = "close_calls";
 const KEY_CLOSE_CALL_MM: &str = "close_call_mm";
 const KEY_REPLAY_DELAY: &str = "replay_delay_s";
 const KEY_SAVE_EVENTS: &str = "save_events";
+const KEY_CURTAIN_WINDOW: &str = "curtain_window_ns";
+
+/// The curtain's window when switched on and none was used before (PLAN D9: 45–100 µs).
+const CURTAIN_DEFAULT_NS: (f32, f32) = (45_000.0, 100_000.0);
+/// How long the switch waits for the sensor's new settings: it drops a write it can't take
+/// (out of range) without an error.
+const CURTAIN_WAIT: Duration = Duration::from_secs(5);
 
 /// The window and taskbar icon (assets/icon/). None if the PNG can't be read: the
 /// window then gets the system's default icon.
@@ -677,6 +684,11 @@ struct SensorApp {
     /// said since connecting (read-only here; the calibration wizard comes in step 5d).
     status: Option<protocol::Status>,
     config: Option<(protocol::Calibration, protocol::Settings)>,
+    /// The curtain's window last used (ns), to switch it back on with: the sensor's own when
+    /// it is on, else remembered (app TODO, the curtain switch).
+    curtain_window: (f32, f32),
+    /// The switch written, waiting for the sensor's settings to show it: (on, since).
+    curtain_pending: Option<(bool, Instant)>,
     event_counts: EventCounts,
     /// Every event written to a log file (`eventlog`), as the firmware's serial log lines.
     save_events: bool,
@@ -765,6 +777,11 @@ impl SensorApp {
             series_sensor: None,
             status: None,
             config: None,
+            curtain_window: storage
+                .and_then(|s| s.get_string(KEY_CURTAIN_WINDOW))
+                .and_then(|v| parse_window(&v))
+                .unwrap_or(CURTAIN_DEFAULT_NS),
+            curtain_pending: None,
             event_counts: EventCounts::default(),
             save_events: storage
                 .and_then(|s| s.get_string(KEY_SAVE_EVENTS))
@@ -994,6 +1011,7 @@ impl SensorApp {
                     self.event_counts = EventCounts::default();
                     self.status = None;
                     self.config = None;
+                    self.curtain_pending = None;
                     self.cal = None;
                     self.log_note(&format!("connected to {name} ({id})"));
                     self.pin_input.clear();
@@ -1012,6 +1030,7 @@ impl SensorApp {
                         task.lost();
                     }
                     self.link = Link::Idle;
+                    self.curtain_pending = None;
                     self.heartbeat = None;
                     self.heartbeat_at = None;
                     self.auto_retry_at = Instant::now() + AUTO_RETRY;
@@ -1057,6 +1076,12 @@ impl SensorApp {
                     {
                         self.log_error = Some(format!("Could not write the event log: {err}"));
                     }
+                    if let Some(w) = set.curtain() {
+                        self.curtain_window = w;
+                    }
+                    if self.curtain_pending.is_some_and(|(on, _)| on == set.curtain().is_some()) {
+                        self.curtain_pending = None;
+                    }
                     self.config = Some((cal, set));
                 }
                 Event::Name(name) => {
@@ -1078,7 +1103,10 @@ impl SensorApp {
                     });
                 }
                 Event::PasskeyCancelled => self.passkey_prompt = None,
-                Event::Error(e) => self.message = Some(e),
+                Event::Error(e) => {
+                    self.curtain_pending = None;
+                    self.message = Some(e);
+                }
             }
         }
         self.run_cal_actions();
@@ -1315,6 +1343,8 @@ impl eframe::App for SensorApp {
         storage.set_string(KEY_CLOSE_CALL_MM, self.close_call_mm.to_string());
         storage.set_string(KEY_REPLAY_DELAY, self.replay_delay_s.to_string());
         storage.set_string(KEY_SAVE_EVENTS, self.save_events.to_string());
+        let (lo, hi) = self.curtain_window;
+        storage.set_string(KEY_CURTAIN_WINDOW, format!("{lo},{hi}"));
     }
 }
 
@@ -1323,12 +1353,12 @@ impl eframe::App for SensorApp {
 impl SensorApp {
     fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            let (dot, text) = match &self.link {
-                Link::Connected { .. } => ("●", format!("Connected: {}", self.sensor_name)),
-                Link::Connecting { name } => ("◌", format!("Connecting to {name}…")),
-                Link::Idle => ("○", "No sensor connected.".to_owned()),
+            let text = match &self.link {
+                Link::Connected { .. } => format!("Connected: {}", self.sensor_name),
+                Link::Connecting { name } => format!("Connecting to {name}…"),
+                Link::Idle => "No sensor connected.".to_owned(),
             };
-            ui.label(RichText::new(dot).strong());
+            link_dot(ui, &self.link);
             ui.label(text);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let gear = ui
@@ -2664,13 +2694,60 @@ impl SensorApp {
         }
     }
 
-    /// Protocol v3, read-only: the calibration, the settings, the air, what the events said,
-    /// and the event log. (Changing them: serial for now, the calibration wizard in step 5d.)
+    /// Whether a shot needs the IR curtain's confirmation (PLAN D9, app TODO). Off writes the
+    /// window 0, 0 (the gate and the emitter off), on the last window used; the rest of the
+    /// settings as read. It shows the sensor's state, not the click's, until the sensor's new
+    /// settings come back (or `CURTAIN_WAIT` passes: the sensor dropped the write).
+    fn curtain_switch(&mut self, ui: &mut Ui, set: &protocol::Settings) {
+        let on = set.curtain().is_some();
+        if let Some((want, since)) = self.curtain_pending
+            && since.elapsed() > CURTAIN_WAIT
+        {
+            self.curtain_pending = None;
+            self.message = Some(format!(
+                "The sensor didn't take the change: the IR curtain is still {}.",
+                if want { "off" } else { "on" }
+            ));
+        }
+        let waiting = self.curtain_pending.is_some();
+        let mut checked = on;
+        let (lo, hi) = self.curtain_window;
+        let tip = format!(
+            "On: a shot counts only with a dip in the IR curtain {:.0}–{:.0} µs after it; a dip with no \
+             sound is a shot through an existing hole. Off: the sound alone decides, the emitter is \
+             off and no holes are reported.",
+            lo / 1000.0,
+            hi / 1000.0
+        );
+        ui.horizontal(|ui| {
+            let r = ui
+                .add_enabled(
+                    !waiting && self.cal.is_none(),
+                    egui::Checkbox::new(&mut checked, "A shot needs the IR curtain's confirmation"),
+                )
+                .on_hover_text(tip)
+                .on_disabled_hover_text("Not while switching, or while calibrating.");
+            if waiting {
+                ui.spinner();
+                ui.label(RichText::new("Switching…").weak());
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
+            }
+            if r.changed() {
+                let window = checked.then_some(self.curtain_window);
+                self.send(Command::WriteSettings(Box::new(set.with_curtain(window))));
+                self.curtain_pending = Some((checked, Instant::now()));
+            }
+        });
+    }
+
+    /// Protocol v3: the calibration, the settings, the air, what the events said, and the
+    /// event log; the curtain switch. (The rest of the settings: serial for now.)
     fn measurement_card(&mut self, ui: &mut Ui) {
         section(ui, "Measurement", |ui| {
             let weak = |ui: &mut Ui, t: String| {
                 ui.add(egui::Label::new(RichText::new(t).weak()).wrap());
             };
+            let mut curtain = None;
             match (&self.status, &self.config) {
                 (Some(st), Some((cal, set))) => {
                     ui.label(calibration_text(st, cal));
@@ -2686,6 +2763,7 @@ impl SensorApp {
                         );
                     }
                     weak(ui, settings_text(set));
+                    curtain = Some(set.clone());
                     weak(ui, air_text(st));
                     if st.flags & protocol::ST_MTU_SMALL != 0 {
                         ui.label(
@@ -2700,6 +2778,9 @@ impl SensorApp {
                         ui.label(RichText::new("Reading the sensor's settings…").weak());
                     });
                 }
+            }
+            if let Some(set) = curtain {
+                self.curtain_switch(ui, &set);
             }
             ui.label(self.event_counts.text());
             let ready = self.status.is_some() && self.config.is_some() && self.cal.is_none();
@@ -3333,7 +3414,7 @@ fn notice(ui: &mut Ui, text: &str) -> bool {
             ui.set_width(ui.available_width());
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 let close = ui
-                    .add(egui::Button::new("✕").frame(false))
+                    .add(egui::Button::new("×").frame(false))
                     .on_hover_text("Dismiss");
                 ui.add(egui::Label::new(text).wrap());
                 close.clicked()
@@ -3942,6 +4023,34 @@ fn calibration_text(st: &protocol::Status, cal: &protocol::Calibration) -> Strin
     )
 }
 
+/// The link's state before the status bar's text: filled when connected, a ring with a dot
+/// while connecting, a ring when idle. Painted: the bundled fonts have no "●" or "◌".
+fn link_dot(ui: &mut Ui, link: &Link) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    let (c, r) = (rect.center(), 4.5);
+    let color = ui.visuals().strong_text_color();
+    let p = ui.painter();
+    match link {
+        Link::Connected { .. } => {
+            p.circle_filled(c, r, color);
+        }
+        Link::Connecting { .. } => {
+            p.circle_stroke(c, r, Stroke::new(1.2, color));
+            p.circle_filled(c, 1.6, color);
+        }
+        Link::Idle => {
+            p.circle_stroke(c, r, Stroke::new(1.2, color));
+        }
+    }
+}
+
+/// "lo,hi" in ns, as saved; a usable window only (0 ≤ lo < hi).
+fn parse_window(v: &str) -> Option<(f32, f32)> {
+    let (lo, hi) = v.split_once(',')?;
+    let (lo, hi): (f32, f32) = (lo.trim().parse().ok()?, hi.trim().parse().ok()?);
+    (lo >= 0.0 && lo < hi && hi <= 2_000_000.0).then_some((lo, hi))
+}
+
 fn settings_text(s: &protocol::Settings) -> String {
     let off = |v: f32, f: &dyn Fn(f32) -> String| if v > 0.0 { f(v) } else { "off".into() };
     let curtain = if s.curtain_hi_ns > 0.0 {
@@ -4546,6 +4655,349 @@ fn open_folder(dir: &std::path::Path) {
 mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
+
+    /// MEASUREMENT 5f-3 to 5f-5: the app against a real sensor running the simulator, through
+    /// the app's own BLE thread (ignored: it needs a bonded sensor advertising, a bare board).
+    /// The curtain switch, holes and missed shots resolved by hand, the `manual` lines, and a
+    /// reconnect that keeps the series. The serial commands go to `LIVE_SERIAL_FIFO` (a session
+    /// that writes each line to the board) or are printed for a person to type.
+    /// `LIVE_SENSOR=<name> [LIVE_SERIAL_FIFO=<fifo>] [LIVE_LOGS=<dir>] [UI_SHOTS=<dir>] cargo test
+    /// --bin opensights-app live_sensor -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_sensor() {
+        use std::io::Write as _;
+        let name = std::env::var("LIVE_SENSOR").expect("LIVE_SENSOR=<the sensor's name>");
+        let fifo = std::env::var_os("LIVE_SERIAL_FIFO");
+        let logs = std::env::var_os("LIVE_LOGS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join(format!("opensights-live-{}", std::process::id())));
+        let log_dir = logs.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 1400.0))
+            .build_eframe(move |cc| {
+                install_fonts(&cc.egui_ctx);
+                let mut app = SensorApp::with_link(cc, ble::spawn(cc.egui_ctx.clone()));
+                app.event_log = Some(EventLog::new(log_dir));
+                app.save_events = true;
+                app
+            });
+        let shots_dir = std::env::var_os("UI_SHOTS").map(std::path::PathBuf::from);
+        let t0 = Instant::now();
+        let say = |what: &str| println!("live {:6.1} s: {what}", t0.elapsed().as_secs_f32());
+        let serial = |cmds: &[&str]| {
+            for c in cmds {
+                say(&format!("serial> {c}"));
+            }
+            match &fifo {
+                Some(f) => {
+                    let mut f = std::fs::OpenOptions::new().write(true).open(f).expect("the serial FIFO");
+                    for c in cmds {
+                        writeln!(f, "{c}").unwrap();
+                    }
+                }
+                None => println!("  (type those on the sensor's serial console)"),
+            }
+        };
+        // Runs the UI in real time until `done`, or fails after `secs`.
+        let wait = |h: &mut egui_kittest::Harness<SensorApp>, secs: f32, what: &str, done: &dyn Fn(&SensorApp) -> bool| {
+            let until = Instant::now() + Duration::from_secs_f32(secs);
+            loop {
+                h.run_steps(1);
+                if done(h.state()) {
+                    say(what);
+                    return;
+                }
+                assert!(Instant::now() < until, "timed out after {secs} s waiting for: {what}");
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        };
+        // Keeps the UI running: a simulator run ends a little after its last hit reaches the
+        // app, and refuses settings until then.
+        let settle = |h: &mut egui_kittest::Harness<SensorApp>, secs: f32| {
+            let until = Instant::now() + Duration::from_secs_f32(secs);
+            while Instant::now() < until {
+                h.run_steps(1);
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        };
+        let shot = |h: &mut egui_kittest::Harness<SensorApp>, step: &str| {
+            h.run_steps(3);
+            if let Some(dir) = &shots_dir {
+                h.render().expect("render").save(dir.join(format!("live-{step}.png"))).unwrap();
+            }
+        };
+        let curtain = |app: &SensorApp| app.config.as_ref().and_then(|(_, s)| s.curtain());
+        let label = "A shot needs the IR curtain's confirmation";
+        let click_switch = |h: &mut egui_kittest::Harness<SensorApp>| {
+            h.get_by_label(label).scroll_to_me();
+            h.run_steps(3);
+            h.get_by_label(label).click();
+        };
+
+        // 5f-3: connect as the app does (the remembered sensor, auto-connect).
+        serial(&["sim stop", "sim dip off", "shots clear", "deadtime 30", "mic sim", "curtain window 50 90"]);
+        let n = name.clone();
+        wait(&mut h, 40.0, "the sensor advertising, paired", &|app: &SensorApp| {
+            app.sensors.iter().any(|s| s.name.contains(&n) && s.paired == Some(true))
+        });
+        {
+            let app = h.state_mut();
+            let id = app.sensors.iter().find(|s| s.name.contains(&name)).unwrap().id.clone();
+            app.remembered = Some(id);
+            app.auto_connect = true;
+            app.auto_retry_at = Instant::now();
+            app.settings_open = true;
+        }
+        wait(&mut h, 40.0, "connected, the settings read: the curtain on at 50-90 us", &|app: &SensorApp| {
+            curtain(app) == Some((50_000.0, 90_000.0)) && app.status.is_some()
+        });
+        shot(&mut h, "0-connected");
+        let read = h.state().config.as_ref().unwrap().1.clone();
+        assert_eq!(h.state().curtain_window, (50_000.0, 90_000.0), "the sensor's window remembered");
+
+        // The switch: off, then on again at the window last used.
+        click_switch(&mut h);
+        shot(&mut h, "1-switching");
+        assert!(h.state().curtain_pending.is_some());
+        wait(&mut h, 10.0, "the curtain off on the sensor", &|app: &SensorApp| {
+            curtain(app).is_none() && app.curtain_pending.is_none()
+        });
+        assert_eq!(h.state().config.as_ref().unwrap().1, read.with_curtain(None), "only the window changed");
+        shot(&mut h, "2-off");
+        click_switch(&mut h);
+        wait(&mut h, 10.0, "the curtain on again at 50-90 us", &|app: &SensorApp| {
+            curtain(app) == Some((50_000.0, 90_000.0)) && app.curtain_pending.is_none()
+        });
+        assert_eq!(h.state().config.as_ref().unwrap().1, read, "back to the settings as read");
+        assert!(h.state().message.is_none(), "{:?}", h.state().message);
+
+        // 5f-4: two holes (a dip, no sound), two shots; then, the curtain off by the switch, two
+        // shots each with a second one 2.5 ms later: MISSED while the first is still read out,
+        // else measured as a shot of its own (bench 2c), never lost.
+        let kinds = |app: &SensorApp, k: protocol::Kind| app.unscored.iter().filter(|(_, s)| s.kind == k).count();
+        serial(&["sim dip 60", "sim fault silent", "sim at 0 0 2"]);
+        wait(&mut h, 20.0, "2 holes, not scored", &|app: &SensorApp| kinds(app, protocol::Kind::Hole) == 2);
+        settle(&mut h, 1.5);
+        serial(&["sim fault none", "sim at 10 10 2"]);
+        wait(&mut h, 20.0, "2 shots scored", &|app: &SensorApp| app.series.len() == 2);
+        settle(&mut h, 1.5);
+        click_switch(&mut h);
+        wait(&mut h, 10.0, "the curtain off", &|app: &SensorApp| curtain(app).is_none() && app.curtain_pending.is_none());
+        serial(&["sim dip off", "deadtime 1", "sim fault double 2500", "sim at -20 30 3"]);
+        wait(&mut h, 20.0, "3 shots, their 3 second shots measured or missed", &|app: &SensorApp| {
+            app.series.len() + kinds(app, protocol::Kind::Missed) == 8
+        });
+        settle(&mut h, 2.0); // the last of them may still be on its way
+        let missed_n = kinds(h.state(), protocol::Kind::Missed);
+        let scored_n = h.state().series.len();
+        say(&format!("{scored_n} shots, {missed_n} missed"));
+        assert!(missed_n >= 1 && scored_n + missed_n == 8, "{scored_n} shots, {missed_n} missed");
+        serial(&["sim fault none", "deadtime 30"]);
+        h.state_mut().settings_open = false;
+        shot(&mut h, "3-hits");
+        let keys = |app: &SensorApp| {
+            let mut all: Vec<(Key, bool)> = app.series.iter().map(|(s, _)| (resolve::key(s), true)).collect();
+            all.extend(app.unscored.iter().map(|(_, s)| (resolve::key(s), false)));
+            all.sort();
+            all
+        };
+        say(&format!("hits: {:?}", keys(h.state())));
+
+        // 5f-5: resolve one of each by hand, as the shooter would.
+        let at = |app: &SensorApp, x: f32, y: f32| {
+            let r = app.card_rect;
+            r.min + app.card.to_card(x, y) * (r.width() / app.card.size_mm().x)
+        };
+        let click_at = |h: &mut egui_kittest::Harness<SensorApp>, p: egui::Pos2| {
+            h.hover_at(p);
+            h.run_steps(1);
+            h.drag_at(p);
+            h.run_steps(1);
+            h.drop_at(p);
+            h.run_steps(2);
+        };
+        // A row's label (two holes in one place share it: the window says which one opened).
+        let row = |app: &SensorApp, k: protocol::Kind| {
+            let (after, s) = app.unscored.iter().find(|(_, s)| s.kind == k).unwrap();
+            hit_name(s, *after)
+        };
+        let opened = |app: &SensorApp| app.resolving.as_ref().expect("the resolve window").key;
+        // A hole placed at (5, 5) mm.
+        let hole_row = row(h.state(), protocol::Kind::Hole);
+        h.get_all_by_label(&hole_row).next().unwrap().click();
+        h.run_steps(3);
+        let hole = opened(h.state());
+        h.get_by_label("Place it on the card…").click();
+        h.run_steps(3);
+        let p = at(h.state(), 5.0, 5.0);
+        click_at(&mut h, p);
+        shot(&mut h, "4-placed");
+        h.get_by_label("Confirm").click();
+        h.run_steps(3);
+        assert_eq!(h.state().manual.get(&hole), Some(&How::Placed));
+        // A missed shot counted a miss.
+        let missed_row = row(h.state(), protocol::Kind::Missed);
+        h.get_all_by_label(&missed_row).next().unwrap().click();
+        h.run_steps(3);
+        let missed = opened(h.state());
+        h.get_by_label("A miss (0)").click();
+        h.run_steps(3);
+        assert_eq!(h.state().manual.get(&missed), Some(&How::Miss));
+        // The other hole: the same hole as the first shot at (10, 10), picked on the card.
+        let hole2_row = row(h.state(), protocol::Kind::Hole);
+        let target = h.state().series.iter().find(|(s, _)| s.scored() && s.x_mm() > 5.0).map(|(s, _)| *s).unwrap();
+        h.get_all_by_label(&hole2_row).next().unwrap().click();
+        h.run_steps(3);
+        let hole2 = opened(h.state());
+        h.get_by_label("The same hole as another shot…").click();
+        h.run_steps(3);
+        let p = at(h.state(), target.x_mm(), target.y_mm());
+        click_at(&mut h, p);
+        shot(&mut h, "5-same");
+        h.get_by_label("Confirm").click();
+        h.run_steps(3);
+        assert_eq!(h.state().manual.get(&hole2), Some(&How::Same(resolve::key(&target))));
+        shot(&mut h, "6-resolved");
+        let before: Vec<(Key, Score)> = h.state().series.iter().map(|(s, sc)| (resolve::key(s), *sc)).collect();
+        let unscored_before: Vec<Key> = h.state().unscored.iter().map(|(_, s)| resolve::key(s)).collect();
+        assert_eq!((before.len(), unscored_before.len()), (scored_n + 3, missed_n - 1));
+        say(&format!("series {before:?}, not scored {unscored_before:?}"));
+
+        // The day's log: the three decisions as `manual` lines.
+        let day = logs.join(format!("{}.log", eventlog::utc_date()));
+        let text = std::fs::read_to_string(&day).unwrap_or_else(|e| panic!("{}: {e}", day.display()));
+        let manual: Vec<&str> = text.lines().filter(|l| l.starts_with("manual ")).collect();
+        for l in &manual {
+            say(l);
+        }
+        assert_eq!(manual.len(), 3);
+        assert!(manual[0].contains("kind=hole as=place x=5.0") || manual[0].contains("kind=hole as=place x=4.9"), "{}", manual[0]);
+        assert!(manual[1].contains("kind=missed as=miss"));
+        assert!(manual[2].contains("kind=hole as=same same="));
+
+        // A disconnect and a reconnect: the series stays as resolved, nothing comes twice.
+        h.state_mut().settings_open = true;
+        h.run_steps(3);
+        h.get_by_label("Disconnect").scroll_to_me();
+        h.run_steps(3);
+        h.get_by_label("Disconnect").click();
+        wait(&mut h, 10.0, "disconnected", &|app: &SensorApp| matches!(app.link, Link::Idle));
+        {
+            let app = h.state_mut();
+            app.auto_connect = true;
+            app.auto_retry_at = Instant::now();
+        }
+        wait(&mut h, 40.0, "reconnected, the settings read", &|app: &SensorApp| {
+            matches!(app.link, Link::Connected { .. }) && app.config.is_some()
+        });
+        settle(&mut h, 4.0); // time for any hit sent again (it would come twice)
+        let after: Vec<(Key, Score)> = h.state().series.iter().map(|(s, sc)| (resolve::key(s), *sc)).collect();
+        let unscored_after: Vec<Key> = h.state().unscored.iter().map(|(_, s)| resolve::key(s)).collect();
+        assert_eq!(after, before, "the series after the reconnect");
+        assert_eq!(unscored_after, unscored_before);
+        say("the series and the hit not scored kept across the reconnect");
+        shot(&mut h, "7-reconnected");
+
+        // Leave the sensor as found: the curtain off (already), the simulator's pin released.
+        serial(&["sim dip off", "curtain"]);
+        h.state_mut().cmd.send(Command::Disconnect).ok();
+        h.run_steps(5);
+    }
+
+    /// The curtain switch (app TODO) in the settings window, against a sensor played by the
+    /// test: off writes the settings as read with the window 0, 0; the switch waits for the
+    /// sensor's new settings; on writes the window last used; a write the sensor drops times
+    /// out with a message. `UI_SHOTS=<dir>` saves an image of each step.
+    #[test]
+    fn curtain_switch() {
+        let logs = std::env::temp_dir().join(format!("opensights-ui-curtain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&logs);
+        let log_dir = logs.clone();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ev_tx, ev_rx) = mpsc::channel();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 1400.0))
+            .build_eframe(move |cc| {
+                install_fonts(&cc.egui_ctx); // as main() does: the connected dot is in them
+                let mut app = SensorApp::with_link(cc, (cmd_tx, ev_rx));
+                app.event_log = Some(EventLog::new(log_dir));
+                app.settings_open = true;
+                app
+            });
+        let shots_dir = std::env::var_os("UI_SHOTS").map(std::path::PathBuf::from);
+        let step = |h: &mut egui_kittest::Harness<SensorApp>, name: &str| {
+            h.run_steps(4);
+            if let Some(dir) = &shots_dir {
+                h.render().expect("render").save(dir.join(format!("curtain-{name}.png"))).unwrap();
+            }
+        };
+        let example = protocol::tests::example;
+        let read = protocol::decode_settings(&example(protocol::tests::SETTINGS_HEX)).unwrap();
+        // Read from the sensor with the gate on at 50–90 µs (the app remembers that window).
+        let set = read.with_curtain(Some((50_000.0, 90_000.0)));
+        let cal = protocol::decode_calibration(&example(protocol::tests::CALIBRATION_HEX)).unwrap();
+        let status = protocol::decode_status(&example(protocol::tests::STATUS_HEX)).unwrap();
+        ev_tx
+            .send(Event::Connected {
+                id: "test".into(),
+                name: "Test".into(),
+                heartbeat: None,
+                pin_supported: true,
+                shots_supported: true,
+            })
+            .unwrap();
+        ev_tx.send(Event::Status(status)).unwrap();
+        ev_tx.send(Event::Config(cal.clone(), set.clone())).unwrap();
+        step(&mut h, "0-on");
+        let label = "A shot needs the IR curtain's confirmation";
+        assert_eq!(h.state().curtain_window, (50_000.0, 90_000.0));
+        let written = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>| {
+            let mut out = None;
+            while let Ok(c) = rx.try_recv() {
+                if let Command::WriteSettings(s) = c {
+                    assert!(out.is_none(), "written twice");
+                    out = Some(*s);
+                }
+            }
+            out
+        };
+        assert!(written(&mut cmd_rx).is_none());
+
+        // Off: the settings as read, the window 0, 0; waiting, the switch shows the sensor's.
+        let click = |h: &mut egui_kittest::Harness<SensorApp>| {
+            h.get_by_label(label).scroll_to_me();
+            h.run_steps(3);
+            h.get_by_label(label).click();
+        };
+        click(&mut h);
+        step(&mut h, "1-switching");
+        let off = written(&mut cmd_rx).expect("written");
+        assert_eq!(off, set.with_curtain(None));
+        assert!(h.state().curtain_pending.is_some_and(|(on, _)| !on));
+        click(&mut h); // disabled while waiting: nothing written
+        step(&mut h, "1b-still");
+        assert!(written(&mut cmd_rx).is_none());
+
+        // The sensor takes it: its settings come back off.
+        ev_tx.send(Event::Config(cal.clone(), off.clone())).unwrap();
+        step(&mut h, "2-off");
+        assert!(h.state().curtain_pending.is_none());
+        assert_eq!(h.state().curtain_window, (50_000.0, 90_000.0));
+
+        // On again: the last window, nothing else changed.
+        click(&mut h);
+        step(&mut h, "3-on");
+        assert_eq!(written(&mut cmd_rx).expect("written"), set);
+
+        // The sensor drops that write: the switch gives up after CURTAIN_WAIT, says so.
+        h.state_mut().curtain_pending = Some((true, Instant::now() - CURTAIN_WAIT - Duration::from_millis(1)));
+        step(&mut h, "4-dropped");
+        assert!(h.state().curtain_pending.is_none());
+        let msg = h.state().message.clone().unwrap_or_default();
+        assert!(msg.contains("didn't take the change") && msg.contains("still off"), "{msg}");
+        let _ = std::fs::remove_dir_all(&logs);
+    }
 
     /// The resolve window driven as a user would: a hole placed on the card (a click, a
     /// drag of the placed shot, the arrow keys, Confirm), the missed shot counted a miss,

@@ -40,12 +40,18 @@ async fn find_sensor(adapter: &btleplug::platform::Adapter) -> Result<Peripheral
         })
         .await
         .map_err(|e| e.to_string())?;
+    // `PROBE_NAME=<text>`: only a sensor whose name contains it.
+    let name = std::env::var("PROBE_NAME").ok();
     let until = Instant::now() + Duration::from_secs(30);
     while Instant::now() < until {
         for p in adapter.peripherals().await.map_err(|e| e.to_string())? {
+            // An RSSI means it is advertising now: BlueZ also lists bonded sensors it knows
+            // from before, out of range.
             if let Ok(Some(props)) = p.properties().await
+                && props.rssi.is_some()
                 && (props.services.contains(&proto::SERVICE_UUID)
                     || proto::decode_adv(&props.manufacturer_data).is_some())
+                && name.as_deref().is_none_or(|n| props.local_name.as_deref().is_some_and(|l| l.contains(n)))
             {
                 println!(
                     "probe: found {:?} ({}), adv {:?}",

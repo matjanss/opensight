@@ -43,6 +43,9 @@ pub enum Command {
     Control(Vec<u8>),
     /// Writes the calibration record (the wizard's fit); the sensor confirms it in Status.
     WriteCalibration(Box<proto::Calibration>),
+    /// Writes the settings (whole; the sensor checks them and drops them if out of range,
+    /// with no error here). Taken, a new cfg ID in Status brings them back as `Config`.
+    WriteSettings(Box<proto::Settings>),
 }
 
 #[derive(Clone, Debug)]
@@ -334,6 +337,12 @@ async fn run(mut commands: UnboundedReceiver<Command>, events: &EventSink) -> Re
                     if let Some(c) = &conn
                         && let Err(e) = c.peripheral.write(&c.calibration, &proto::encode_calibration(&cal), WriteType::WithResponse).await {
                             events.send(Event::Error(format!("Could not write the calibration: {e}")));
+                        }
+                }
+                Some(Command::WriteSettings(set)) => {
+                    if let Some(c) = &conn
+                        && let Err(e) = c.peripheral.write(&c.settings, &proto::encode_settings(&set), WriteType::WithResponse).await {
+                            events.send(Event::Error(format!("Could not write the sensor's settings: {e}")));
                         }
                 }
                 Some(Command::SetPin(pin)) => {

@@ -6,14 +6,6 @@ status and settings are in (step 5c).
 
 ## Protocol v3 (step 5c leftovers)
 
-- **Unscored hits by hand: the check with a sensor.** Resolving by hand is in (merged to
-  `main` 2026-11-26), passing its unit tests, the headless UI test (`resolve_hits_by_hand`)
-  and the user's look at the demo. Still to run, when the NodeMCU is on USB again: real holes and missed shots
-  over BLE. Curtain on (`curtain on`) with `sim dip 60`, then `sim fault silent` (expect a
-  hole per shot, "not scored") and `sim fault double` (expect a MISSED hit); resolve one of
-  each in the app, check the `manual` lines in the day's log, then disconnect and reconnect:
-  the series stays as resolved (the decisions live in memory with the series, so an app
-  restart loses both).
 - **Unscored hits: resolved at the end of the series, with the card photo.** Now each hit
   is resolved on its own, whenever the shooter clicks it. A better workflow (the user,
   2026-11-26; think it through before building) does it once, at the end of the series,
@@ -29,16 +21,8 @@ status and settings are in (step 5c).
   keep both?), several unscored hits against several unclaimed holes (which goes where),
   and whether the series counts as finished only once every hit is resolved.
 - **Settings editor.** The sensor's settings (span, dead time, validity limits, the curtain's
-  window) are shown read-only; the protocol can write them (Settings).
-- **The IR curtain on or off, in the settings.** A switch for whether a shot needs the
-  curtain's confirmation (PLAN D9, step 4b). The first tests run without the curtain, to
-  find out whether the acoustic checks alone tell real shots from other sounds. The firmware
-  already supports it over BLE, with no change needed: Settings with the curtain's window at
-  0, 0 switch the gate off (and the emitter, IR_EN), a window (45–100 µs by default) switches
-  it on, and the setting is kept in NVS. The gate is off by default. The app writes Settings
-  whole, so the switch keeps the other values as read, and remembers the last window to turn
-  it back on. Do this first, ahead of the rest of the settings editor. (Asked for
-  2026-11-24.)
+  window) are shown read-only, but for the curtain's switch (MEASUREMENT 5f); the protocol
+  can write them all (Settings, `Command::WriteSettings`).
 - **Calibration templates.** The wizard has the 4 × 4 grid built in
   (`assets/templates/grid-4x4.json`); choosing another template file, and the sparks per
   point, in the window.

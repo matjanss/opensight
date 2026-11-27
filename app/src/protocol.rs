@@ -444,6 +444,24 @@ pub struct Settings {
     pub deadtime_ms: u16,
 }
 
+impl Settings {
+    /// The curtain's window (low, high ns), or None when its gate is off (0, 0).
+    pub fn curtain(&self) -> Option<(f32, f32)> {
+        (self.curtain_hi_ns > 0.0).then_some((self.curtain_lo_ns, self.curtain_hi_ns))
+    }
+
+    /// These settings with only the curtain's window changed: None switches its gate off
+    /// (and the sensor's emitter, IR_EN). Settings are written whole, so the rest stays as read.
+    pub fn with_curtain(&self, window: Option<(f32, f32)>) -> Settings {
+        let (lo, hi) = window.unwrap_or((0.0, 0.0));
+        Settings {
+            curtain_lo_ns: lo,
+            curtain_hi_ns: hi,
+            ..self.clone()
+        }
+    }
+}
+
 pub const SETTINGS_LEN: usize = 36;
 
 pub fn decode_settings(bytes: &[u8]) -> Option<Settings> {
@@ -775,6 +793,22 @@ pub(crate) mod tests {
         let mut other = hex(SETTINGS_HEX);
         other[0] = 2;
         assert_eq!(decode_settings(&other), None);
+    }
+
+    /// The curtain switched off and on again: bytes 20–27 change, nothing else.
+    #[test]
+    fn curtain_switch_changes_only_the_window() {
+        let s = decode_settings(&hex(SETTINGS_HEX)).unwrap();
+        assert_eq!(s.curtain(), Some((45000.0, 100_000.0)));
+        let off = s.with_curtain(None);
+        assert_eq!(off.curtain(), None);
+        let (a, b) = (encode_settings(&s), encode_settings(&off));
+        let changed: Vec<usize> = (0..SETTINGS_LEN).filter(|&i| a[i] != b[i]).collect();
+        assert!(changed.iter().all(|i| (20..28).contains(i)), "{changed:?}");
+        assert_eq!(&b[20..28], &[0; 8]);
+        let on = off.with_curtain(Some((50000.0, 90000.0)));
+        assert_eq!(on.curtain(), Some((50000.0, 90000.0)));
+        assert_eq!(on.with_curtain(s.curtain()), s);
     }
 
     #[test]

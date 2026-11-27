@@ -432,7 +432,7 @@ impl CountTask {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .add(egui::Button::new("✕").frame(false))
+                            .add(egui::Button::new("×").frame(false))
                             .on_hover_text("Remove this card (the photo file stays)")
                             .clicked()
                         {
@@ -552,7 +552,7 @@ impl CountTask {
             State::Failed(e) => {
                 ui.add(egui::Label::new(format!("Not counted: {e}.")).wrap());
                 ui.add(
-                    egui::Label::new(RichText::new("Remove it with ✕ and take the photo again.").weak())
+                    egui::Label::new(RichText::new("Remove it with × and take the photo again.").weak())
                         .wrap(),
                 );
             }

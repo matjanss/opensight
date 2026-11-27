@@ -89,7 +89,7 @@ so a problem shows up in the step that caused it.
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
 | 3 | Solver and calibration | **simulated tests pass** (bare NodeMCU, 2026-11-22; merged to `main`): 3a-1, 3a-2, 3a-5, 3b (PC), 3c, 3d, 3e. Waiting for the parts: 3a-3 and 3a-4 (DS18B20, BME280). With the boards: the same solver and calibration on real sensors (PLAN phase 1) |
 | 4 | Validity checks | 4a (the verdict) passes its simulated bench tests on a bare NodeMCU (2026-11-22). 4b (the curtain) passes its simulated bench tests on a bare NodeMCU (2026-11-22, run by Claude). 4c (loudness, sharpness) planned |
-| 5 | Protocol and app | 5a (protocol v3), 5b (firmware) and 5c (app) built; their bench test passes over BLE from the PC (2026-11-23, run by Claude, merged to `main`). 5d (the calibration wizard, the Rust fit, the field check) passes its bench test over BLE (2026-11-23, run by Claude, merged to `main`). 5e (the shot store in flash) passes 5e-1 to 5e-7 (2026-11-24, run by Claude, merged to `main`); 5e-8 (a real power cut) is the user's |
+| 5 | Protocol and app | 5a (protocol v3), 5b (firmware) and 5c (app) built; their bench test passes over BLE from the PC (2026-11-23, run by Claude, merged to `main`). 5d (the calibration wizard, the Rust fit, the field check) passes its bench test over BLE (2026-11-23, run by Claude, merged to `main`). 5e (the shot store in flash) passes 5e-1 to 5e-7 (2026-11-24, run by Claude, merged to `main`); 5e-8 (a real power cut) is the user's. 5f (the app's curtain switch, and unscored hits against a real sensor) passes 5f-1 to 5f-5 (2026-11-27, run by Claude, merged to `main`) |
 | 6 | Wi-Fi and MQTT | planned |
 | 7 | The real boards (PLAN phase 1) | tests written and the analysis tool (`tools/bench.py`) passing its self-test (2026-11-24); 7-0 (h 5.5 mm, simulated) passes; 7-1 to 7-7 wait for the boards |
 
@@ -1435,6 +1435,53 @@ Bench test (bare NodeMCU over serial and the probe over BLE, run by Claude):
    write takes 0.6–3 ms of every 150 ms), 1 at most; then `shots` and the app connected:
    every boot's hits in order, a gap in seq only where a boot line reported a torn record.
 
+#### 5f. The curtain switch, and unscored hits against a real sensor
+
+The app's TODO: the first tests run without the curtain, so the app gets a switch for it;
+and resolving holes and missed shots by hand (merged 2026-11-26) still needed a run against
+a sensor. Branch `app-curtain-switch`. No firmware or protocol change: Settings with the
+window 0, 0 switch the gate and IR_EN off (PROTOCOL.md "Settings").
+
+Built (app):
+
+- `Command::WriteSettings` (`ble.rs`); `Settings::curtain()` and `with_curtain()`
+  (`protocol.rs`): the settings as last read, only bytes 20–27 changed.
+- In "Measurement": "A shot needs the IR curtain's confirmation". Off writes 0, 0; on writes
+  the window last used (the sensor's own when it was on, kept in the app's storage; 45–100
+  µs if none). It shows the sensor's state, with "Switching…", until the new settings come
+  back; the sensor drops a write it can't take without an error, so after 5 s it says "The
+  sensor didn't take the change". Disabled while calibrating.
+- Found by the UI test: the bundled fonts have no "●", "◌" or "✕", so the status bar's
+  connected and connecting dots and the notices' and counted cards' close buttons were
+  empty boxes. The dot is now painted; the buttons use "×".
+- The probe: only a sensor advertising now (BlueZ also lists bonded ones out of range), and
+  `PROBE_NAME=<text>`.
+- `live_sensor` (ignored test in `main.rs`): the app with its own BLE thread, driven
+  headless (egui_kittest), against a sensor running the simulator; its serial commands go
+  to a session's FIFO.
+
+Bench test (a bare NodeMCU over serial, the app over BLE, run by Claude):
+
+1. **5f-1, PC:** `cargo test` (the unit test `curtain_switch_changes_only_the_window`, the UI
+   test `curtain_switch` against a sensor played by the test), clippy clean.
+2. **5f-2, pairing a new board:** serial `pairing`; `bluetoothctl` pairs with the passkey
+   000000 (the default PIN on a fresh NVS); the probe connects, the cfg ID from the reads
+   matches Status.
+3. **5f-3, the switch:** `curtain window 50 90` on serial; the app connects (the remembered
+   sensor) and reads the curtain on at 50–90 µs. Off: the serial log shows `BLE: settings
+   from the app` and the `cfg` line with `ir=-`; the app's settings equal those read but for
+   0, 0 in the window. On: `ir=50000,90000` again, the settings equal those read (the window
+   remembered from the sensor, not the default 45–100). No message.
+4. **5f-4, hits not scored:** `sim dip 60`, `sim fault silent`, `sim at 0 0 2`: 2 holes in
+   the app. `sim fault none`, `sim at 10 10 2`: 2 shots. The switch off; `sim dip off`,
+   `deadtime 1`, `sim fault double 2500`, `sim at -20 30 2`: 2 shots and 2 missed hits (the
+   second shot 2.5 ms later, while the first is read out; bench 2c).
+5. **5f-5, resolved by hand:** a hole placed at (5, 5) mm (a click on the card, Confirm); a
+   missed hit a miss; the other hole the same hole as the shot at (10, 10) (picked on the
+   card). The series: 7 shots, 1 missed hit not scored. The day's log: 3 `manual` lines
+   (`as=place x=5.0`, `as=miss`, `as=same`). Disconnect, reconnect: the same series and
+   scores, the same hit not scored, nothing twice.
+
 ### 6. Wi-Fi and MQTT
 
 FUTURE_ARCHITECTURE.md step 2. Check the GPIO 36/39 erratum here (see Risks).
@@ -1585,6 +1632,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-27 | 5f | The curtain switch and unscored hits, branch `app-curtain-switch`. A new NodeMCU (ESP32-D0WD-V3, MAC 70:4b:ca:8f:0c:cc, "OpenSights-487", fresh NVS) on `/dev/ttyUSB0`, flashed by the user; run by Claude: serial `logs/serial-261127-B.log`, the probe `logs/probe-261127-5f-0.*`, the live test `logs/live-261127-5f-run1.out`, `-run2.out` with the app's event logs in `logs/app-261127-5f-run1/` and `app-261127-5f/` | **Pass.** 5f-1: `cargo test` (the app 55, 3 ignored), clippy clean; the UI test found the bundled fonts lack "●", "◌" and "✕" (the status dots and close buttons drew as empty boxes): the dot is painted now, the buttons use "×". 5f-2: paired by `bluetoothctl` with the passkey 000000; the probe connected (cfg ID F5B887F6 from the reads and in Status: match) once it skipped BlueZ's cached, out-of-range "sensor123" (it now takes only a sensor advertising). 5f-3: the app connected in 1.2–1.5 s and read the curtain on at 50–90 µs; off and on again each took under 0.5 s; serial `BLE: settings from the app` and `ir=-`, then `ir=50000,90000` (the window remembered from the sensor); the settings equal those read but for the window; no message. 5f-4: 2 holes, 2 shots; then with the curtain off, 3 double shots: 7 shots and 1 missed hit in both runs (each second shot is MISSED only while the first is still read out, else measured on its own; the first try's 6 and 2 differ only in that, none lost). 5f-5: a hole placed at (5.00, 5.00) (10.1), the missed hit a miss, the other hole the same hole as the shot at (10.01, 10.00) (9.2); 3 `manual` lines; disconnected and reconnected: the same 10 shots and scores, nothing twice. **Found on the way:** (1) the clone CP2102 on this board floods the port with replayed data (about 0.5 MB/s at any baud) when opened with DTR and RTS asserted (pyserial's default): open it with both released. (2) The live test first sent settings while a simulator run was ending, which it refuses ("settings can't change while it runs"): the test now waits 1.5 s after a run's hits. (3) With `sim fault silent` the dips come 7.2 µs late and 27.1 µs long instead of 35 (the simulator's known first-step stall, 4b; its own check passes). The air-sensor search prints two I2C errors at boot with nothing on J5. |
 | 2026-11-24 | 5e | The shot store. PC: `pio test -e native` (31 cases). Bare NodeMCU flashed with the new table (logs `logs/upload-261124-*-5e.log`), run by Claude over serial (`logs/device-monitor-261124-131158-5e-a.log`, `-131401-5e-b.log`, `-5e-c.log`, `-5e-6.log`, `-5e-6b.log`, `-5e-7.log`, `-5e-7b.log`) and over BLE with the probe (`logs/probe-261124-5e-*.out`) | **PASS, 5e-1 to 5e-7.** 5e-1: `test_store` 8 of 8 (five laps of an 8-sector ring, 449 held at the end against 385 guaranteed; a write cut at each of its 64 bytes: nothing earlier lost, the torn hit absent; a cut erase). 5e-2: boot `capacity 1921`; the NVS kept (`mic` as before), and the store kept through the next reflash too (uploads don't touch `shots`). 5e-3: 30 hits, `reboot` (added for this: a clean restart): `30 hits held from 1 boot(s), 0 torn`, read in 42 ms; 10 more, reboot: 40 from 2 boots. 5e-4: the probe from (0, 0): boot 074B3DEF seq 1–30 then 651E3407 1–10, in order. **On that first connection after the reflash every hit came twice in a row** (80 for 40); the next connections with the same firmware: never (20, 0, 40, 1938, 1954 shots, none twice). The new build's "services changed" with BlueZ (bench 5) is the likely cause; the app drops duplicates by (boot, seq), so no score changes. `PROBE_FROM=074B3DEF:21`: seq 21–30 then the second boot's 1–10; `PROBE_FROM=651E3407:11`: none. 5e-5: `PROBE_CLEAR=1` after the 40: cleared up to H 40 (both boots), kept through a reboot; the probe then got 0. 5e-6: `sim random 2000` is the simulator's limit (its first try refused 2100), so two runs of 1100: both PASS (1100 of 1100 ok, sent, 0 missed, 0 late starts, 0.0125 / 0.0124 mm rms), the ring wrapped: 1921 held (H 320–2240), one erase done at a quiet moment (2 s); the slowest write 3.3 ms (typically 0.6), the slowest erase 29 ms; `stat`: interrupt 8.4 %, longest 22.4 µs (as before), 2200 events, 0 possibly missed. Found on the way: the quiet erase also waited for "no hit waiting to be sent", which never comes with no app connected: removed (an erase only delays the next indication). 5e-7, first try: reopening the port right after closing it didn't reset the board (the hits all stayed one boot: the store's "1 boot" was right); then with EN pulsed through RTS: 5 resets, each boot one boot more, 0 torn, the ring read in 98–100 ms; the probe got 1954 hits: the long run's boot seq 984–2601, then the five reset boots 1–85, 1–75, 1–27, 1–74, 1–75, 0 gaps, 336 in all = the 336 events logged before the resets. |
 | 2026-11-24 | 7-0b | The top-right mic moved out 25 mm along its diagonal, to (122.68, 122.68) (PLAN D1's update). PC: `model.py` (vectors made again), `pio test -e native`, the app's `cargo test`, `layout_study.py --drop` (log `logs/layout-study-261124-o25.txt`). Bare NodeMCU, run by Claude over serial: `mic default`, `mic sim`, `sim random 160`, `sim fault late 5`, `sim random 60`; log `logs/device-monitor-261124-125746-o25.log` | **PASS.** Native tests 23 of 23; the blast check: the four corners alone score 0 (smallest residual 6871 ns, the study's 6.9 µs), all six 0 (50.9 µs), any one dropped 0 (31.5–46.0 µs). The app's tests 68 pass (1 ignored, the phone), the Rust solver against the new vectors. The study: O25 (4 corners) 0 of 624 blasts, 6.88 µs; O25+B (5) 0, 31.6 µs, a late channel found 555 of 555 and then 0 blasts (S40+B: 553 of 555); O25+BR (6, the layout now) 0, 51.1 µs (S40+BR: 34.5 µs), a late channel found 666 of 666, then 0 blasts. On the board: `mic default` and `mic sim` put CH3 (the simulator's CH5) at (122.68, 122.68), and the board's blast check finds none, with every mic or any one dropped (1049 ms). `sim random 160`: 160 of 160 ok, 0.0123 mm rms, worst 0.028. The moved mic 24 µs late (`sim fault late 5`): dropped in 60 of 60, every shot ok, 0.0145 mm rms. Note: the board's boot text has ROM bytes in it, so `grep` takes the log for binary; use `grep -a`. |
 | 2026-11-24 | 7-0 | Bare NodeMCU, h 5.5 mm (the new default), run by Claude over serial: `mic default`, `mic sim`, `sim at 20 -30 100`, `sim random 160`; log `logs/device-monitor-261124-124225-h55.log`, upload `logs/upload-261124-*.log` (the first try: "Failed to start stub flasher", the second flashed); then `tools/bench.py` on that log, and `bench.py --selftest` | **PASS.** Every mic at h 5.50 mm after `mic default` and `mic sim`. `sim at`: 100 of 100 ok; `sim random 160`: 160 of 160 ok, error 0.0130 mm rms, worst 0.0276, none dropped. `bench.py verify --drop`: 0.013 mm rms, worst 0.028 (the simulator's own figures); without CH7 or CH8 (the middle mics) 0.014, without a corner 0.016–0.020. `bench.py repeat` (the 100 `sim at` shots): runs, but its predicted scatter is half the measured (0.007 against 0.014 mm): at one fixed point the simulator's only error is the sampling, nearly the same every shot (some channels' t0 differences vary by 3 ns), not the independent noise the method assumes; real analog noise is. `bench.py kcheck` on the simulator: k 0.305–0.361 (true 1/3 on all) with t2 − t1 spanning only 0.1–1.6 µs. This found two faults in the tool, both fixed: (1) the edges' sampling error is in t1 and in t2 − t1 alike and pulls the slope low (by σq²(2k + 1)/var(t2 − t1)): now corrected, the mean k 0.334; (2) over so short a range the boards' comparison misfires (a synthetic check: χ² up to 31 for equal boards, on the 25 ns grid or not; 4–7 over 1–10 µs): now no verdict under 1 µs (1σ). Self-test: 7 checks PASS (noise per channel within 6 %, a 24 µs late trip found, k within 0.0024, a curved channel found, equal boards agreeing in 5 of 5, no verdict on a short range in 5 of 5, the swap's k and offset recovered and its error 0.170 → 0.015 mm). |

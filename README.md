@@ -30,6 +30,10 @@ rust-analyzer picks up `app/`.
 - The app can save every event the sensor captured (also the rejected ones) to a log file,
   one per day, in the same format as the sensor's serial log (Settings → Measurement; on by
   default). Settings also show the sensor's calibration, settings and air readings.
+- Settings → Measurement → **A shot needs the IR curtain's confirmation** switches the light
+  curtain's check on the sensor on or off. Off, the sound alone decides what counts as a
+  shot (the curtain's lights are off too, and no shots through an existing hole are
+  reported). On again, it uses the window last set (45–100 µs if none was).
 - Calibrate from the app: Settings → Measurement → **Calibrate…** walks through the spark
   points of the calibration template (16 points, 10 sparks each), fits the microphones'
   positions and timing, shows the result, and writes it to the sensor. **Field check…** makes
