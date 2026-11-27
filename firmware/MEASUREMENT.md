@@ -88,7 +88,7 @@ so a problem shows up in the step that caused it.
 | 1 | Capture and raw dump | done on the v0.2 map; on the v0.3 map: retest 3 (self-test) and 14 (pin map) |
 | 2 | Arrival times | simulated tests 2a-2d pass (2d without a sensor); real-board tests wait for the boards |
 | 3 | Solver and calibration | **simulated tests pass** (bare NodeMCU, 2026-11-22; merged to `main`): 3a-1, 3a-2, 3a-5, 3b (PC), 3c, 3d, 3e. Waiting for the parts: 3a-3 and 3a-4 (DS18B20, BME280). With the boards: the same solver and calibration on real sensors (PLAN phase 1) |
-| 4 | Validity checks | 4a (the verdict) passes its simulated bench tests on a bare NodeMCU (2026-11-22). 4b (the curtain) passes its simulated bench tests on a bare NodeMCU (2026-11-22, run by Claude). 4c (loudness, sharpness) planned |
+| 4 | Validity checks | 4a (the verdict) passes its simulated bench tests on a bare NodeMCU (2026-11-22). 4b (the curtain) passes its simulated bench tests on a bare NodeMCU (2026-11-22, run by Claude). 4c (loudness, sharpness) planned. 4d (a moderately off mic: Huber weights or an earlier drop-one) studied, synthetic and on the board's path (2026-11-27, run by Claude): drop-one started by sigma wins; the firmware change waits for the user |
 | 5 | Protocol and app | 5a (protocol v3), 5b (firmware) and 5c (app) built; their bench test passes over BLE from the PC (2026-11-23, run by Claude, merged to `main`). 5d (the calibration wizard, the Rust fit, the field check) passes its bench test over BLE (2026-11-23, run by Claude, merged to `main`). 5e (the shot store in flash) passes 5e-1 to 5e-7 (2026-11-24, run by Claude, merged to `main`); 5e-8 (a real power cut) is the user's. 5f (the app's curtain switch, and unscored hits against a real sensor) passes 5f-1 to 5f-5 (2026-11-27, run by Claude, merged to `main`) |
 | 6 | Wi-Fi and MQTT | planned |
 | 7 | The real boards (PLAN phase 1) | tests written and the analysis tool (`tools/bench.py`) passing its self-test (2026-11-24); 7-0 (h 5.5 mm, simulated) passes; 7-1 to 7-7 wait for the boards |
@@ -630,6 +630,8 @@ are there:
   the curtain's bench test (PLAN phase 1.6).
 - **4c, loudness and sharpness:** the nearest mic must be the loudest (shortest t2 − t1)
   and the edges sharp. Tuned from real pulses (PLAN phase 1–2); nothing to simulate yet.
+- **4d, a moderately off mic** (a study, 2026-11-27; nothing in the firmware yet): Huber
+  weights against drop-one started from the mics' sigmas. See 4d below.
 - **Then, on the range** (PLAN phase 2): no false shots from blasts or electrical
   spikes, and real shots accepted. Every event is logged with its verdict, so the limits
   are tuned by replaying range logs (`tools/replay --lost/--area/--together/--pulse/--curtain`).
@@ -1230,6 +1232,103 @@ mic default
 truth` lines of 4b-2 (both runs), the `stat` lines of 4b-6 and the replay's three
 summaries. For any FAIL, send the log too.
 
+#### 4d. A moderately off mic: Huber weights or an earlier drop-one (a study)
+
+The app's TODO ("The solver: Huber weights and mic health", 2026-11-26): a mic 0.5–3 µs off
+(a drifted threshold, a blocked port, a moved mic) keeps the rms residual under the 1500 ns
+limit, so drop-one never starts, yet it moves the hit by tenths of a mm. The TODO proposed
+Huber weights in the solver, then one refit without a far-out mic. This step is its first
+item: try it offline before anything goes into the firmware. Branch `huber-study`.
+
+Built (tools only; `lib/measure`, MODEL.md and the firmware unchanged):
+
+- `tools/huber.h`: on top of `solve`/`solveDropOne`, unchanged. Huber by reweighting (each
+  round mic i's sigma becomes sigma_i / sqrt(w_i), w_i = min(1, c sigma_i / |r_i|)), the
+  TODO's two steps (`solveHuber`), and two others to compare: `solveDropSigma`, today's
+  drop-one started when the rms is over a trigger times the rms the sigmas give
+  (sigma sqrt((m − 3) / m) for m mics; with a guard option), and `solveHuberSearch`, Huber
+  with the drop-one search when a mic is far out.
+- `tools/huber_study.cpp`: synthetic shots uniform over ±100 mm, the D1/D2 mics (h 5.5 mm),
+  Gaussian noise per mic, 0–2 mics with a bias (a random mic and sign per shot); every
+  method judged as the firmware judges (unweighted rms within 1500 ns, at most one lost,
+  inside the area). `--n --c --drop --trigger --seed --only`. Built in CI.
+- `tools/replay --alt dropS|dropSg|huber|huberS[:p]`: every event solved that way too, its
+  error against the true points and its drops per channel beside the firmware's (for the
+  real logs of 7-3 and 7-4).
+
+The study (5,000 shots per case, seed 1; noise 50 ns unless said; error rms against the
+truth, mm; today = the firmware, `drop`):
+
+| Case | today | Huber | the TODO's 2 steps | dropS ×3 | dropS ×5 | Huber + search |
+|---|---|---|---|---|---|---|
+| 6 mics healthy (50 / 150 / 300 ns) | 0.016 / 0.047 / 0.096 | the same | the same | the same | the same | the same |
+| 1 mic 0.5 µs off | 0.067 | 0.050 | 0.046 | 0.048 | 0.064 | 0.049 |
+| 1 mic 1 µs off | 0.131 | 0.084 | 0.073 | **0.042** | 0.065 | 0.049 |
+| 1 mic 2 µs off | 0.258 | 0.153 | 0.150 | **0.030** | 0.042 | 0.030 |
+| 1 mic 3 µs off | 0.385 | 0.222 | 0.221 | **0.028** | 0.028 | 0.028 |
+| 1 mic 10 µs off | 0.484 | 0.764 | 0.764 | **0.020** | 0.020 | 0.020 |
+| 1 mic 24 µs off | 0.021 | 1.911 | 1.911 | 0.021 | 0.021 | 0.021 |
+| 1 mic 3 µs off, noise 150 ns | 0.386 | 0.240 | 0.209 | **0.123** | 0.192 | 0.140 |
+| 2 mics 1 µs off | 0.183 | 0.187 | 0.187 | 0.267 | 0.267 | 0.239 |
+| 2 mics 10 µs off | 2.620 (34 % sent) | 1.874 | 1.874 | 2.618 (34 %) | 2.618 | 2.367 |
+| 5 mics, 1 mic 1 µs off | 0.155 | 0.129 | 0.126 | **0.087** | 0.097 | 0.092 |
+| 4 mics, 1 mic 1 µs off | 0.186 | 0.196 | 0.196 | 0.186 | 0.186 | 0.196 |
+| 6 healthy, fit sigma 3× too low | 0.047 | 0.050 | 0.057 (25 % wrong drops) | 0.064 (39 %) | 0.050 (3.9 %) | 0.058 (21 %) |
+| 6 healthy, fit sigma 3× too high | 0.016 | the same | the same | the same | the same | the same |
+
+What it shows:
+
+- **Huber alone** helps a little at 0.5–3 µs (−30 to −45 % rms) but not the worst shots
+  (the 95th percentile at 1 µs: 0.195 mm with the two steps, today 0.196), and it is far worse than today
+  against a big fault (1.9 mm at 24 µs, today 0.021): it caps a bad mic's pull, it doesn't
+  remove it.
+- **The TODO's two steps** fail at big faults: the fit spreads one large error so that two
+  mics look far out in about 20 % of shots, and "two far out: drop nothing" then keeps the
+  bad mic. Its residual limit over the weighted residuals (as the TODO proposed) also
+  passed 99 % of shots with two mics 10 µs off, 1.9 mm wrong, where today's unweighted
+  limit rejects two thirds: the weighted limit is unsafe. (The table above judges every
+  method by the unweighted limit.)
+- **Drop-one started by the sigmas (dropS)** is the change that helps: the same search the
+  firmware has, started when the rms is over 3 (or 5) times the rms healthy mics give
+  instead of over 1500 ns. With the sigmas right, healthy shots are never touched (0 drops in
+  15,000), and from 1 µs at 50 ns noise the bad mic is dropped in 97–100 % of shots, the
+  wrong one in 0–1.1 %. Huber + search is within a few hundredths of a mm of it: a little
+  better where the bias is under the trigger (1 µs at 150 ns noise: 0.120 against 0.130;
+  sigma 3× too high: 0.098 against 0.116), a little worse elsewhere (3 µs at 150 ns: 0.140
+  against 0.123), for about ten times the solver's work on a big fault (about 395 LM
+  iterations a shot against about 28 for the drop-one search).
+- **Its price:** it relies on the sigmas. With the fit's sigma 3× too low, trigger 3 drops a
+  healthy mic in 39 % of shots (error 0.047 → 0.064 mm); trigger 5 in 3.9 % (0.050 mm),
+  and still fixes 2 µs and more at 50 ns noise. Too high a sigma only makes it start later.
+- **Two mics off:** no method fixes it. With a guard (still over the trigger after the
+  drop: keep the full fit, mark the shot uncertain) the wrong drops fall from 43 % to 6 %
+  and 87–100 % of those shots are marked; but going back to the full fit cost a little on
+  big single faults (24 µs: 0.046 against 0.021 mm), so marking without reverting is the
+  better form. What an uncertain shot does (sent, held, flagged) is the user's call.
+- **4 mics:** nothing helps; one redundant measurement can't tell a bad mic (as the TODO said).
+- **Healthy mics' soft zone:** at 2 sigma only 0.5–0.9 % of a healthy mic's shots, not
+  the 5 % the TODO assumed: with 6 mics and 3 unknowns the residuals keep half the noise's
+  variance (0.71 sigma).
+- **Mic health:** with dropS the drops per channel are the health signal (the bad mic
+  dropped in 97–100 % of shots, the others in 0–1 %); a mean residual per channel (in
+  sigmas) covers drifts too small to drop.
+
+Bench test (run by Claude):
+
+1. **4d-1, PC:** `huber_study --n 5000` (the table above), then `--trigger 3, 4, 5, 8`.
+2. **4d-2, the board's path:** the bare NodeMCU, `mic sim`, `sim random 300` three times:
+   healthy, then `sim offset 5 1000` (CH5, the moved corner, 1 µs late without the
+   firmware knowing), then `sim offset 5 3000`; each run replayed with `--alt dropS:3`,
+   `dropS:5`, `huber:2`, `huberS:2`. Expect: healthy the same 4 ways; the firmware's error
+   about 0.13 and 0.38 mm (the study), dropS well under.
+
+**For the user to decide** (nothing in the firmware yet): whether drop-one should start by
+the sigmas (a trigger of 3–5 times the expected rms, apart from the verdict's 1500 ns
+limit); the sigmas per channel from the calibration fit's residuals (they are the scale);
+what an uncertain shot does; and the drops per channel as the app's mic-health flag. Before
+that, the same replay on the real logs of 7-3 and 7-4: real errors aren't Gaussian, and a
+mic position error gives a bias that depends on where the shot lands.
+
 ### 5. Protocol and app
 
 Protocol v3 (`protocol/PROTOCOL.md`, PLAN D4, D5, D7, D9): what step 3 and 4 kept on serial
@@ -1632,6 +1731,7 @@ Newest first. Date, step, setup, what was measured, and what it changed.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-27 | 4d | A moderately off mic, branch `huber-study`, run by Claude. PC: `tools/huber_study --n 5000` (seed 1), then `--trigger 3, 4, 5, 8`. Board: the bare NodeMCU ("OpenSights-487"), `mic sim`, `sim random 300` healthy, with `sim offset 5 1000` and with `sim offset 5 3000`; log `logs/serial-261127-4d.log`, split into `-4d-healthy.log`, `-4d-ch5-1us.log`, `-4d-ch5-3us.log`; each replayed with `--alt` | **The study: drop-one started by the sigmas beats Huber.** Synthetic (table in 4d): with one mic 1–10 µs off at 50 ns noise, dropS ×3 gives 0.020–0.042 mm rms where the firmware gives 0.131–0.484 and Huber 0.084–0.764; healthy shots are never touched; Huber alone fails a 24 µs fault (1.9 mm, the firmware 0.021); the TODO's two steps keep the bad mic in about 20 % of big faults ("two far out"), and its weighted residual limit passed shots 1.9 mm wrong with two mics off. dropS's price: with sigma 3× too low, trigger 3 drops a healthy mic in 39 % of shots, trigger 5 in 3.9 %. **On the board's path** (100 ns sampling, the firmware's own fit): healthy 0.0128 mm all four ways, 0 drops; CH5 1 µs late: the firmware 0.1410 mm (rms residual 260 ns, nothing dropped), dropS ×3 0.0325 (CH5 dropped in 293 of 300, CH6 in 3), dropS ×5 0.0718, Huber 0.0926, Huber + search 0.0436; CH5 3 µs late: the firmware 0.4086 (residual 800 ns, nothing dropped), dropS ×3 and ×5 and Huber + search 0.0170 (CH5 in 300 of 300), Huber 0.2429. The simulator's own check: every run PASS. Nothing in the firmware yet: the user decides (4d). |
 | 2026-11-27 | 5f | The curtain switch and unscored hits, branch `app-curtain-switch`. A new NodeMCU (ESP32-D0WD-V3, MAC 70:4b:ca:8f:0c:cc, "OpenSights-487", fresh NVS) on `/dev/ttyUSB0`, flashed by the user; run by Claude: serial `logs/serial-261127-B.log`, the probe `logs/probe-261127-5f-0.*`, the live test `logs/live-261127-5f-run1.out`, `-run2.out` with the app's event logs in `logs/app-261127-5f-run1/` and `app-261127-5f/` | **Pass.** 5f-1: `cargo test` (the app 55, 3 ignored), clippy clean; the UI test found the bundled fonts lack "●", "◌" and "✕" (the status dots and close buttons drew as empty boxes): the dot is painted now, the buttons use "×". 5f-2: paired by `bluetoothctl` with the passkey 000000; the probe connected (cfg ID F5B887F6 from the reads and in Status: match) once it skipped BlueZ's cached, out-of-range "sensor123" (it now takes only a sensor advertising). 5f-3: the app connected in 1.2–1.5 s and read the curtain on at 50–90 µs; off and on again each took under 0.5 s; serial `BLE: settings from the app` and `ir=-`, then `ir=50000,90000` (the window remembered from the sensor); the settings equal those read but for the window; no message. 5f-4: 2 holes, 2 shots; then with the curtain off, 3 double shots: 7 shots and 1 missed hit in both runs (each second shot is MISSED only while the first is still read out, else measured on its own; the first try's 6 and 2 differ only in that, none lost). 5f-5: a hole placed at (5.00, 5.00) (10.1), the missed hit a miss, the other hole the same hole as the shot at (10.01, 10.00) (9.2); 3 `manual` lines; disconnected and reconnected: the same 10 shots and scores, nothing twice. **Found on the way:** (1) the clone CP2102 on this board floods the port with replayed data (about 0.5 MB/s at any baud) when opened with DTR and RTS asserted (pyserial's default): open it with both released. (2) The live test first sent settings while a simulator run was ending, which it refuses ("settings can't change while it runs"): the test now waits 1.5 s after a run's hits. (3) With `sim fault silent` the dips come 7.2 µs late and 27.1 µs long instead of 35 (the simulator's known first-step stall, 4b; its own check passes). The air-sensor search prints two I2C errors at boot with nothing on J5. |
 | 2026-11-24 | 5e | The shot store. PC: `pio test -e native` (31 cases). Bare NodeMCU flashed with the new table (logs `logs/upload-261124-*-5e.log`), run by Claude over serial (`logs/device-monitor-261124-131158-5e-a.log`, `-131401-5e-b.log`, `-5e-c.log`, `-5e-6.log`, `-5e-6b.log`, `-5e-7.log`, `-5e-7b.log`) and over BLE with the probe (`logs/probe-261124-5e-*.out`) | **PASS, 5e-1 to 5e-7.** 5e-1: `test_store` 8 of 8 (five laps of an 8-sector ring, 449 held at the end against 385 guaranteed; a write cut at each of its 64 bytes: nothing earlier lost, the torn hit absent; a cut erase). 5e-2: boot `capacity 1921`; the NVS kept (`mic` as before), and the store kept through the next reflash too (uploads don't touch `shots`). 5e-3: 30 hits, `reboot` (added for this: a clean restart): `30 hits held from 1 boot(s), 0 torn`, read in 42 ms; 10 more, reboot: 40 from 2 boots. 5e-4: the probe from (0, 0): boot 074B3DEF seq 1–30 then 651E3407 1–10, in order. **On that first connection after the reflash every hit came twice in a row** (80 for 40); the next connections with the same firmware: never (20, 0, 40, 1938, 1954 shots, none twice). The new build's "services changed" with BlueZ (bench 5) is the likely cause; the app drops duplicates by (boot, seq), so no score changes. `PROBE_FROM=074B3DEF:21`: seq 21–30 then the second boot's 1–10; `PROBE_FROM=651E3407:11`: none. 5e-5: `PROBE_CLEAR=1` after the 40: cleared up to H 40 (both boots), kept through a reboot; the probe then got 0. 5e-6: `sim random 2000` is the simulator's limit (its first try refused 2100), so two runs of 1100: both PASS (1100 of 1100 ok, sent, 0 missed, 0 late starts, 0.0125 / 0.0124 mm rms), the ring wrapped: 1921 held (H 320–2240), one erase done at a quiet moment (2 s); the slowest write 3.3 ms (typically 0.6), the slowest erase 29 ms; `stat`: interrupt 8.4 %, longest 22.4 µs (as before), 2200 events, 0 possibly missed. Found on the way: the quiet erase also waited for "no hit waiting to be sent", which never comes with no app connected: removed (an erase only delays the next indication). 5e-7, first try: reopening the port right after closing it didn't reset the board (the hits all stayed one boot: the store's "1 boot" was right); then with EN pulsed through RTS: 5 resets, each boot one boot more, 0 torn, the ring read in 98–100 ms; the probe got 1954 hits: the long run's boot seq 984–2601, then the five reset boots 1–85, 1–75, 1–27, 1–74, 1–75, 0 gaps, 336 in all = the 336 events logged before the resets. |
 | 2026-11-24 | 7-0b | The top-right mic moved out 25 mm along its diagonal, to (122.68, 122.68) (PLAN D1's update). PC: `model.py` (vectors made again), `pio test -e native`, the app's `cargo test`, `layout_study.py --drop` (log `logs/layout-study-261124-o25.txt`). Bare NodeMCU, run by Claude over serial: `mic default`, `mic sim`, `sim random 160`, `sim fault late 5`, `sim random 60`; log `logs/device-monitor-261124-125746-o25.log` | **PASS.** Native tests 23 of 23; the blast check: the four corners alone score 0 (smallest residual 6871 ns, the study's 6.9 µs), all six 0 (50.9 µs), any one dropped 0 (31.5–46.0 µs). The app's tests 68 pass (1 ignored, the phone), the Rust solver against the new vectors. The study: O25 (4 corners) 0 of 624 blasts, 6.88 µs; O25+B (5) 0, 31.6 µs, a late channel found 555 of 555 and then 0 blasts (S40+B: 553 of 555); O25+BR (6, the layout now) 0, 51.1 µs (S40+BR: 34.5 µs), a late channel found 666 of 666, then 0 blasts. On the board: `mic default` and `mic sim` put CH3 (the simulator's CH5) at (122.68, 122.68), and the board's blast check finds none, with every mic or any one dropped (1049 ms). `sim random 160`: 160 of 160 ok, 0.0123 mm rms, worst 0.028. The moved mic 24 µs late (`sim fault late 5`): dropped in 60 of 60, every shot ok, 0.0145 mm rms. Note: the board's boot text has ROM bytes in it, so `grep` takes the log for binary; use `grep -a`. |

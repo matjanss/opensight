@@ -181,9 +181,11 @@ jobs:
           python3 tools/bench.py --selftest
           python3 tools/calibrate.py --selftest
 
-      - name: Build the replay tool (PC)
+      - name: Build the replay tool and the Huber study (PC)
         working-directory: firmware
-        run: g++ -std=gnu++17 -O2 -mfma -ffp-contract=fast -Wall -Wextra -Werror -I lib/measure -o tools/replay tools/replay.cpp lib/measure/solver.cpp lib/measure/record.cpp
+        run: |
+          g++ -std=gnu++17 -O2 -mfma -ffp-contract=fast -Wall -Wextra -Werror -I lib/measure -o tools/replay tools/replay.cpp lib/measure/solver.cpp lib/measure/record.cpp
+          g++ -std=gnu++17 -O2 -mfma -ffp-contract=fast -Wall -Wextra -Werror -I lib/measure -o tools/huber_study tools/huber_study.cpp lib/measure/solver.cpp
 
       - name: Package
         run: |

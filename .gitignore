@@ -20,8 +20,9 @@ hardware/**/*.lck
 hardware/**/~*.lck
 hardware/**/_autosave-*
 hardware/**/*.kicad_prl
-# The replay tool (firmware/tools/replay.cpp), built locally
+# The replay tool and the Huber study (firmware/tools/*.cpp), built locally
 firmware/tools/replay
+firmware/tools/huber_study
 # Serial logs (pio device monitor --filter log2file)
 logs/
 # Python

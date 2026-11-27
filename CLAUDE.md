@@ -58,7 +58,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Part | Where it stands | Next (see) |
 |---|---|---|
 | Firmware: BLE, pairing, uplink | Protocol v3 (step 5b): `uplink.cpp` with the hits and the event ring, Status, Control, Calibration and Settings; bench test passes over BLE (2026-11-23, merged to `main`). The shot store in flash (5e, PLAN D6): every hit kept across reboots, requests and clears across boots; bench 5e-1 to 5e-7 pass (2026-11-24, merged to `main`) | 5e-8, a real power cut (the user); MQTT (phase 4) |
-| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration, PLAN phase 0) passes all its simulated tests on a bare NodeMCU (2026-11-22, merged to `main`): the solver on the board, drop-one, the blast check, calibration mode and `tools/calibrate.py`. The DS18B20 and BME280 tests (3a-3, 3a-4) wait for the parts. Step 4a (the verdict) passes its simulated bench tests (2026-11-22, merged to `main`). Step 4b (the curtain) passes its simulated bench tests (2026-11-22, run by Claude, merged to `main`) Step 7 (the real boards, PLAN phase 1): the tests written and `tools/bench.py` passing its self-test; 7-0 (h 5.5 mm, simulated) passes (2026-11-24, branch `phase1-prep`) | The boards' arrival (PLAN phase 1, MEASUREMENT 7); 3a-3/3a-4 when the parts are there |
+| Firmware: measurement | Step 1 passed on a bare NodeMCU (on the v0.3 pin map, tests 3 and 14 are due again). Step 2's simulated tests pass; its real-board tests wait for the boards. Step 3 (solver and calibration, PLAN phase 0) passes all its simulated tests on a bare NodeMCU (2026-11-22, merged to `main`): the solver on the board, drop-one, the blast check, calibration mode and `tools/calibrate.py`. The DS18B20 and BME280 tests (3a-3, 3a-4) wait for the parts. Step 4a (the verdict) passes its simulated bench tests (2026-11-22, merged to `main`). Step 4b (the curtain) passes its simulated bench tests (2026-11-22, run by Claude, merged to `main`) Step 4d (a moderately off mic, a study, 2026-11-27): drop-one started by the sigmas beats Huber weights, synthetic and on the board's path; the firmware change waits for the user (MEASUREMENT 4d, app TODO). Step 7 (the real boards, PLAN phase 1): the tests written and `tools/bench.py` passing its self-test; 7-0 (h 5.5 mm, simulated) passes (2026-11-24, branch `phase1-prep`) | The boards' arrival (PLAN phase 1, MEASUREMENT 7); 3a-3/3a-4 when the parts are there |
 | Sensor board (`hardware/acoustic-sensor/`) | v0.3 ordered (2026-11-27, JLC, SMD parts assembled), not yet on the bench | On arrival: MEASUREMENT 7-1 (the summary's initial calibration, polarity first: stop before ordering more if SIG goes down), then PLAN phase 1 |
 | Host board (`hardware/host-board/`) | v0.3 ordered (2026-11-27): the J5 (BME280) and U4-supply changes on the board, the south half laid out again and the board routed again (2026-11-24, 76 × 132 mm, 0.4/0.6/0.8 mm tracks, DRC and ERC clean); firmware already on its pin map | Assemble by hand (U3, U4 socketed); MEASUREMENT 7-2 (step 1 tests 3 and 14 on the real board); its bench list (`TODO.md`) |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner moved out along the diagonal by d = 25 mm, to (122.68, 122.68) (PLAN D1's update; principle in `hardware/frame/top-right-holder.svg`), plus bottom-middle and right-middle mics; the user designs and prints the holders. The firmware defaults, the simulator and `model.py` use it from 2026-11-24 (MEASUREMENT 7-0b) |
@@ -89,6 +89,8 @@ firmware/                     PlatformIO, pinned: pioarduino 55.03.312-1 (Arduin
   tools/replay.cpp            replays a serial log's events through lib/measure (g++)
   tools/calibrate.py          the calibration fit (numpy, scipy)
   tools/bench.py              phase 1 bench analysis: repeat, kcheck, verify, swap (MEASUREMENT 7)
+  tools/huber.h, huber_study.cpp  a moderately off mic: Huber weights against drop-one started
+                              by the sigmas, on synthetic shots (MEASUREMENT 4d; study only)
   tools/layout_study.py       mic layout study behind PLAN D1/D2 (numpy)
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs, eventlog.rs,
@@ -154,7 +156,10 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   lib/measure/record.cpp` (FMA like the ESP32, so it matches the board to 0.001 mm; no
   `-mfma` on ARM), then
   `tools/replay [--h mm] [--temp C] [--without ch] [--lost n|off] [--area mm|off]
-  [--together us|off] [--pulse us|off] [--curtain lo,hi|off] <log>` (also built in CI).
+  [--together us|off] [--pulse us|off] [--curtain lo,hi|off] [--alt dropS|dropSg|huber|huberS[:p]]
+  <log>` (also built in CI; `--alt` solves every event another way too, MEASUREMENT 4d). The
+  Huber study: `g++ ... -o tools/huber_study tools/huber_study.cpp lib/measure/solver.cpp`
+  (the same flags), `tools/huber_study [--n shots] [--trigger x] [--c sigmas] [--only text]`.
 - **Release:** `git tag vX.Y.Z && git push origin vX.Y.Z`.
 - **Claude runs the tests (from 2026-11-23); the user reviews the results** and says when a
   part of the testing needs revisiting.

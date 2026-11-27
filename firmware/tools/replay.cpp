@@ -21,6 +21,12 @@
 //                     here it is no shot
 //   --fit-c           fit one factor on every event's speed of sound (the least total
 //                     residual) and say what air temperature that means
+//   --alt <m>[:<p>]   also solve every event another way (MEASUREMENT 4d, tools/huber.h) and
+//                     compare: dropS:<trigger> (drop-one started at trigger x the rms the
+//                     sigmas give, default 3), dropSg:<trigger> (the same with its guard),
+//                     huber:<c> (Huber weights, c sigma, default 2), huberS:<c> (Huber and
+//                     the drop-one search when a mic is far out). Its position against the
+//                     true points, and the drops per channel, beside the firmware's
 //   --quiet           the summary only
 //
 // Build (from firmware/):
@@ -40,6 +46,7 @@
 #include <vector>
 
 #include "air.h"
+#include "huber.h"
 #include "record.h"
 
 using namespace measure;
@@ -54,6 +61,8 @@ struct Options {
   float curtainLoNs = NAN, curtainHiNs = NAN;               // NAN: the cfg's, 0, 0: off
   uint8_t without = 0;
   bool quiet = false, fitC = false;
+  int alt = 0;          // 0 none, 1 dropS, 2 dropSg, 3 huber, 4 huberS
+  float altParam = NAN;
   bool changed() const {
     return !isnan(h) || !isnan(tempC) || !isnan(cMs) || !isnan(resLimitNs) || dropOne >= 0 || without ||
            maxLost != -2 || !isnan(areaMm) || !isnan(togetherNs) || !isnan(pulseMaxNs) ||
@@ -74,7 +83,8 @@ struct Item {
 void usage() {
   fprintf(stderr, "usage: replay [--h mm] [--temp C] [--c m/s] [--without ch]... "
                   "[--reslimit ns] [--dropone on|off] [--lost n|off] [--area mm|off] "
-                  "[--together us|off] [--pulse us|off] [--curtain lo,hi|off] [--fit-c] [--quiet] log...\n");
+                  "[--together us|off] [--pulse us|off] [--curtain lo,hi|off] [--fit-c] "
+                  "[--alt dropS|dropSg|huber|huberS[:p]] [--quiet] log...\n");
   exit(2);
 }
 
@@ -140,6 +150,14 @@ int main(int argc, char** argv) {
       int ch = atoi(value());
       if (ch < 1 || ch > MAX_MICS) usage();
       opt.without |= 1 << (ch - 1);
+    } else if (!strcmp(a, "--alt")) {
+      char name[16] = "";
+      float p = NAN;
+      if (sscanf(value(), "%15[a-zA-Z]:%f", name, &p) < 1) usage();
+      opt.alt = !strcmp(name, "dropS") ? 1 : !strcmp(name, "dropSg") ? 2 : !strcmp(name, "huber") ? 3
+                : !strcmp(name, "huberS") ? 4 : 0;
+      if (!opt.alt) usage();
+      opt.altParam = p;
     } else if (!strcmp(a, "--fit-c")) opt.fitC = true;
     else if (!strcmp(a, "--quiet")) opt.quiet = true;
     else if (a[0] == '-') usage();
@@ -257,6 +275,12 @@ int main(int argc, char** argv) {
   int verdicts[V_COUNT] = {}, verdictsCompared = 0, verdictsDiffer = 0;
   int curtain[2][2] = {}, curtainNot = 0, withDips = 0;   // [acoustic ok][a dip in the window]
   double worstDiff = 0, sumDiff2 = 0, worstPt = 0, sumPt2 = 0;
+  // --alt: the other method against the firmware's, on the events both converged on.
+  int altBoth = 0, altUncertain = 0, altDrops[MAX_MICS] = {}, fwDrops[MAX_MICS] = {};
+  double altSum2 = 0, fwSum2 = 0, altWorst = 0, fwWorst = 0;
+  HuberOpts altOpts;
+  if (opt.alt >= 3 && !isnan(opt.altParam)) altOpts.c = opt.altParam;
+  const float altTrigger = opt.alt <= 2 && !isnan(opt.altParam) ? opt.altParam : 3;
   for (const Item& it : items) {
     Rec rec = it.rec;
     rec.cMs = (float)(rec.cMs * scale);
@@ -313,6 +337,38 @@ int main(int argc, char** argv) {
       worstPt = std::max(worstPt, e);
       if (!opt.quiet) printf("; %.3f mm from pt", e);
     }
+    if (opt.alt) {
+      SolveInput in;
+      solveInput(it.cfg, rec, in);
+      Solution a;
+      bool unc = false;
+      if (opt.alt <= 2) {
+        a = solveDropSigma(in, f.mask, altTrigger, opt.alt == 2, &unc);
+      } else {
+        const HuberFit h = opt.alt == 3 ? [&] { HuberOpts o = altOpts; o.refit = false; return solveHuber(in, f.mask, o); }()
+                                        : solveHuberSearch(in, f.mask, altOpts);
+        a = h.s;
+        unc = h.uncertain;
+      }
+      altUncertain += unc;
+      if (a.converged && s.converged) {
+        if (a.dropped >= 0) altDrops[a.dropped]++;
+        if (s.dropped >= 0) fwDrops[s.dropped]++;
+        if (rec.hasPt) {
+          const double ea = hypot(a.x - rec.ptX, a.y - rec.ptY), ef = hypot(s.x - rec.ptX, s.y - rec.ptY);
+          altBoth++;
+          altSum2 += ea * ea;
+          fwSum2 += ef * ef;
+          altWorst = std::max(altWorst, ea);
+          fwWorst = std::max(fwWorst, ef);
+        }
+      }
+      if (!opt.quiet) {
+        printf("; alt %+.3f %+.3f", a.x, a.y);
+        if (a.dropped >= 0) printf(" (CH%d dropped)", a.dropped + 1);
+        if (unc) printf(" (uncertain)");
+      }
+    }
     if (!opt.quiet) printf("\n");
   }
 
@@ -341,6 +397,18 @@ int main(int argc, char** argv) {
   if (withPt)
     printf("replay: against the true points (pt): %d good shots, error rms %.4f mm, worst %.4f mm\n",
            withPt, sqrt(sumPt2 / withPt), worstPt);
+  if (opt.alt) {
+    static const char* names[] = {"", "dropS", "dropSg", "huber", "huberS"};
+    printf("replay: alt %s %.1f: %d uncertain", names[opt.alt], opt.alt <= 2 ? altTrigger : altOpts.c, altUncertain);
+    if (altBoth)
+      printf("; against the true points (both converged, %d events): rms %.4f mm, worst %.4f mm (the "
+             "firmware's way: rms %.4f mm, worst %.4f mm)", altBoth, sqrt(altSum2 / altBoth), altWorst,
+             sqrt(fwSum2 / altBoth), fwWorst);
+    printf("\nreplay: alt drops per channel:");
+    for (int c = 0; c < MAX_MICS; c++)
+      if (altDrops[c] || fwDrops[c]) printf(" CH%d %d (firmware %d)", c + 1, altDrops[c], fwDrops[c]);
+    printf("\n");
+  }
   if (opt.fitC && !items.empty()) {
     // In terms of temperature, at the middle event's logged air.
     const Rec& mid = items[items.size() / 2].rec;
