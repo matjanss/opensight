@@ -41,6 +41,35 @@ status and settings are in (step 5c).
   card, and the penalty for the discipline; keep the removed shot in the event log (a
   `manual` line, as the resolve window does) and greyed in the list, so nothing is lost.
 
+## Interface cleanup (the user, 2026-11-27)
+
+The interface is getting cluttered. A cleanup of the main window, in these parts. Think it
+through before building; the UI tests (`egui_kittest`) follow each change.
+
+- **One window, two app modes.** The "shoot series" view and the "count cards" window become
+  one window, with no separate window. At the top of the column right of the target card
+  sits a banner, the "app mode": a plain row of buttons, "Shoot" and "Count" (or "Shoot
+  series" and "Count cards"). A click changes both the card view and the panels below the
+  banner, like browser tabs. The "Count card" button in the status bar goes.
+- **Shoot mode, the right column:**
+  - last shot info;
+  - the series shots;
+  - "Clear series" as a button (it is text now);
+  - "Card photo" becomes a button, "Take Photo";
+  - the "Shots per ring" panel goes (it moves to the card details, below).
+- **Take Photo.** Opens the window with the QR code, as now. It closes when the photo is
+  uploaded, and the main view comes back (as now). What changes after that, in the series
+  panel:
+  - the "photo's details" drop-down goes. A button "Card Details", under the shot table
+    next to "Remove Photo", opens a new window with all the detail;
+  - the details window gets: the stats and the notifications (warnings), the shot x, y and
+    hole − shot columns (the extended table as it is now), and the shots per ring;
+  - the table in the main view has fewer columns (without those);
+  - "Keep the photo" stays as it is;
+  - "Clear series", "Take another photo" and "Open the folder" become buttons;
+  - "Remove from the card" becomes a button, "Remove Photo".
+- **Count mode, the right column:** not yet described (the user, 2026-11-27: to follow).
+
 ## The solver: Huber weights and mic health (to discuss again)
 
 **Note (2026-11-27, MEASUREMENT 4d): on synthetic shots Huber weights don't seem to add
