@@ -76,6 +76,8 @@ pub enum UploadEvent {
         series: String,
         reason: String,
     },
+    /// The phone pressed "Finished": the link is gone; the app closes its server.
+    Finished,
 }
 
 type Notify = Arc<dyn Fn() + Send + Sync>;
@@ -92,7 +94,7 @@ struct Offer {
 
 /// What the phone hears when the session holds the most cards it may.
 pub const SESSION_FULL: &str =
-    "The app holds as many cards as it can. Remove one there, or close its window and start again.";
+    "The app holds as many cards as it can. Remove one there, or start over there.";
 
 struct Shared {
     dir: PathBuf,
@@ -313,7 +315,12 @@ fn drain(req: &mut Request) {
 fn handle(shared: &Shared, mut req: Request) {
     let url = req.url().to_string();
     let path = url.strip_prefix("/p/").unwrap_or("");
-    // A session's page asks for its lines at /p/<token>/cards.
+    // A session's page asks for its lines at /p/<token>/cards; either page's "Finished"
+    // posts to /p/<token>/finished.
+    let (path, finished) = match path.strip_suffix("/finished") {
+        Some(t) => (t, true),
+        None => (path, false),
+    };
     let (token, cards) = match path.strip_suffix("/cards") {
         Some(t) => (t, true),
         None => (path, false),
@@ -324,15 +331,22 @@ fn handle(shared: &Shared, mut req: Request) {
         .unwrap()
         .get(token)
         .map(|o| (o.series.clone(), o.many, o.lines.clone()));
-    let Some((series, many, lines)) = found.filter(|f| !token.is_empty() && (f.1 || !cards)) else {
+    let Some((series, many, lines)) = found.filter(|f| !token.is_empty() && (f.1 || !cards) && !(cards && finished))
+    else {
         let msg = "This link has been used or has expired. Scan the code in the app again.";
-        return if *req.method() == Method::Get && !cards {
+        return if *req.method() == Method::Get && !cards && !finished {
             respond(req, 404, "text/html; charset=utf-8", page(Page::Gone, msg))
         } else {
             respond(req, 404, TEXT, msg)
         };
     };
     match req.method() {
+        Method::Post if finished => {
+            shared.offers.lock().unwrap().remove(token);
+            shared.send(UploadEvent::Finished);
+            respond(req, 200, TEXT, "Finished: the app has closed the link. You can close this page.");
+        }
+        _ if finished => respond(req, 405, TEXT, "Only POST here."),
         Method::Get if cards => {
             let body = serde_json::json!({ "lines": lines }).to_string();
             respond(req, 200, "application/json", body);
@@ -563,7 +577,8 @@ const TIPS: &str = r#"<ul>
 <label class=btn><span id=cam-text>Take photo</span><input id=cam type=file accept="image/*" capture=environment hidden></label>
 <label class="btn alt"><span id=pick-text>Choose a photo</span><input id=pick type=file accept="image/*" hidden></label>
 <progress id=bar max=1 value=0 hidden></progress>
-<p id=msg class=msg></p>"#;
+<p id=msg class=msg></p>
+<button id=fin class="btn fin" type=button>Finished</button>"#;
 
 /// The upload, on both pages; `done(ok)` after each.
 const SEND_JS: &str = r#"const msg = document.getElementById('msg'), bar = document.getElementById('bar');
@@ -579,7 +594,19 @@ function send(f, done) {
   x.send(f);
 }
 for (const id of ['cam', 'pick'])
-  document.getElementById(id).onchange = e => { send(e.target.files[0], ok => after(ok)); e.target.value = ''; };"#;
+  document.getElementById(id).onchange = e => { send(e.target.files[0], ok => after(ok)); e.target.value = ''; };
+// "Finished": the app closes its server; nothing more goes to it from this page.
+document.getElementById('fin').onclick = () => {
+  fetch(location.pathname + '/finished', { method: 'POST' })
+    .then(r => r.text())
+    .then(t => { finished(); msg.textContent = t; })
+    .catch(() => { msg.textContent = 'The app could not be reached. Close this page.'; });
+};
+function finished() {
+  if (typeof timer !== 'undefined') clearTimeout(timer);
+  document.querySelectorAll('.btn').forEach(b => b.hidden = true);
+  window.done = true;
+}"#;
 
 /// The phone's page.
 fn page(kind: Page, msg: &str) -> String {
@@ -610,6 +637,7 @@ const list = document.getElementById('cards');
 let timer = null;
 function poll() {{
   clearTimeout(timer);
+  if (window.done) return;
   fetch(location.pathname + '/cards', {{ cache: 'no-store' }}).then(r => {{
     if (r.status == 404) {{
       document.querySelectorAll('.btn').forEach(b => b.hidden = true);
@@ -636,6 +664,7 @@ body {{ font: 17px/1.4 system-ui, sans-serif; margin: 0 auto; max-width: 30em; p
 h1 {{ font-size: 1.3em; }}
 .btn {{ display: block; text-align: center; padding: .9em; margin: .7em 0; border-radius: .5em; background: #222; color: #fff; font-weight: 600; }}
 .btn.alt {{ background: #ddd; color: #222; }}
+.btn.fin {{ width: 100%; border: 0; font: inherit; font-weight: 600; background: #fff; color: #222; border: 2px solid #222; margin-top: 1.5em; }}
 .btn[hidden] {{ display: none; }}
 progress {{ width: 100%; height: 1.2em; }}
 .msg {{ font-weight: 600; }}
@@ -771,6 +800,30 @@ mod tests {
         let (code, page) = http(srv.port, "GET", &path, b"", None);
         assert_eq!(code, 404);
         assert!(page.contains("Scan the code"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// "Finished" on either page: the link gone, the app told; only by POST.
+    #[test]
+    fn finished_closes_the_link() {
+        let dir = temp_dir("finished");
+        let (srv, _) = server(&dir, MAX_BYTES);
+        for session in [true, false] {
+            // One at a time: a new link ends the old one.
+            let path = path_of(&if session { srv.offer_session("count", 5) } else { srv.offer("Series 1") });
+            let (code, page) = http(srv.port, "GET", &path, b"", None);
+            assert_eq!(code, 200);
+            assert!(page.contains(">Finished<") && page.contains("/finished"));
+            assert!(matches!(srv.try_recv(), Some(UploadEvent::Opened { .. })));
+            assert_eq!(http(srv.port, "GET", &format!("{path}/finished"), b"", None).0, 405);
+            assert!(srv.try_recv().is_none());
+            let (code, body) = http(srv.port, "POST", &format!("{path}/finished"), b"", Some(0));
+            assert_eq!(code, 200, "{body}");
+            assert!(body.starts_with("Finished"));
+            assert!(matches!(srv.try_recv(), Some(UploadEvent::Finished)));
+            assert_eq!(http(srv.port, "GET", &path, b"", None).0, 404);
+            assert_eq!(http(srv.port, "POST", &format!("{path}/finished"), b"", Some(0)).0, 404);
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

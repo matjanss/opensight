@@ -405,7 +405,9 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   message. The UI test `curtain_switch` plays the sensor.
 - **Card photos (PLAN D13, `CARDPHOTO.md`):** `upload.rs` runs a `tiny_http` server while
   the dialog is open (port 8710, a single-use token per link, shown as a QR code); the phone's
-  page sends the photo as it is; `cardphoto::meta` drops EXIF/GPS/XMP from the file without
+  page sends the photo as it is, and its "Finished" (`POST /p/<token>/finished`, either
+  page) ends the link and tells the app (`UploadEvent::Finished`), which closes the photo
+  window, or stops the count's server until its "New link"; `cardphoto::meta` drops EXIF/GPS/XMP from the file without
   re-encoding; stored in `photos/` next to `logs/` with a JSON beside it; originals removed
   after 30 days unless marked to keep. The registration and the holes are in `cardphoto/`: the hole fit with direct derivatives,
   big groups and the groups themselves on the cores (`par_map`), holes not pinned down
@@ -470,6 +472,10 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
     - a close-call notice at the top left lists every shot of the series within the
       close-call margin (0.5 mm by default) of a higher score, for manual review
       (`Card::higher`, the same rule as scoring);
+    - the notices on the card (`review_notice`: the close calls, the unscored hits, the
+      count's close calls) minimise with the bar at their top right to the "!" and a short
+      title ("Close Call", "Not scored"); a click there opens them again (egui memory, per
+      notice, while the app runs);
     - zoomed in, a sharp render of just the visible part replaces the stretched card once
       the view stops moving.
   - **The settings window** (an immediate viewport, opened from the gear in the status

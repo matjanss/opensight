@@ -308,20 +308,73 @@ const REVIEW_MAX_LINES: usize = 8;
 
 /// A notice at the top left of the card, `top` points below the card's top: a title, then
 /// one line per item (`lines`, in shot order). The close calls, and the hits with no score.
-/// With `hover`, a line can be clicked. Returns the clicked line, and the space the notice
-/// takes from the card's top (for the next one).
+/// With `hover`, a line can be clicked. Its minimise button (top right) leaves only the
+/// exclamation mark and `short` (a click there opens it again), kept per `salt` while the
+/// app runs. Returns the clicked line, and the space the notice takes from the card's top
+/// (for the next one).
 #[allow(clippy::too_many_arguments)]
 fn review_notice(
     ui: &Ui,
     painter: &egui::Painter,
     card_rect: egui::Rect,
     title: &str,
+    short: &str,
     top: f32,
     salt: &str,
     lines: &[String],
     hover: Option<&str>,
 ) -> (Option<usize>, f32) {
     let visuals = ui.visuals();
+    let min_id = ui.scope_id().with(("notice_minimised", salt));
+    let minimised = ui.ctx().data(|d| d.get_temp::<bool>(min_id)).unwrap_or(false);
+    let (pad, icon, gap, line_gap) = (8.0, 22.0, 8.0, 2.0);
+    // An exclamation mark in a filled circle, centred on `c`.
+    let mark = |c: egui::Pos2| {
+        painter.circle_filled(c, icon / 2.0, visuals.strong_text_color());
+        let m = visuals.window_fill;
+        painter.line_segment([c - egui::vec2(0.0, 6.0), c + egui::vec2(0.0, 2.0)], Stroke::new(2.5, m));
+        painter.circle_filled(c + egui::vec2(0.0, 5.5), 1.5, m);
+    };
+    let frame = |rect: egui::Rect| {
+        painter.rect(
+            rect,
+            CornerRadius::same(10),
+            visuals.window_fill,
+            visuals.window_stroke,
+            egui::StrokeKind::Inside,
+        );
+    };
+
+    if minimised {
+        let title = painter.layout_no_wrap(
+            short.into(),
+            TextStyle::Body.resolve(ui.style()),
+            visuals.strong_text_color(),
+        );
+        let size = egui::vec2(pad + icon + gap + title.size().x + pad + 2.0, pad + title.size().y.max(icon) + pad);
+        let rect = egui::Rect::from_min_size(card_rect.min + egui::vec2(10.0, 10.0 + top), size);
+        let r = ui
+            .interact(rect, ui.scope_id().with((salt, "notice")), egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Show it all");
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, short));
+        frame(rect);
+        if r.hovered() {
+            painter.rect_filled(rect.shrink(1.0), 9.0, visuals.widgets.hovered.weak_bg_fill);
+        }
+        let c = egui::pos2(rect.left() + pad + icon / 2.0, rect.center().y);
+        mark(c);
+        painter.galley(
+            egui::pos2(c.x + icon / 2.0 + gap, c.y - title.size().y / 2.0),
+            title,
+            Color32::PLACEHOLDER,
+        );
+        if r.clicked() {
+            ui.ctx().data_mut(|d| d.insert_temp(min_id, false));
+        }
+        return (None, top + size.y + 8.0);
+    }
+
     let small = TextStyle::Small.resolve(ui.style());
     let title = painter.layout_no_wrap(
         title.into(),
@@ -337,7 +390,8 @@ fn review_notice(
     let more = (more > 0)
         .then(|| painter.layout_no_wrap(format!("and {more} more"), small, visuals.weak_text_color()));
 
-    let (pad, icon, gap, line_gap) = (8.0, 22.0, 8.0, 2.0);
+    // Room at the top right for the minimise button.
+    let button = 18.0;
     let text_w = galleys
         .iter()
         .chain(&more)
@@ -345,32 +399,38 @@ fn review_notice(
         .fold(title.size().x, f32::max);
     let rows_h: f32 = galleys.iter().chain(&more).map(|g| g.size().y + line_gap).sum();
     let size = egui::vec2(
-        pad + icon + gap + text_w + pad + 4.0,
+        pad + icon + gap + text_w + gap + button + pad,
         pad + (title.size().y + 4.0 + rows_h).max(icon) + pad,
     );
     let rect = egui::Rect::from_min_size(card_rect.min + egui::vec2(10.0, 10.0 + top), size);
     // Clicks on the notice mustn't reach the card (and close the shot popup).
     ui.interact(rect, ui.scope_id().with((salt, "notice")), egui::Sense::click());
-    painter.rect(
-        rect,
-        CornerRadius::same(10),
-        visuals.window_fill,
-        visuals.window_stroke,
-        egui::StrokeKind::Inside,
-    );
+    frame(rect);
 
-    // An exclamation mark in a filled circle, beside the title.
+    // The exclamation mark beside the title.
     let c = egui::pos2(
         rect.left() + pad + icon / 2.0,
         rect.top() + pad + title.size().y.max(icon) / 2.0,
     );
-    painter.circle_filled(c, icon / 2.0, visuals.strong_text_color());
-    let mark = visuals.window_fill;
+    mark(c);
+
+    // The minimise button: a bar, top right.
+    let b = egui::Rect::from_center_size(egui::pos2(rect.right() - pad - button / 2.0, c.y), egui::vec2(button, button));
+    let r = ui
+        .interact(b, ui.scope_id().with((salt, "minimise")), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Minimise");
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Minimise: {short}")));
+    if r.hovered() {
+        painter.rect_filled(b, 4.0, visuals.widgets.hovered.weak_bg_fill);
+    }
     painter.line_segment(
-        [c - egui::vec2(0.0, 6.0), c + egui::vec2(0.0, 2.0)],
-        Stroke::new(2.5, mark),
+        [b.center() + egui::vec2(-5.0, 0.0), b.center() + egui::vec2(5.0, 0.0)],
+        Stroke::new(1.8, visuals.text_color()),
     );
-    painter.circle_filled(c + egui::vec2(0.0, 5.5), 1.5, mark);
+    if r.clicked() {
+        ui.ctx().data_mut(|d| d.insert_temp(min_id, true));
+    }
 
     let x = c.x + icon / 2.0 + gap;
     let mut y = c.y - title.size().y / 2.0;
@@ -2100,6 +2160,7 @@ impl SensorApp {
                 &painter,
                 rect,
                 "Close Call - Manual review recommended",
+                "Close Call",
                 0.0,
                 "close_calls",
                 &lines,
@@ -2130,6 +2191,7 @@ impl SensorApp {
                 &painter,
                 rect,
                 "Not scored - check the card",
+                "Not scored",
                 notice_top,
                 "unscored",
                 &lines,
@@ -4674,6 +4736,7 @@ impl SensorApp {
     /// The server's news and the processing's result.
     fn poll_photo(&mut self, ctx: &egui::Context) {
         let mut received = Vec::new();
+        let mut finished = false;
         if let Some(t) = &mut self.photo_task
             && let Ok(s) = &t.server
         {
@@ -4690,8 +4753,14 @@ impl SensorApp {
                         t.show_link = false;
                         received.push(p);
                     }
+                    upload::UploadEvent::Finished => finished = true,
                 }
             }
+        }
+        if finished {
+            // The phone pressed "Finished": the window closes, the server stops. A photo
+            // already received is still processed.
+            self.photo_task = None;
         }
         for p in received {
             self.process_photo(PhotoJob::Stored(p), ctx);
@@ -5106,6 +5175,20 @@ mod tests {
         }
         for l in ["Count card", "SHOTS PER RING", "Card details"] {
             assert!(!has(&h, l), "{l}");
+        }
+
+        // The notices on the card minimise to their mark and a short title, and back.
+        for short in ["Close Call", "Not scored"] {
+            assert!(!has(&h, short), "{short}");
+            h.get_by_label(&format!("Minimise: {short}")).click();
+            step(&mut h, &format!("1-min-{short}"));
+            assert!(has(&h, short), "{short}");
+            assert!(!has(&h, &format!("Minimise: {short}")), "{short}");
+        }
+        for short in ["Close Call", "Not scored"] {
+            h.get_by_label(short).click();
+            step(&mut h, &format!("1-restored-{short}"));
+            assert!(has(&h, &format!("Minimise: {short}")), "{short}");
         }
 
         // A card photo of the series, processed as the app does.

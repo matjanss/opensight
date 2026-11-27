@@ -236,6 +236,11 @@ enum News {
 /// The count, from the first switch to count mode until the app closes.
 pub struct CountTask {
     server: Result<upload::UploadServer, String>,
+    /// The phone pressed "Finished": the server stopped until "New link".
+    phone_done: bool,
+    /// For a new server: its folder, and the context it wakes.
+    dir: PathBuf,
+    ctx: egui::Context,
     url: Option<String>,
     qr: Option<(usize, Vec<bool>)>,
     status: String,
@@ -269,6 +274,7 @@ impl CountTask {
     pub fn open(ctx: &egui::Context, dir: PathBuf) -> CountTask {
         let c = ctx.clone();
         let server = upload::UploadServer::start_lan(dir.clone(), move || c.request_repaint());
+        let dir_for_worker = dir.clone();
         let (url, qr, status) = match &server {
             Ok(s) => {
                 let url = s.offer_session(SERIES, COUNT_MAX);
@@ -282,10 +288,13 @@ impl CountTask {
         let c = ctx.clone();
         std::thread::Builder::new()
             .name("count-cards".into())
-            .spawn(move || worker(dir, rx, tx, c))
+            .spawn(move || worker(dir_for_worker, rx, tx, c))
             .expect("no thread for counting cards");
         CountTask {
             server,
+            phone_done: false,
+            dir,
+            ctx: ctx.clone(),
             url,
             qr,
             status,
@@ -324,6 +333,7 @@ impl CountTask {
     /// The server's news, the worker's, and the phone's lines.
     pub fn poll(&mut self, env: &CountEnv) {
         let mut received = Vec::new();
+        let mut finished = false;
         if let Ok(s) = &self.server {
             while let Some(e) = s.try_recv() {
                 match e {
@@ -333,8 +343,18 @@ impl CountTask {
                         self.status = format!("Received a photo ({:.1} MB).", p.meta.bytes as f64 / 1e6);
                         received.push(p);
                     }
+                    upload::UploadEvent::Finished => finished = true,
                 }
             }
+        }
+        if finished {
+            // The server stops (dropped); the photos it took are still counted.
+            self.server = Err("the phone finished".into());
+            self.phone_done = true;
+            self.show_link = false;
+            self.url = None;
+            self.qr = None;
+            self.status = "The phone finished: the link is closed.".into();
         }
         for p in received {
             self.add(PhotoJob::Stored(p));
@@ -457,13 +477,37 @@ impl CountTask {
         self.texture = None;
         self.error = None;
         self.show_link = true;
-        if let Ok(s) = &self.server {
+        if self.phone_done {
+            self.new_link();
+        } else if let Ok(s) = &self.server {
             let url = s.offer_session(SERIES, COUNT_MAX);
             self.qr = upload::qr(&url).ok();
             self.url = Some(url);
             self.status = "Waiting for the phone…".into();
         }
         self.lines.clear();
+    }
+
+    /// After the phone's "Finished": the server again, a session with room for the cards
+    /// the count can still take.
+    fn new_link(&mut self) {
+        let c = self.ctx.clone();
+        self.server = upload::UploadServer::start_lan(self.dir.clone(), move || c.request_repaint());
+        self.phone_done = false;
+        self.show_link = true;
+        self.lines.clear();
+        match &self.server {
+            Ok(s) => {
+                let url = s.offer_session(SERIES, COUNT_MAX.saturating_sub(self.cards.len()));
+                self.qr = upload::qr(&url).ok();
+                self.url = Some(url);
+                self.status = "Waiting for the phone…".into();
+            }
+            Err(_) => {
+                self.url = None;
+                self.qr = None;
+            }
+        }
     }
 
     fn remove(&mut self, n: u32) {
@@ -632,7 +676,7 @@ impl CountTask {
                 } else {
                     "Show the code"
                 };
-                if !self.cards.is_empty() {
+                if !self.cards.is_empty() && !self.phone_done {
                     toggle_link = ui.add(egui::Button::new(label).frame(false)).clicked();
                 }
                 if let Some(dir) = &env.photos_dir
@@ -664,7 +708,17 @@ impl CountTask {
             self.start_over();
             return;
         }
-        if self.show_link || self.cards.is_empty() {
+        let mut new_link = false;
+        if self.phone_done {
+            panel(ui, "From the phone", |ui| {
+                ui.add(egui::Label::new("The phone pressed \"Finished\": the link is closed.").wrap());
+                new_link = ui
+                    .button("New link")
+                    .on_hover_text("Start the link again, for more cards from the phone")
+                    .clicked();
+                ui.label(RichText::new("Or drop photo files on this window.").weak());
+            });
+        } else if self.show_link || self.cards.is_empty() {
             panel(ui, "From the phone", |ui| {
                 match &self.server {
                     Err(e) => {
@@ -697,6 +751,9 @@ impl CountTask {
         }
         if toggle_link {
             self.show_link = !self.show_link;
+        }
+        if new_link {
+            self.new_link();
         }
         if let Some(n) = pick {
             self.follow = false;
@@ -1192,6 +1249,7 @@ impl CountTask {
                     &painter,
                     rect,
                     "Close Call - Manual review recommended",
+                    "Close Call",
                     0.0,
                     "count_close_calls",
                     &lines,
@@ -1402,6 +1460,9 @@ mod tests {
         let (_tx, news) = mpsc::channel();
         let task = CountTask {
             server: Err("no server in the test".into()),
+            phone_done: false,
+            dir: std::env::temp_dir(),
+            ctx: egui::Context::default(),
             url: None,
             qr: None,
             status: String::new(),

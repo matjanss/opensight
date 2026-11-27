@@ -490,8 +490,10 @@ sent to the sensor and the series isn't touched.
   up to 20 cards. After each photo the page keeps its buttons as "Upload another card" and
   "Choose another photo", and shows the app's line for each card, newest first, with the
   total on top once two are counted (it asks `/p/<token>/cards` every 2 s). Over 20 the
-  upload is refused ("The app holds as many cards as it can. Remove one there, or close its
-  window and start again."); removing a card gives its place back. Closed in the app: the
+  upload is refused ("The app holds as many cards as it can. Remove one there, or start over
+  there."); removing a card gives its place back. "Finished" at the bottom (2026-11-27, on
+  the single photo's page too) closes the link: the app stops the count's server (its side
+  says so, with "New link"), or closes the photo window. Closed in the app: the
   page says the session ended. Photo files dropped on the window count the same way. The tips
   on both pages no longer ask for a grey or coloured surface.
 - **The counting:** one worker thread, one card at a time in the order they came (1–5 s
@@ -538,6 +540,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-27 | C3, C7 | "Finished" on the phone's pages; run by Claude: `cargo test` (the app 61, 3 ignored; the new test `finished_closes_the_link`), clippy | **Pass** for the server: on a session and a single link, GET of `/finished` refused (405), POST answers "Finished: …", the app gets `Finished`, then the page and a second "Finished" are 404. The app's side (the photo window closing, the count's "New link") and the page on a phone not yet tried: the user. |
 | 2026-11-27 | C4, C7 | The interface cleanup (app TODO): count mode in the main window, the photo's results in "Card details"; run by Claude: `cargo test` (the app 60, 3 ignored; the new UI test `app_modes` with a demo photo of the demo series), clippy, the test's images looked at | **Pass** (the user's look is due). Shoot mode: the mode buttons, the series with "Clear series" and "Take photo"; with the photo: #, OpenSights, Paper, Off in the main table (paper 56 = sensor 56), "Card details" opening the window with 0.150 mm rms (6 of 6), the full table and the shots per ring; "Remove photo" closes it. Count mode in the same window and back; without a sensor the connection's card and counting still there. |
 | 2026-11-27 | C7 | Holes by hand in the count window; run by Claude: `cargo test` (the app 59, 3 ignored; the new UI test `holes_changed_by_hand`), clippy, the test's images looked at | **Pass** (the user's look is due). The false hole removed: 4 → 3 holes, the total less its score, the phone's line "…, 3 holes"; restored and removed again; the missed hole placed within a point of the click, dragged 1 mm (it followed the pointer, the card stayed), nudged 0.05 mm up, confirmed: scored 7 by the card, marked "by hand", the totals up by 7; deleted by Delete; Escape stops adding. |
 | 2026-11-26 | C7 | The user: the window and the phone page, with the fix below | **Pass** (the user's report: "works fine"). Merged to `main`. |

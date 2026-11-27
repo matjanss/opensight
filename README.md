@@ -38,15 +38,19 @@ rust-analyzer picks up `app/`.
   the solver's limits, the curtain's window, the mic span, the dead time and the channels.
   Values out of range can't be written; the sensor's own check has the last word, and the
   app says when it didn't take them.
+- The notices on the card (close calls, hits not scored) minimise with the bar at their top
+  right, to just "!" and a short title; click that to open them again.
 - Click on shots that overlap (a tight group, two shots through one hole) to get a list of
   them all; pick one to see its details.
 - Calibrate from the app: Settings → Measurement → **Calibrate…** walks through the spark
   points of the calibration template (16 points, 10 sparks each), fits the microphones'
   positions and timing, shows the result, and writes it to the sensor. **Field check…** makes
   a few sparks at the template's centre and tells you whether the calibration still holds.
-- **Card photo** (under the series): a photo of the shot card, taken with a phone, shows
+- **Take photo** (under the series): a photo of the shot card, taken with a phone, shows
   under the shots, and the app compares each shot with its hole (the sensor's accuracy).
-  The series list then shows each shot's score on the paper beside the sensor's.
+  The series list then shows each shot's score on the paper beside the sensor's; **Card
+  details** shows it all (the sensor against the holes per shot, warnings, shots per ring).
+  **Finished** on the phone's page closes the app's link.
   Scan the QR code with the phone (on the same Wi-Fi), take the photo with the card flat and
   the phone straight above it. The photo's metadata (location and the like) is removed;
   photos are kept 30 days unless marked to keep. Work in progress, see
