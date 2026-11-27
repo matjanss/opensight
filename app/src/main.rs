@@ -2653,7 +2653,7 @@ impl SensorApp {
             // then hides nothing).
             egui::Grid::new("series_plain").num_columns(3).spacing([14.0, 4.0]).show(ui, |ui| {
                 ui.label(RichText::new("#").small().weak());
-                ui.label(RichText::new("OpenSights").small().weak()).on_hover_text("The sensor's score.");
+                ui.label(RichText::new("OpenSights Score").small().weak()).on_hover_text("The sensor's score.");
                 ui.label("");
                 ui.end_row();
                 for i in (0..=self.series.len()).rev() {
@@ -2695,8 +2695,8 @@ impl SensorApp {
                     }
                 };
                 head(ui, "#", "");
-                head(ui, "OpenSights", "The sensor's score.");
-                head(ui, "Paper", "The score of the shot's hole in the card photo, gauged against the printed rings.");
+                head(ui, "OpenSights Score", "The sensor's score.");
+                head(ui, "Paper Score", "The score of the shot's hole in the card photo, gauged against the printed rings.");
                 if full {
                     head(ui, "Shot x, y (mm)", "Where the sensor put the shot.");
                     head(ui, "Hole − shot (mm)", "The hole in the photo minus the sensor's position: the sensor's error.");
@@ -5254,7 +5254,7 @@ mod tests {
         let keys = h.state().measured_keys();
         h.state_mut().card_photo = Some(CardPhoto { p, texture: None, keys });
         step(&mut h, "2-photo");
-        for l in ["Card details", "Remove photo", "Take another photo", "Open the folder", "Paper", "Off (mm)"] {
+        for l in ["Card details", "Remove photo", "Take another photo", "Open the folder", "Paper Score", "Off (mm)"] {
             assert!(has(&h, l), "{l}");
         }
         for l in ["Take photo", "Shot x, y (mm)", "Hole − shot (mm)", "SHOTS PER RING"] {
