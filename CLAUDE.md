@@ -487,6 +487,9 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
     - decimal scoring (off by default: whole rings, X = inner ten);
     - the card's zoom and replay bars, the default replay speed;
     - the close-call notice and its margin;
+    - the shot highlight color (red or blue, blue by default; `Highlight`, `highlight_ring`):
+      the ring around the shot clicked and around the holes found in a card photo, on the
+      card and in count mode;
     - the sensor list and pairing;
     - one "Sensor settings" panel: name, PIN, disconnect/forget.
 

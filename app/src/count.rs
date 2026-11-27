@@ -13,7 +13,7 @@ use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke, Ui, Vec2};
 use crate::card::{Card, CardTexture, Score};
 use crate::{
     BAR_BUTTON, BAR_PAD, CardView, LAST_SHOT_COLOR, PhotoJob, ZOOM_LABEL, card as panel, dashed_circle,
-    fade_control, notice, open_folder, paint_quad, photo, qr_code, review_detail, review_notice, score_chart,
+    fade_control, highlight_ring, notice, open_folder, paint_quad, photo, qr_code, review_detail, review_notice, score_chart,
     upload, zoom_controls,
 };
 
@@ -34,6 +34,8 @@ pub struct CountEnv<'a> {
     /// The close-call margin, mm, when the notice is on.
     pub close_call_mm: Option<f32>,
     pub photos_dir: Option<PathBuf>,
+    /// The colour of the rings drawn around holes (the setting).
+    pub highlight: Color32,
 }
 
 /// One hole on a counted card: mm from the card's centre (y up), its score.
@@ -1097,8 +1099,7 @@ impl CountTask {
             let c = pos(h);
             match h.by {
                 By::Found => {
-                    painter.circle_stroke(c, radius, Stroke::new(3.0, Color32::from_black_alpha(150)));
-                    painter.circle_stroke(c, radius, Stroke::new(1.2, Color32::WHITE));
+                    highlight_ring(&painter, c, radius, env.highlight);
                 }
                 // Added by hand: white dashes on a dark ring (as the main card's hits by hand).
                 By::Added => {
@@ -1267,8 +1268,7 @@ impl CountTask {
         if let Some((i, h)) = picked {
             let p = pos(h);
             if rect.contains(p) {
-                painter.circle_stroke(p, radius + 3.0, Stroke::new(3.0, Color32::BLACK));
-                painter.circle_stroke(p, radius + 3.0, Stroke::new(1.5, Color32::WHITE));
+                highlight_ring(&painter, p, radius + 3.0, env.highlight);
                 let gap = radius + 8.0;
                 let (offset, pivot) = if p.x > rect.center().x {
                     (egui::vec2(-gap, -gap), egui::Align2::RIGHT_BOTTOM)
@@ -1504,6 +1504,7 @@ mod tests {
             zoom_controls: true,
             close_call_mm: Some(0.5),
             photos_dir: None,
+            highlight: Color32::BLUE,
         };
         let mut h = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1200.0, 900.0))

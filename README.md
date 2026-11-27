@@ -38,6 +38,8 @@ rust-analyzer picks up `app/`.
   the solver's limits, the curtain's window, the mic span, the dead time and the channels.
   Values out of range can't be written; the sensor's own check has the last word, and the
   app says when it didn't take them.
+- Settings → **Shot highlight color** (blue or red): the ring drawn around the shot you
+  click, and around the holes found in a card photo.
 - The notices on the card (close calls, hits not scored) minimise with the bar at their top
   right, to just "!" and a short title; click that to open them again.
 - Click on shots that overlap (a tight group, two shots through one hole) to get a list of

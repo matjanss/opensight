@@ -32,6 +32,8 @@ use resolve::{How, Key};
 const CONTENT_MAX_WIDTH: f32 = 460.0;
 /// Width of the column next to the target card; below this window width they stack.
 const SIDE_WIDTH: f32 = 280.0;
+/// Space kept under the side column's last card, above the status bar.
+const SIDE_BOTTOM_GAP: f32 = 12.0;
 /// The side column with a card photo: the series table's six columns.
 const SIDE_WIDTH_PHOTO: f32 = 440.0;
 const STACK_BELOW: f32 = 640.0;
@@ -48,6 +50,7 @@ const KEY_DECIMAL: &str = "decimal_scoring";
 const KEY_ZOOM_CONTROLS: &str = "zoom_controls";
 const KEY_REPLAY_CONTROLS: &str = "replay_controls";
 const KEY_CLOSE_CALLS: &str = "close_calls";
+const KEY_HIGHLIGHT: &str = "highlight";
 const KEY_CLOSE_CALL_MM: &str = "close_call_mm";
 const KEY_REPLAY_DELAY: &str = "replay_delay_s";
 const KEY_SAVE_EVENTS: &str = "save_events";
@@ -790,6 +793,8 @@ struct SensorApp {
     show_close_calls: bool,
     /// A shot this close (mm) to a higher score is a close call.
     close_call_mm: f32,
+    /// The colour of the rings drawn around shots and holes.
+    highlight: Highlight,
     /// Seconds between shots when a replay starts; the bar's buttons change it from there.
     replay_delay_s: f32,
 
@@ -893,6 +898,10 @@ impl SensorApp {
                 .map_or(CLOSE_CALL_DEFAULT_MM, |v: f32| {
                     v.clamp(CLOSE_CALL_MIN_MM, CLOSE_CALL_MAX_MM)
                 }),
+            highlight: storage
+                .and_then(|s| s.get_string(KEY_HIGHLIGHT))
+                .and_then(|v| Highlight::from_key(&v))
+                .unwrap_or_default(),
             replay_delay_s,
             remembered: storage
                 .and_then(|s| s.get_string(KEY_REMEMBERED))
@@ -1285,6 +1294,7 @@ impl eframe::App for SensorApp {
             zoom_controls: self.show_zoom_controls,
             close_call_mm: self.show_close_calls.then_some(self.close_call_mm),
             photos_dir: Self::photos_dir(),
+            highlight: self.highlight.color(),
         };
         if let Some(task) = &mut self.count {
             task.poll(&env);
@@ -1430,6 +1440,7 @@ impl eframe::App for SensorApp {
         storage.set_string(KEY_REPLAY_CONTROLS, self.show_replay_controls.to_string());
         storage.set_string(KEY_CLOSE_CALLS, self.show_close_calls.to_string());
         storage.set_string(KEY_CLOSE_CALL_MM, self.close_call_mm.to_string());
+        storage.set_string(KEY_HIGHLIGHT, self.highlight.key().to_string());
         storage.set_string(KEY_REPLAY_DELAY, self.replay_delay_s.to_string());
         storage.set_string(KEY_SAVE_EVENTS, self.save_events.to_string());
         let (lo, hi) = self.curtain_window;
@@ -1498,6 +1509,7 @@ impl SensorApp {
             zoom_controls: self.show_zoom_controls,
             close_call_mm: self.show_close_calls.then_some(self.close_call_mm),
             photos_dir: Self::photos_dir(),
+            highlight: self.highlight.color(),
         };
         let mode = &mut self.mode;
         match &mut self.count {
@@ -1930,8 +1942,7 @@ impl SensorApp {
             }
             for h in cp.holes() {
                 let c = to_screen(self.card.to_card(h.0 as f32, h.1 as f32));
-                painter.circle_stroke(c, radius, Stroke::new(3.0, Color32::from_black_alpha(150)));
-                painter.circle_stroke(c, radius, Stroke::new(1.2, Color32::WHITE));
+                highlight_ring(&painter, c, radius, self.highlight.color());
             }
         }
 
@@ -2232,8 +2243,7 @@ impl SensorApp {
         }
         let how = self.manual.get(&resolve::key(shot)).copied();
         // A dark and a light ring, visible on the card's black and white parts.
-        painter.circle_stroke(pos, radius + 3.0, Stroke::new(3.0, Color32::BLACK));
-        painter.circle_stroke(pos, radius + 3.0, Stroke::new(1.5, Color32::WHITE));
+        highlight_ring(&painter, pos, radius + 3.0, self.highlight.color());
 
         // Beside the shot, towards the card's middle so it stays on the card.
         let gap = radius + 8.0;
@@ -2377,8 +2387,8 @@ impl SensorApp {
             });
         });
 
-        // The series card fills the rest of the column.
-        let series_h = ui.available_height();
+        // The series card fills the rest of the column, a little short of the status bar.
+        let series_h = (ui.available_height() - SIDE_BOTTOM_GAP).max(160.0);
         let mut clear = false;
         let mut photo = false;
         let (mut another, mut forget, mut details) = (false, false, false);
@@ -2630,10 +2640,6 @@ impl SensorApp {
     ) -> Option<(u32, u32)> {
         let mut clicked = None;
         let red = ui.visuals().error_fg_color;
-        let text = |s: &Score, strong: bool| {
-            let t = RichText::new(s.text(decimal));
-            if strong { t.strong() } else { t.weak() }
-        };
         // With the inner ten's X, for the table's cells.
         let text_x = |s: &Score, strong: bool| {
             let x = if s.inner_ten && decimal { " X" } else { "" };
@@ -2643,47 +2649,35 @@ impl SensorApp {
         let resolving = self.resolving.as_ref().map(|r| r.key);
         let by_hand = |key: Key| self.manual.get(&key).map(|&h| how_label(h));
         let Some(paper) = paper else {
-            // No photo: two columns.
-            for i in (0..=self.series.len()).rev() {
-                for (_, hit) in self.unscored.iter().rev().filter(|(after, _)| *after == i) {
-                    let key = resolve::key(hit);
+            // No photo: #, the score, and a note, all aligned left (a scroll bar on the right
+            // then hides nothing).
+            egui::Grid::new("series_plain").num_columns(3).spacing([14.0, 4.0]).show(ui, |ui| {
+                for i in (0..=self.series.len()).rev() {
+                    for (_, hit) in self.unscored.iter().rev().filter(|(after, _)| *after == i) {
+                        let key = resolve::key(hit);
+                        let bg = ui.painter().add(egui::Shape::Noop);
+                        let mut row = ui.label(RichText::new("·").weak()).rect;
+                        row = row.union(ui.label(RichText::new(unscored_label(hit)).weak().italics()).rect);
+                        row = row.union(ui.label("").rect);
+                        if row_click(ui, row, bg, key, resolving == Some(key), RESOLVE_TIP, &hit_name(hit, i)) {
+                            clicked = Some(key);
+                        }
+                        ui.end_row();
+                    }
+                    let Some(i) = i.checked_sub(1) else { break };
+                    let (shot, score) = &self.series[i];
+                    let key = (shot.boot, shot.seq);
                     let bg = ui.painter().add(egui::Shape::Noop);
-                    let row = ui
-                        .horizontal(|ui| {
-                            ui.label(RichText::new("·").weak());
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(unscored_label(hit)).weak().italics());
-                            });
-                        })
-                        .response
-                        .rect;
-                    if row_click(ui, row, bg, key, resolving == Some(key), RESOLVE_TIP, &hit_name(hit, i)) {
+                    let mut row = ui.label(RichText::new(format!("{}", i + 1)).weak()).rect;
+                    row = row.union(ui.label(text_x(score, true)).rect);
+                    let note = by_hand(key).map_or(RichText::new(""), |h| RichText::new(h).small().weak().italics());
+                    row = row.union(ui.label(note).rect);
+                    if row_click(ui, row, bg, key, self.selected_shot == Some(key), SHOW_TIP, &format!("Shot {}", i + 1)) {
                         clicked = Some(key);
                     }
+                    ui.end_row();
                 }
-                let Some(i) = i.checked_sub(1) else { break };
-                let (shot, score) = &self.series[i];
-                let key = (shot.boot, shot.seq);
-                let bg = ui.painter().add(egui::Shape::Noop);
-                let row = ui
-                    .horizontal(|ui| {
-                        ui.label(RichText::new(format!("{}", i + 1)).weak());
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(text(score, true));
-                            if score.inner_ten && decimal {
-                                ui.label(RichText::new("X").small().weak());
-                            }
-                            if let Some(h) = by_hand(key) {
-                                ui.label(RichText::new(h).small().weak().italics());
-                            }
-                        });
-                    })
-                    .response
-                    .rect;
-                if row_click(ui, row, bg, key, self.selected_shot == Some(key), SHOW_TIP, &format!("Shot {}", i + 1)) {
-                    clicked = Some(key);
-                }
-            }
+            });
             return clicked;
         };
         egui::Grid::new(("series_table", full))
@@ -2916,6 +2910,19 @@ impl SensorApp {
             });
             ui.label(
                 RichText::new("Flags shots this close to a higher score for manual review.")
+                    .small()
+                    .weak(),
+            );
+            ui.horizontal(|ui| {
+                ui.label("Shot highlight color");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    for h in [Highlight::Red, Highlight::Blue] {
+                        ui.selectable_value(&mut self.highlight, h, h.label());
+                    }
+                });
+            });
+            ui.label(
+                RichText::new("The ring around the shot you click, and around the holes found in a card photo.")
                     .small()
                     .weak(),
             );
@@ -4472,6 +4479,46 @@ fn mode_bar(ui: &mut Ui, mode: &mut Mode) {
 
 /// The status bar's dot: green when connected, orange when connected but something is wrong
 /// (`problem`, shown on hover) or while connecting, red when not connected.
+/// The colour of the rings drawn around shots and holes: a setting, for visibility on the
+/// card's black and white parts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Highlight {
+    #[default]
+    Blue,
+    Red,
+}
+
+impl Highlight {
+    fn key(self) -> &'static str {
+        match self {
+            Highlight::Blue => "blue",
+            Highlight::Red => "red",
+        }
+    }
+    fn from_key(k: &str) -> Option<Self> {
+        [Highlight::Blue, Highlight::Red].into_iter().find(|h| h.key() == k)
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Highlight::Blue => "Blue",
+            Highlight::Red => "Red",
+        }
+    }
+    fn color(self) -> Color32 {
+        match self {
+            Highlight::Blue => Color32::from_rgb(20, 110, 255),
+            Highlight::Red => Color32::from_rgb(255, 30, 30),
+        }
+    }
+}
+
+/// A ring in the highlight colour with a pale halo under it, seen on the card's black and
+/// white parts alike.
+fn highlight_ring(painter: &egui::Painter, c: egui::Pos2, r: f32, color: Color32) {
+    painter.circle_stroke(c, r, Stroke::new(4.0, Color32::from_white_alpha(210)));
+    painter.circle_stroke(c, r, Stroke::new(2.2, color));
+}
+
 fn link_dot(ui: &mut Ui, link: &Link, problem: Option<&str>) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
     let (c, r) = (rect.center(), 4.5);
@@ -5292,6 +5339,59 @@ mod tests {
         h.run_steps(3);
         assert!(matches!(h.state().link, Link::Idle));
         assert!(problem(&h).is_none());
+    }
+
+    /// The side column in a short window, with and without a card photo: its last button
+    /// ("Open the folder", "Take photo") above the status bar, and no table cell under the
+    /// scroll bar's side. `UI_SHOTS=<dir>` saves an image of each size.
+    #[test]
+    fn side_column_fits_short_windows() {
+        let dir = std::env::temp_dir().join(format!("opensights-short-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shots_dir = std::env::var_os("UI_SHOTS").map(std::path::PathBuf::from);
+        for height in [560.0, 700.0] {
+            let mut h = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1100.0, height))
+                .build_eframe(|cc| {
+                    install_fonts(&cc.egui_ctx);
+                    let link = (tokio::sync::mpsc::unbounded_channel().0, mpsc::channel().1);
+                    let mut app = SensorApp::with_link(cc, link).demo_series();
+                    app.event_log = None;
+                    app
+                });
+            let status_top = |h: &egui_kittest::Harness<SensorApp>| {
+                h.get_by_label_contains("No sensor connected").rect().top()
+            };
+            h.run_steps(4);
+            let save = |h: &mut egui_kittest::Harness<SensorApp>, n: &str| {
+                if let Some(d) = &shots_dir {
+                    h.render().expect("render").save(d.join(format!("short-{height}-{n}.png"))).unwrap();
+                }
+            };
+            save(&mut h, "1-plain");
+            let b = h.get_by_label("Take photo").rect();
+            assert!(b.bottom() < status_top(&h), "{height}: {b:?} vs {}", status_top(&h));
+            let shots: Vec<(f64, f64)> = h
+                .state()
+                .series
+                .iter()
+                .filter(|(s, _)| s.scored())
+                .map(|(s, _)| (f64::from(s.x_mm()), f64::from(s.y_mm())))
+                .collect();
+            let card = card::air_pistol();
+            let bytes = photo::demo_photo(&card, &shots, 0.1, 7).unwrap();
+            let stored = upload::store(&dir, "short", &bytes, upload::now_unix()).unwrap();
+            let p = photo::process(stored, &card, &shots).unwrap();
+            let keys = h.state().measured_keys();
+            h.state_mut().card_photo = Some(CardPhoto { p, texture: None, keys });
+            h.run_steps(4);
+            save(&mut h, "2-photo");
+            for l in ["Open the folder", "Remove photo", "Card details"] {
+                let b = h.get_by_label(l).rect();
+                assert!(b.bottom() < status_top(&h), "{height} {l}: {b:?} vs {}", status_top(&h));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The settings editor (app TODO) against a sensor played by the test: opened, three
