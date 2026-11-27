@@ -42,18 +42,15 @@ status and settings are in (step 5c).
 
 ## The solver: Huber weights and mic health (to discuss again)
 
-**Studied 2026-11-27 (MEASUREMENT 4d): Huber is not the way; drop-one started by the sigmas
-is.** The first item of "Order" below is done (`tools/huber_study`, `tools/replay --alt`).
-Huber weights help a little against a mic 0.5–3 µs off, not the worst shots, and fail a big
-fault (1.9 mm at 24 µs, today 0.021); the two steps below keep the bad mic in about 20 % of
-big faults ("two far out"), and a residual limit over weighted residuals passed shots 1.9 mm
-wrong. Today's drop-one, started when the rms is over 3–5 times what the sigmas predict
-(instead of 1500 ns), takes one mic 1 µs off from 0.13 to 0.03–0.07 mm, 3 µs off from 0.41 to
-0.017 mm (on the board's path too), and never touches healthy shots, given sigmas from the
-calibration. Its drops per channel are the mic-health signal. For the user to decide: that
-change in the firmware (apart from the verdict's limit), the trigger (3 or 5), what an
-uncertain shot does (two mics off), and the health flag in the app; first the same replay on
-the real logs of 7-3 and 7-4. The text below is the original idea, kept for the record.
+**Note (2026-11-27, MEASUREMENT 4d): on synthetic shots Huber weights don't seem to add
+value.** Against one mic 0.5–3 µs off they help a little (not the worst shots), against a
+big fault they are much worse than today's drop-one (1.9 mm at 24 µs, today 0.021). What did
+help was today's drop-one started earlier: when the rms is over 3–5 times what the mics'
+sigmas predict, instead of over 1500 ns (one mic 1 µs off: 0.13 → 0.03–0.07 mm; 3 µs: 0.41 →
+0.017 mm; healthy shots untouched). It needs sigmas from the calibration, so it waits for
+the real logs of 7-3 and 7-4 (`tools/replay --alt dropS:3`, `dropS:5`); if it holds up
+there, it goes into the firmware as a setting, off by default (a model change). The idea
+below is kept as it was.
 
 An idea from 2026-11-26, not decided. It touches the firmware solver (`lib/measure/solver.cpp`,
 PLAN D12), the protocol and the app; it is listed here because the visible result (the mic
