@@ -24,6 +24,23 @@ status and settings are in (step 5c).
   (`assets/templates/grid-4x4.json`); choosing another template file, and the sparks per
   point, in the window.
 
+## Shots
+
+- **Undo shot / too many shots on a card.** Normally a card takes x shots, then a new
+  card goes in. If the shooter fires too many holes in one card (or a stray shot is not
+  meant for this series), the app needs a way to take a shot out of the series: "Undo
+  shot" on the newest shot, and removing any shot from the list. Which shot ISSF drops
+  (user's question, 2026-11-27; check the current rulebook text before building, this is
+  from memory): for excess shots in a series or match, the General Technical Rules
+  (6.3.8, "Excess shots") say the shot of the highest value is not counted, and a
+  penalty of 2 points (in some events per excess shot) is deducted, so a shooter gains
+  nothing from it. It is the highest-value shot, not the last one fired, because on paper
+  there is no telling the order. With a sensor the order is known, so the app can offer
+  both: undo the last one (a mistake, no penalty), and "excess shots" (ISSF: the highest
+  scores go, with the penalty). Open points: whether the rule applies per series or per
+  card, and the penalty for the discipline; keep the removed shot in the event log (a
+  `manual` line, as the resolve window does) and greyed in the list, so nothing is lost.
+
 ## The solver: Huber weights and mic health (to discuss again)
 
 **Note (2026-11-27, MEASUREMENT 4d): on synthetic shots Huber weights don't seem to add
