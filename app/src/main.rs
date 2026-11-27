@@ -57,6 +57,8 @@ const KEY_CURTAIN_WINDOW: &str = "curtain_window_ns";
 const CURTAIN_DEFAULT_NS: (f32, f32) = (45_000.0, 100_000.0);
 /// How long a settings write waits for the sensor's new settings: it drops a write it can't
 /// take (out of range) without an error.
+/// The sensor beats every 2 s; the status bar's dot turns orange after this long without one.
+const HEARTBEAT_LATE: Duration = Duration::from_secs(6);
 const SETTINGS_WAIT: Duration = Duration::from_secs(5);
 
 /// The window and taskbar icon (assets/icon/). None if the PNG can't be read: the
@@ -1097,7 +1099,7 @@ impl SensorApp {
                     self.name_input = name.clone();
                     self.sensor_name = name;
                     self.heartbeat = heartbeat;
-                    self.heartbeat_at = heartbeat.map(|_| Instant::now());
+                    self.heartbeat_at = Some(Instant::now()); // from here the beats are awaited
                     self.message = None;
                 }
                 Event::Disconnected { reason } => {
@@ -1445,7 +1447,8 @@ impl SensorApp {
                 Link::Connecting { name } => format!("Connecting to {name}…"),
                 Link::Idle => "No sensor connected.".to_owned(),
             };
-            link_dot(ui, &self.link);
+            let problem = self.link_problem();
+            link_dot(ui, &self.link, problem.as_deref());
             ui.label(text);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let gear = ui
@@ -2931,8 +2934,6 @@ impl SensorApp {
                     ui.separator();
                     self.pin_card(ui);
                     ui.separator();
-                    self.heartbeat_card(ui);
-                    ui.separator();
                     self.measurement_card(ui);
                     ui.separator();
                     section_title(ui, "Connection");
@@ -3244,23 +3245,20 @@ impl SensorApp {
         });
     }
 
-    fn heartbeat_card(&mut self, ui: &mut Ui) {
-        section(ui, "Heartbeat", |ui| match self.heartbeat {
-            Some(ms) => {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(group_digits(ms)).size(40.0).strong());
-                    ui.label(RichText::new("ms").weak());
-                });
-                let ago = self.heartbeat_at.map_or(0, |t| t.elapsed().as_secs());
-                ui.label(RichText::new(format!("Uptime {} · updated {ago} s ago", uptime(ms))).weak());
+    /// Why the link is up but not well, for the status bar's dot: the sensor's heartbeat
+    /// (every 2 s, `HEARTBEAT_LATE`) has stopped, as when its firmware has crashed or hung.
+    fn link_problem(&self) -> Option<String> {
+        if !matches!(self.link, Link::Connected { .. }) {
+            return None;
+        }
+        let ago = self.heartbeat_at?.elapsed();
+        (ago > HEARTBEAT_LATE).then(|| {
+            if self.heartbeat.is_some() {
+                format!("No heartbeat from the sensor for {} s: it may have crashed or hung.", ago.as_secs())
+            } else {
+                format!("No heartbeat from the sensor yet ({} s since connecting).", ago.as_secs())
             }
-            None => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(RichText::new("Waiting for the first heartbeat…").weak());
-                });
-            }
-        });
+        })
     }
 
     fn name_card(&mut self, ui: &mut Ui) {
@@ -3519,24 +3517,6 @@ fn pairing_help_card(ui: &mut Ui) {
 }
 
 // ---- Formatting ----
-
-/// 1234567 → "1 234 567" (thin spaces, so it reads well at any size).
-fn group_digits(n: u32) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push('\u{2009}');
-        }
-        out.push(c);
-    }
-    out
-}
-
-fn uptime(ms: u32) -> String {
-    let s = ms / 1000;
-    format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
-}
 
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -4490,23 +4470,40 @@ fn mode_bar(ui: &mut Ui, mode: &mut Mode) {
     ui.add_space(4.0);
 }
 
-fn link_dot(ui: &mut Ui, link: &Link) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+/// The status bar's dot: green when connected, orange when connected but something is wrong
+/// (`problem`, shown on hover) or while connecting, red when not connected.
+fn link_dot(ui: &mut Ui, link: &Link, problem: Option<&str>) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
     let (c, r) = (rect.center(), 4.5);
-    let color = ui.visuals().strong_text_color();
+    let dark = ui.visuals().dark_mode;
+    let (green, orange, red) = if dark {
+        (Color32::from_rgb(70, 200, 110), Color32::from_rgb(240, 165, 50), Color32::from_rgb(235, 85, 75))
+    } else {
+        (Color32::from_rgb(30, 150, 70), Color32::from_rgb(215, 125, 10), Color32::from_rgb(200, 45, 40))
+    };
     let p = ui.painter();
-    match link {
-        Link::Connected { .. } => {
-            p.circle_filled(c, r, color);
-        }
+    let tip = match link {
+        Link::Connected { .. } => match problem {
+            None => {
+                p.circle_filled(c, r, green);
+                "Connected"
+            }
+            Some(why) => {
+                p.circle_filled(c, r, orange);
+                why
+            }
+        },
         Link::Connecting { .. } => {
-            p.circle_stroke(c, r, Stroke::new(1.2, color));
-            p.circle_filled(c, 1.6, color);
+            p.circle_stroke(c, r, Stroke::new(1.5, orange));
+            p.circle_filled(c, 1.6, orange);
+            "Connecting"
         }
         Link::Idle => {
-            p.circle_stroke(c, r, Stroke::new(1.2, color));
+            p.circle_filled(c, r, red);
+            "Not connected"
         }
-    }
+    };
+    response.on_hover_text(tip);
 }
 
 /// An optional setting (0: off): a checkbox, and the value when on. `unit`: stored per shown
@@ -5251,6 +5248,50 @@ mod tests {
         step(&mut h, "8-count-no-sensor");
         assert!(has(&h, "No cards yet."));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The status bar's dot: red with no sensor, green when connected, orange once the
+    /// heartbeat is late (as when the sensor has crashed), green again with the next beat.
+    #[test]
+    fn link_dot_colours() {
+        let (ev_tx, ev_rx) = mpsc::channel();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .build_eframe(move |cc| {
+                install_fonts(&cc.egui_ctx);
+                let mut app = SensorApp::with_link(cc, (tokio::sync::mpsc::unbounded_channel().0, ev_rx));
+                app.event_log = None;
+                app
+            });
+        let problem = |h: &egui_kittest::Harness<SensorApp>| h.state().link_problem();
+        assert!(matches!(h.state().link, Link::Idle));
+        assert!(problem(&h).is_none());
+        ev_tx
+            .send(Event::Connected {
+                id: "t".into(),
+                name: "T".into(),
+                heartbeat: Some(1000),
+                pin_supported: true,
+                shots_supported: true,
+            })
+            .unwrap();
+        h.run_steps(3);
+        assert!(matches!(h.state().link, Link::Connected { .. }));
+        assert!(problem(&h).is_none());
+        // No beat for longer than the limit.
+        h.state_mut().heartbeat_at = Some(Instant::now() - HEARTBEAT_LATE - Duration::from_secs(1));
+        let why = problem(&h).expect("late");
+        assert!(why.contains("No heartbeat"), "{why}");
+        h.run_steps(2);
+        // The next beat.
+        ev_tx.send(Event::Heartbeat(3000)).unwrap();
+        h.run_steps(3);
+        assert!(problem(&h).is_none());
+        // Gone: no problem to report, the dot is red.
+        ev_tx.send(Event::Disconnected { reason: None }).unwrap();
+        h.run_steps(3);
+        assert!(matches!(h.state().link, Link::Idle));
+        assert!(problem(&h).is_none());
     }
 
     /// The settings editor (app TODO) against a sensor played by the test: opened, three

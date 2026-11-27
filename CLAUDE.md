@@ -467,6 +467,9 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
       popup; clicking overlapping shots lists them, newest first, and the one picked opens
       its popup (`overlap_list`; the UI test `overlapping_shots_listed`);
     - zoom with the wheel or the zoom bar (bottom right), drag to pan;
+    - the status bar's dot (`link_dot`): green connected, orange connected with the
+      heartbeat (every 2 s) missing for `HEARTBEAT_LATE` 6 s (`link_problem`, on hover) or
+      connecting, red not connected; the UI test `link_dot_colours`;
     - the replay bar (bottom left) shows the series again shot by shot; both bars can be
       hidden in settings;
     - a close-call notice at the top left lists every shot of the series within the
@@ -485,7 +488,7 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
     - the card's zoom and replay bars, the default replay speed;
     - the close-call notice and its margin;
     - the sensor list and pairing;
-    - one "Sensor settings" panel: name, PIN, heartbeat, disconnect/forget.
+    - one "Sensor settings" panel: name, PIN, disconnect/forget.
 
     The PIN popup and messages show in the settings window while it's open.
   - **Storage:** the remembered sensor ID and the preferences are saved with eframe's
