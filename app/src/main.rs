@@ -2458,13 +2458,14 @@ impl SensorApp {
                 ui.separator();
                 // The buttons at the bottom, the list scrolling in the height between.
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                    ui.horizontal_wrapped(|ui| {
+                    // Rows that never wrap: a wrapped row would grow downwards, under the
+                    // status bar, since the column is laid out from the bottom up.
+                    ui.horizontal(|ui| {
                         clear = ui
                             .button("Clear series")
                             .on_hover_text("Start a new series. Also clears the sensor's stored shots.")
                             .clicked();
                         if let Some(cp) = &self.card_photo {
-                            another = ui.button("Take another photo").clicked();
                             if ui.button("Open the folder").clicked()
                                 && let Some(dir) = cp.p.photo.image.parent()
                             {
@@ -2475,7 +2476,14 @@ impl SensorApp {
                         }
                     });
                     if let Some(cp) = &self.card_photo {
-                        ui.horizontal_wrapped(|ui| {
+                        ui.horizontal(|ui| {
+                            another = ui.button("Take another photo").clicked();
+                            forget = ui
+                                .button("Remove photo")
+                                .on_hover_text("Takes the photo off the card and the series (the file stays).")
+                                .clicked();
+                        });
+                        ui.horizontal(|ui| {
                             let notes = photo_notes(cp, &self.series).len();
                             let label = if notes > 0 { "Card details ⚠" } else { "Card details" };
                             let tip = if notes > 0 {
@@ -2488,10 +2496,6 @@ impl SensorApp {
                                 "The photo's results in full: the sensor against the holes, the shots per ring.".into()
                             };
                             details = ui.button(label).on_hover_text(tip).clicked();
-                            forget = ui
-                                .button("Remove photo")
-                                .on_hover_text("Takes the photo off the card and the series (the file stays).")
-                                .clicked();
                         });
                         ui.checkbox(&mut keep, "Keep the photo for evaluation (else removed after 30 days)");
                     }
@@ -5353,9 +5357,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("opensights-short-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let shots_dir = std::env::var_os("UI_SHOTS").map(std::path::PathBuf::from);
-        for height in [560.0, 700.0] {
+        for (width, height) in [(1100.0, 560.0), (1100.0, 700.0), (820.0, 700.0), (700.0, 640.0)] {
             let mut h = egui_kittest::Harness::builder()
-                .with_size(egui::vec2(1100.0, height))
+                .with_size(egui::vec2(width, height))
                 .build_eframe(|cc| {
                     install_fonts(&cc.egui_ctx);
                     let link = (tokio::sync::mpsc::unbounded_channel().0, mpsc::channel().1);
@@ -5369,12 +5373,12 @@ mod tests {
             h.run_steps(4);
             let save = |h: &mut egui_kittest::Harness<SensorApp>, n: &str| {
                 if let Some(d) = &shots_dir {
-                    h.render().expect("render").save(d.join(format!("short-{height}-{n}.png"))).unwrap();
+                    h.render().expect("render").save(d.join(format!("short-{width}x{height}-{n}.png"))).unwrap();
                 }
             };
             save(&mut h, "1-plain");
             let b = h.get_by_label("Take photo").rect();
-            assert!(b.bottom() < status_top(&h), "{height}: {b:?} vs {}", status_top(&h));
+            assert!(b.bottom() < status_top(&h), "{width}x{height}: {b:?} vs {}", status_top(&h));
             let shots: Vec<(f64, f64)> = h
                 .state()
                 .series
@@ -5392,7 +5396,7 @@ mod tests {
             save(&mut h, "2-photo");
             for l in ["Open the folder", "Remove photo", "Card details"] {
                 let b = h.get_by_label(l).rect();
-                assert!(b.bottom() < status_top(&h), "{height} {l}: {b:?} vs {}", status_top(&h));
+                assert!(b.bottom() < status_top(&h), "{width}x{height} {l}: {b:?} vs {}", status_top(&h));
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
