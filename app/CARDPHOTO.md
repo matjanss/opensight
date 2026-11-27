@@ -17,7 +17,7 @@ and reviews the results.
 | C4 | In the app: the photo under the shots, the ground-truth panel | the processing passes through the app's path (2026-11-23); the UI looked at and accepted (the user, 2026-11-24) |
 | C5 | Real photos: registration (no holes), then holes | first set (2026-11-25): registration passes after a fix; the holes with the gauge (torn holes): every hole found, 0.035–0.046 mm from straight above; in the app, with the camera's angle and the expected error; overlapping torn holes and the scans' truth still open (see C5) |
 | C6 | The serial number from the photo | later |
-| C7 | Counting cards: a photo apart from the series, its holes scored | pass (2026-11-26): every real photo counted and drawn upright (the axes from the printed numbers); the window and the phone page looked at by the user; merged to `main`. Open: a false hole on ring 1's line (see C5) |
+| C7 | Counting cards: a photo apart from the series, its holes scored | pass (2026-11-26): every real photo counted and drawn upright (the axes from the printed numbers); the window and the phone page looked at by the user; merged to `main`. Open: a false hole on ring 1's line (see C5). Holes by hand (added, removed, restored): the UI test passes (2026-11-27, merged to `main`); the user's look is due |
 
 ## The card and its coordinates
 
@@ -480,7 +480,7 @@ sent to the sensor and the series isn't touched.
   zoom and pan, the holes as rings; a hole clicked shows its score, x, y and distance from the
   centre); the close-call notice on the card, as on the main card. Right: the cards in the
   order they came ("Card 3: 92, 10 holes", "counting…", "waiting", "not counted, <why>. Take
-  it again."), each with ✕ to remove it; the total over the cards counted ("6 cards · 58
+  it again."), each with × to remove it; the total over the cards counted ("6 cards · 58
   holes", X count or whole rings); "Show the code"; and the shown card: its score, the
   warnings (tilt, overlapping holes), the holes best first (score, x, y, "overlaps"), holes
   per ring, the photo's details. The view follows the newest card counted until one is
@@ -502,7 +502,22 @@ sent to the sensor and the series isn't touched.
   up" warning (C5, above): a score doesn't depend on it. A tilt warning now needs the expected
   error to be at least 1.2 times the straight-down one (a clean card has no holes away from
   the centre).
-- **Tests:** `count::tests::counts_a_dropped_photo` (the demo photo, 6 holes, through the
+- **Holes by hand** (2026-11-27, the user: on another computer some black holes on a dark
+  background were missed): the shown card's holes can be changed. "Add a hole…" under the
+  holes list: a click on the card puts the hole there, a drag that starts on it moves it, the
+  arrow keys nudge it 0.05 mm (Shift 0.5 mm; they don't flip the cards meanwhile), x and y
+  can be typed, its score shows live; Confirm adds it, scored on the card and marked "by
+  hand" (a dashed ring, as the main card's hits by hand); Cancel or Escape stops. Each row has
+  × to remove its hole: a hole added by hand goes, a found one stays listed struck through
+  ("removed by hand", a faint dashed ring with a cross) with "Restore"; Delete removes the
+  selected hole. Removed holes don't count anywhere: the card's and the window's totals, the
+  hole counts, the X count, the chart, the close calls and the phone's lines. The changes
+  live with the window's cards (in memory, as the count does).
+- **Tests:** `count::tests::holes_changed_by_hand` (the window headless, a counted card
+  with a false hole and a missed one: removed by its ×, restored, removed again; the missed
+  one added by a click, a 1 mm drag, an arrow key and Confirm, scored, "by hand"; the added
+  one deleted by Delete; Escape; the totals and the phone's line after each);
+  `count::tests::counts_a_dropped_photo` (the demo photo, 6 holes, through the
   worker: each within 0.1 mm of its place, scored as the card scores it, best first, the
   grid image saved and loaded, the phone's line); `upload::tests::session_takes_many_until_full`
   (photo after photo up to the room, the refusal, a place given back, a dropped file's place,
@@ -513,7 +528,7 @@ sent to the sensor and the series isn't touched.
   folder in turn with "Upload another card". Expect card 1: 29, 5 holes; card 2: 28 or 29, 4
   holes, with a close call (its 8 is 0.02–0.09 mm from the 9); card 3: 44, 9 holes, "2 holes
   overlap another"; card 4: 8, 3 holes; all four: 109 or 110, 21 holes, on the phone too. A
-  photo of something else: "not counted, no card found…". Then ✕, the arrow keys, and closing
+  photo of something else: "not counted, no card found…". Then ×, the arrow keys, and closing
   the window (the phone's page says so).
 
 ## Results
@@ -522,6 +537,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-27 | C7 | Holes by hand in the count window; run by Claude: `cargo test` (the app 59, 3 ignored; the new UI test `holes_changed_by_hand`), clippy, the test's images looked at | **Pass** (the user's look is due). The false hole removed: 4 → 3 holes, the total less its score, the phone's line "…, 3 holes"; restored and removed again; the missed hole placed within a point of the click, dragged 1 mm (it followed the pointer, the card stayed), nudged 0.05 mm up, confirmed: scored 7 by the card, marked "by hand", the totals up by 7; deleted by Delete; Escape stops adding. |
 | 2026-11-26 | C7 | The user: the window and the phone page, with the fix below | **Pass** (the user's report: "works fine"). Merged to `main`. |
 | 2026-11-26 | C7 | Counting cards drawn turned by random angles (the user's 9 photos of 2026-11-26), and the numbers never deciding the way up; run by Claude: every real photo (the 9 and the 59 earlier) through the count's path against the committed code, the saved card images looked at, `cargo test` | **Pass.** The cause: the card's outline was found on none of the photos (paper on a light table, the lens's fit bending the edges beyond the rings), so the angle was whatever the ring fit gave (seen 1–36° off a right angle), and the quarter-turn match sampled the numbers' places on those arbitrary axes. Now the axes come from the printed numbers (C1, found on all 68 photos, all 8 bands agreeing) and the quarter turn from the digits cropped and scaled alike (C4): decided on all 68, margins 0.22–0.38 (need 0.1; the demo 0.51, was 0.18). **Every saved card image upright**, looked at (the serial top right, the ISSF mark bottom left, the maker bottom right), scans included. Synthetic registration within 0.012–0.014 mm (C1's outline 0.013–0.016). Holes against the committed code: 241 of 242 matched on the 59, radius change median 0.002 mm, 95 % 0.022 mm; card 1's hole below the 5 in one photo 0.24 mm, now nearer its median over 12 photos; card 2's close-call hole (on the −x 7) ±0.081 mm over its 10 photos, was ±0.066 (tilted photos; from straight above 24.08 mm both). The counts as in C7 but card 2's IMG_3463: 30, was 29 (its close-call hole 24.002 → 23.983 mm, across the 8's edge at 24.0 mm). Found on the way: the number patch in the expected card (C5) assumed the four copies at their places; real cards print the horizontal axis's 0.6 mm off, which split a hole on the 3 into two: each copy is now aligned first. On the 9: the counts 10, 22, 28, 11, 9, 8, 44, 29, 29; a false hole on ring 1's line on card 4 gone, one on card 6 (77.25 mm) still there (see C5, not solved). `cargo test` passes (cardphoto 3 + 2 + 10 + 4 + 10 + 7, the app 49), clippy clean. |
 | 2026-11-26 | C7 | Counting cards: the window, the session link and the phone's page, the worker; run by Claude: `cargo test`, and every real photo (59 files, the 4 holed cards and the clean one) through the count's path | **Pass** (the window and the phone page not yet looked at: the user). The demo photo: 6 of 6 holes, within 0.005–0.060 mm, each scored as the card scores its true place. Real: every photo of a card counted the same: clean 0 (14 files), card 1: 29, 5 holes (12); card 3: 44, 9 holes, its pair flagged (12); card 4: 8, 3 holes (9 and the scan); card 2: 28 in 5 photos, 29 in 5: one hole 0.017–0.090 mm inside the 8 (the close call shows it), its expected error 0.06–0.15 mm. 189 s for the 59 (3.2 s each, release). **Found:** the printed numbers never decide the card's way up on real cards (margins 0.004–0.072, need 0.1; see C5, not solved). `cargo test` passes (cardphoto 10 + 4 + 10 + 7, the app 49, 2 ignored), clippy clean. |

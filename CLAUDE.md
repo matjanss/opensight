@@ -436,7 +436,10 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   total. A worker thread counts them in turn (`photo::process` without shots, the photo on the
   card's grid saved as `<photo>.grid.png`, only the shown card's in memory). The window: the
   card (photo, fade, zoom, holes as rings, close calls), the cards with × and the total, the
-  shown card's holes best first. `COUNT_PHOTOS=<folder> cargo test --release count::real --
+  shown card's holes best first. Holes by hand (2026-11-27): "Add a hole…" (a click, a drag,
+  arrow keys, Confirm; marked "by hand"), × per row (an added hole goes, a found one is
+  struck through, "Restore"), Delete; removed holes count nowhere (`By`, `Placing`,
+  `HoleEdit`; the UI test `holes_changed_by_hand`). `COUNT_PHOTOS=<folder> cargo test --release count::real --
   --ignored --nocapture` counts a folder of real photos as the window does.
 - **Calibration (step 5d):** `calwizard.rs` holds the wizard and the field check as state
   machines (events, Status and Calibration in; actions out: calibration mode, the template

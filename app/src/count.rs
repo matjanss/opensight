@@ -12,8 +12,9 @@ use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke, Ui, Vec2};
 
 use crate::card::{Card, CardTexture, Score};
 use crate::{
-    BAR_BUTTON, BAR_PAD, CardView, PhotoJob, ZOOM_LABEL, card as panel, fade_control, notice, open_folder,
-    paint_quad, photo, qr_code, review_detail, review_notice, score_chart, title, upload, zoom_controls,
+    BAR_BUTTON, BAR_PAD, CardView, LAST_SHOT_COLOR, PhotoJob, ZOOM_LABEL, card as panel, dashed_circle,
+    fade_control, notice, open_folder, paint_quad, photo, qr_code, review_detail, review_notice, score_chart,
+    title, upload, zoom_controls,
 };
 
 /// The most cards a window holds.
@@ -36,10 +37,30 @@ pub struct CountEnv<'a> {
 }
 
 /// One hole on a counted card: mm from the card's centre (y up), its score.
+#[derive(Clone, Debug)]
 struct Hole {
     at: (f64, f64),
     score: Score,
     overlap: bool,
+    by: By,
+}
+
+/// Where a hole came from: the count found it, or the shooter added it by hand (one the
+/// count missed: a black hole on a dark background); a found one can be removed by hand (not
+/// a hole, or one hole counted twice) and restored. A removed hole doesn't count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum By {
+    Found,
+    Added,
+    Removed,
+}
+
+/// Adding a hole by hand on the shown card: its place (mm, once clicked), and the grab
+/// offset while it is dragged.
+struct Placing {
+    card: u32,
+    at: Option<(f64, f64)>,
+    grab: Option<Vec2>,
 }
 
 /// A card counted.
@@ -62,13 +83,10 @@ impl Count {
                 at,
                 score: card.score(at.0 as f32, at.1 as f32),
                 overlap: p.hole_overlap.get(i).copied().unwrap_or(false),
+                by: By::Found,
             })
             .collect();
-        holes.sort_by(|a, b| {
-            (b.score.tenths, b.score.inner_ten)
-                .cmp(&(a.score.tenths, a.score.inner_ten))
-                .then(a.at.0.hypot(a.at.1).total_cmp(&b.at.0.hypot(b.at.1)))
-        });
+        sort_holes(&mut holes);
         let details = format!(
             "{:.1} px per mm; the rings fit to {:.3} mm rms ({} of {} edge points); lens k1 {:+.3}. Taken {:.0}° \
              from straight above: the holes expected to within about {:.2} mm (rms). Processed in {:.1} s. The \
@@ -91,17 +109,67 @@ impl Count {
         }
     }
 
+    /// The holes that count: found or added, not removed.
+    fn counted(&self) -> impl Iterator<Item = &Hole> {
+        self.holes.iter().filter(|h| h.by != By::Removed)
+    }
+
+    fn n_holes(&self) -> usize {
+        self.counted().count()
+    }
+
     fn rings(&self) -> u32 {
-        self.holes.iter().map(|h| u32::from(h.score.ring)).sum()
+        self.counted().map(|h| u32::from(h.score.ring)).sum()
     }
 
     fn tenths(&self) -> u32 {
-        self.holes.iter().map(|h| u32::from(h.score.tenths)).sum()
+        self.counted().map(|h| u32::from(h.score.tenths)).sum()
+    }
+
+    /// A hole added by hand at `at`, scored on the card. Returns its place in the list.
+    fn add(&mut self, at: (f64, f64), card: &Card) -> usize {
+        self.holes.push(Hole {
+            at,
+            score: card.score(at.0 as f32, at.1 as f32),
+            overlap: false,
+            by: By::Added,
+        });
+        let new = self.holes.len() - 1;
+        let key = |h: &Hole| (h.at.0.to_bits(), h.at.1.to_bits(), h.by);
+        let k = key(&self.holes[new]);
+        sort_holes(&mut self.holes);
+        self.holes.iter().rposition(|h| key(h) == k).unwrap_or(new)
+    }
+
+    /// Hole `i` removed: an added one goes, a found one stays listed as removed.
+    fn remove(&mut self, i: usize) {
+        match self.holes.get(i).map(|h| h.by) {
+            Some(By::Added) => {
+                self.holes.remove(i);
+            }
+            Some(By::Found) => self.holes[i].by = By::Removed,
+            _ => {}
+        }
+    }
+
+    fn restore(&mut self, i: usize) {
+        if let Some(h) = self.holes.get_mut(i).filter(|h| h.by == By::Removed) {
+            h.by = By::Found;
+        }
     }
 
     fn total(&self, decimal: bool) -> String {
         total_text(self.rings(), self.tenths(), decimal)
     }
+}
+
+/// Best first; equal scores the nearer to the centre first.
+fn sort_holes(holes: &mut [Hole]) {
+    holes.sort_by(|a, b| {
+        (b.score.tenths, b.score.inner_ten)
+            .cmp(&(a.score.tenths, a.score.inner_ten))
+            .then(a.at.0.hypot(a.at.1).total_cmp(&b.at.0.hypot(b.at.1)))
+    });
 }
 
 fn total_text(rings: u32, tenths: u32, decimal: bool) -> String {
@@ -140,11 +208,20 @@ impl Counted {
                 "Card {}: {}, {}",
                 self.n,
                 c.total(decimal),
-                plural(c.holes.len(), "hole", "holes")
+                plural(c.n_holes(), "hole", "holes")
             ),
             State::Failed(e) => format!("Card {}: not counted, {e}. Take it again.", self.n),
         }
     }
+}
+
+/// A change by hand to the shown card's holes (the side panel's buttons, the card's keys).
+enum HoleEdit {
+    StartAdd,
+    Confirm,
+    Cancel,
+    Remove(usize),
+    Restore(usize),
 }
 
 /// What the worker tells the window.
@@ -176,6 +253,10 @@ pub struct CountTask {
     view: CardView,
     fade: f32,
     selected_hole: Option<usize>,
+    /// Adding a hole by hand on the shown card, while on.
+    placing: Option<Placing>,
+    /// Where the card was drawn last (the UI test places holes by it).
+    card_rect: egui::Rect,
     /// The lines the phone was given last.
     lines: Vec<String>,
     error: Option<String>,
@@ -218,6 +299,8 @@ impl CountTask {
             view: CardView::default(),
             fade: 0.6,
             selected_hole: None,
+            placing: None,
+            card_rect: egui::Rect::NOTHING,
             lines: Vec::new(),
             error: None,
         }
@@ -298,7 +381,7 @@ impl CountTask {
     /// "548, 6 cards, 58 holes".
     fn total_line(&self, decimal: bool) -> String {
         let (rings, tenths, holes, cards) = self.done().fold((0, 0, 0, 0), |a, c| {
-            (a.0 + c.rings(), a.1 + c.tenths(), a.2 + c.holes.len(), a.3 + 1)
+            (a.0 + c.rings(), a.1 + c.tenths(), a.2 + c.n_holes(), a.3 + 1)
         });
         format!(
             "{}, {}, {}",
@@ -311,8 +394,55 @@ impl CountTask {
     fn select(&mut self, n: Option<u32>) {
         if n != self.selected {
             self.selected_hole = None;
+            self.placing = None;
         }
         self.selected = n;
+    }
+
+    /// The shown card's count, to change it.
+    fn shown_mut(&mut self) -> Option<&mut Count> {
+        let n = self.selected?;
+        self.cards.iter_mut().find(|c| c.n == n).and_then(|c| match &mut c.state {
+            State::Done(d) => Some(d.as_mut()),
+            _ => None,
+        })
+    }
+
+    /// A change by hand to the shown card's holes.
+    fn edit(&mut self, e: HoleEdit, card: &Card) {
+        match e {
+            HoleEdit::StartAdd => {
+                if let Some(n) = self.selected {
+                    self.placing = Some(Placing { card: n, at: None, grab: None });
+                    self.selected_hole = None;
+                }
+            }
+            HoleEdit::Cancel => self.placing = None,
+            HoleEdit::Confirm => {
+                let at = self.placing.as_ref().and_then(|p| p.at);
+                if let (Some(at), Some(d)) = (at, self.shown_mut()) {
+                    let i = d.add(at, card);
+                    self.selected_hole = Some(i);
+                    self.placing = None;
+                }
+            }
+            HoleEdit::Remove(i) => {
+                let added = self
+                    .shown_mut()
+                    .is_some_and(|d| d.holes.get(i).is_some_and(|h| h.by == By::Added));
+                if let Some(d) = self.shown_mut() {
+                    d.remove(i);
+                }
+                if added && self.selected_hole.is_some_and(|s| s >= i) {
+                    self.selected_hole = None; // the list moved up
+                }
+            }
+            HoleEdit::Restore(i) => {
+                if let Some(d) = self.shown_mut() {
+                    d.restore(i);
+                }
+            }
+        }
     }
 
     fn remove(&mut self, n: u32) {
@@ -362,7 +492,7 @@ impl CountTask {
                 0
             }
         });
-        if step != 0 && !self.cards.is_empty() {
+        if step != 0 && !self.cards.is_empty() && self.placing.is_none() {
             let at = self.cards.iter().position(|c| Some(c.n) == self.selected);
             let i = match at {
                 Some(i) => (i as i64 + step).clamp(0, self.cards.len() as i64 - 1) as usize,
@@ -458,7 +588,7 @@ impl CountTask {
                             .size(28.0)
                             .strong(),
                     );
-                    let holes: usize = self.done().map(|c| c.holes.len()).sum();
+                    let holes: usize = self.done().map(|c| c.n_holes()).sum();
                     let mut detail = format!(
                         "{} · {}",
                         plural(self.done().count(), "card", "cards"),
@@ -466,7 +596,7 @@ impl CountTask {
                     );
                     let x: usize = self
                         .done()
-                        .map(|c| c.holes.iter().filter(|h| h.score.inner_ten).count())
+                        .map(|c| c.counted().filter(|h| h.score.inner_ten).count())
                         .sum();
                     if decimal {
                         detail.push_str(&format!(" · {rings} in whole rings"));
@@ -542,6 +672,8 @@ impl CountTask {
             return;
         };
         let mut hole_pick = None;
+        let mut edit = None;
+        let placing = &mut self.placing;
         panel(ui, &format!("Card {}", c.n), |ui| match &c.state {
             State::Waiting | State::Counting => {
                 ui.horizontal(|ui| {
@@ -559,8 +691,12 @@ impl CountTask {
             State::Done(d) => {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(d.total(decimal)).size(28.0).strong());
-                    let mut detail = plural(d.holes.len(), "hole", "holes");
-                    let x = d.holes.iter().filter(|h| h.score.inner_ten).count();
+                    let mut detail = plural(d.n_holes(), "hole", "holes");
+                    let by_hand = d.holes.iter().filter(|h| h.by != By::Found).count();
+                    if by_hand > 0 {
+                        detail.push_str(&format!(" · {by_hand} by hand"));
+                    }
+                    let x = d.counted().filter(|h| h.score.inner_ten).count();
                     if !decimal && x > 0 {
                         detail.push_str(&format!(" · {x}X"));
                     }
@@ -575,16 +711,20 @@ impl CountTask {
                 if !d.holes.is_empty() {
                     ui.separator();
                     egui::Grid::new(("count_holes", c.n))
-                        .num_columns(4)
+                        .num_columns(5)
                         .spacing([18.0, 4.0])
                         .striped(true)
                         .show(ui, |ui| {
-                            for t in ["Score", "x mm", "y mm", ""] {
+                            for t in ["Score", "x mm", "y mm", "", ""] {
                                 ui.label(RichText::new(t).small().weak());
                             }
                             ui.end_row();
                             for (i, h) in d.holes.iter().enumerate() {
+                                let removed = h.by == By::Removed;
                                 let mut s = RichText::new(h.score.text(decimal)).strong();
+                                if removed {
+                                    s = RichText::new(h.score.text(decimal)).weak().strikethrough();
+                                }
                                 if self.selected_hole == Some(i) {
                                     s = s.underline();
                                 }
@@ -595,14 +735,42 @@ impl CountTask {
                                 {
                                     hole_pick = Some(i);
                                 }
-                                ui.label(format!("{:+.2}", h.at.0));
-                                ui.label(format!("{:+.2}", h.at.1));
-                                if h.overlap {
-                                    ui.label("⚠ overlaps").on_hover_text(
-                                        "Fitted together with the hole it overlaps: less certain than a single hole.",
-                                    );
-                                } else {
-                                    ui.label("");
+                                let coord = |v: f64| {
+                                    let t = RichText::new(format!("{v:+.2}"));
+                                    if removed { t.weak().strikethrough() } else { t }
+                                };
+                                ui.label(coord(h.at.0));
+                                ui.label(coord(h.at.1));
+                                match h.by {
+                                    By::Removed => {
+                                        ui.label(RichText::new("removed by hand").small().weak());
+                                    }
+                                    By::Added => {
+                                        ui.label(RichText::new("by hand").small().weak());
+                                    }
+                                    By::Found if h.overlap => {
+                                        ui.label("⚠ overlaps").on_hover_text(
+                                            "Fitted together with the hole it overlaps: less certain than a single hole.",
+                                        );
+                                    }
+                                    By::Found => {
+                                        ui.label("");
+                                    }
+                                }
+                                if removed {
+                                    if ui
+                                        .add(egui::Button::new("Restore").small().frame(false))
+                                        .on_hover_text("Count this hole again")
+                                        .clicked()
+                                    {
+                                        edit = Some(HoleEdit::Restore(i));
+                                    }
+                                } else if ui
+                                    .add(egui::Button::new("×").frame(false))
+                                    .on_hover_text("Remove this hole: not a hole, or one hole counted twice")
+                                    .clicked()
+                                {
+                                    edit = Some(HoleEdit::Remove(i));
                                 }
                                 ui.end_row();
                             }
@@ -618,9 +786,58 @@ impl CountTask {
                         .weak(),
                     );
                     ui.allocate_ui(egui::vec2(ui.available_width(), 130.0), |ui| {
-                        let scores: Vec<Score> = d.holes.iter().map(|h| h.score).collect();
+                        let scores: Vec<Score> = d.counted().map(|h| h.score).collect();
                         score_chart(ui, &scores, decimal);
                     });
+                }
+                // Adding a hole the count missed.
+                ui.separator();
+                match placing.as_mut().filter(|p| p.card == c.n) {
+                    None => {
+                        if ui
+                            .button("Add a hole…")
+                            .on_hover_text("A hole the count missed: place it on the card yourself.")
+                            .clicked()
+                        {
+                            edit = Some(HoleEdit::StartAdd);
+                        }
+                    }
+                    Some(p) => {
+                        ui.label(RichText::new("Add a hole").strong());
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(
+                                    "Click the hole on the card, then drag the ring until it sits on the hole's \
+                                     edge. The arrow keys move it 0.05 mm (Shift: 0.5 mm). Zoom in for a close fit.",
+                                )
+                                .weak(),
+                            )
+                            .wrap(),
+                        );
+                        match &mut p.at {
+                            Some(at) => {
+                                ui.horizontal(|ui| {
+                                    ui.label("x");
+                                    ui.add(egui::DragValue::new(&mut at.0).speed(0.01).range(-200.0..=200.0).suffix(" mm"));
+                                    ui.label("y");
+                                    ui.add(egui::DragValue::new(&mut at.1).speed(0.01).range(-200.0..=200.0).suffix(" mm"));
+                                });
+                                let sc = env.card.score(at.0 as f32, at.1 as f32);
+                                ui.label(format!("Score {}", sc.text(decimal)));
+                            }
+                            None => {
+                                ui.label(RichText::new("Not placed yet.").weak());
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(p.at.is_some(), egui::Button::new("Confirm")).clicked() {
+                                edit = Some(HoleEdit::Confirm);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                edit = Some(HoleEdit::Cancel);
+                            }
+                        });
+                    }
                 }
                 egui::CollapsingHeader::new(RichText::new("The photo's details").small().weak())
                     .id_salt(("count_details", c.n))
@@ -636,6 +853,9 @@ impl CountTask {
                 Some(i)
             };
         }
+        if let Some(e) = edit {
+            self.edit(e, env.card);
+        }
     }
 
     /// The shown card's photo under the printed card, its holes as rings; zoom and pan as on
@@ -645,6 +865,7 @@ impl CountTask {
         let card_mm = card.size_mm();
         let base = width / card_mm.x;
         let (rect, response) = ui.allocate_exact_size(card_mm * base, egui::Sense::click_and_drag());
+        self.card_rect = rect;
         self.view.clamp(card_mm);
         let view_before = self.view;
         if response.hovered() {
@@ -656,12 +877,60 @@ impl CountTask {
             }
             ui.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
         }
-        if response.dragged() {
+        // Adding a hole by hand: a drag that starts on the placed ring moves it, following the
+        // pointer where it was grabbed (as on the main card); anywhere else it moves the card.
+        let shown_n = self
+            .selected
+            .filter(|n| self.cards.iter().any(|c| c.n == *n && matches!(c.state, State::Done(_))));
+        if self.placing.as_ref().is_some_and(|p| Some(p.card) != shown_n) {
+            self.placing = None;
+        }
+        {
+            let scale = base * self.view.zoom;
+            let origin = rect.center() - self.view.centre_mm * scale;
+            let centre = card.to_card(0.0, 0.0);
+            let follow = |pl: &mut Placing, ptr: egui::Pos2, grab: Vec2| {
+                let m = (ptr + grab - origin) / scale;
+                pl.at = Some(((m.x - centre.x) as f64, (centre.y - m.y) as f64));
+            };
+            if response.drag_started()
+                && let Some(pl) = self.placing.as_mut()
+            {
+                let reach = (card.pellet_diameter_mm / 2.0 * scale).max(10.0);
+                pl.grab = match (pl.at, ui.input(|i| i.pointer.press_origin())) {
+                    (Some(a), Some(press)) => {
+                        let at = origin + card.to_card(a.0 as f32, a.1 as f32) * scale;
+                        (at.distance(press) <= reach).then(|| at - press)
+                    }
+                    _ => None,
+                };
+            }
+            if response.drag_stopped()
+                && let Some(pl) = &mut self.placing
+                && let Some(grab) = pl.grab.take()
+                && let Some(ptr) = response.interact_pointer_pos().or(ui.input(|i| i.pointer.latest_pos()))
+            {
+                follow(pl, ptr, grab);
+            }
+            if let Some(pl) = &mut self.placing
+                && let Some(grab) = pl.grab
+                && let Some(ptr) = response.interact_pointer_pos()
+            {
+                follow(pl, ptr, grab);
+            }
+        }
+        let moving = self.placing.as_ref().is_some_and(|p| p.grab.is_some());
+        if response.dragged() && !moving {
             self.view.pan(response.drag_delta(), base, card_mm);
         }
         let scale = base * self.view.zoom;
         let origin = rect.center() - self.view.centre_mm * scale;
         let to_screen = |mm: Vec2| origin + mm * scale;
+        let centre_mm = card.to_card(0.0, 0.0);
+        let to_mm = |p: egui::Pos2| {
+            let m = (p - origin) / scale;
+            ((m.x - centre_mm.x) as f64, (centre_mm.y - m.y) as f64)
+        };
         let painter = ui.painter_at(rect);
         let ppp = ui.ctx().pixels_per_point();
         let quad = |mm: egui::Rect| {
@@ -730,8 +999,37 @@ impl CountTask {
         let pos = |h: &Hole| to_screen(card.to_card(h.at.0 as f32, h.at.1 as f32));
         for h in holes {
             let c = pos(h);
-            painter.circle_stroke(c, radius, Stroke::new(3.0, Color32::from_black_alpha(150)));
+            match h.by {
+                By::Found => {
+                    painter.circle_stroke(c, radius, Stroke::new(3.0, Color32::from_black_alpha(150)));
+                    painter.circle_stroke(c, radius, Stroke::new(1.2, Color32::WHITE));
+                }
+                // Added by hand: white dashes on a dark ring (as the main card's hits by hand).
+                By::Added => {
+                    painter.circle_stroke(c, radius, Stroke::new(3.0, Color32::from_gray(20)));
+                    dashed_circle(&painter, c, radius, Stroke::new(1.5, Color32::WHITE));
+                }
+                // Removed: faint dashes and a cross, not counted.
+                By::Removed => {
+                    dashed_circle(&painter, c, radius, Stroke::new(1.2, Color32::from_white_alpha(150)));
+                    let arm = radius * 0.6;
+                    for d in [egui::vec2(arm, arm), egui::vec2(arm, -arm)] {
+                        painter.line_segment([c - d, c + d], Stroke::new(1.2, Color32::from_white_alpha(150)));
+                    }
+                }
+            }
+        }
+        // The hole being added: translucent, a cross through its centre to line it up.
+        if let Some(a) = self.placing.as_ref().and_then(|p| p.at) {
+            let c = to_screen(card.to_card(a.0 as f32, a.1 as f32));
+            painter.circle_filled(c, radius, LAST_SHOT_COLOR.gamma_multiply(0.45));
+            painter.circle_stroke(c, radius, Stroke::new(3.0, Color32::from_black_alpha(160)));
             painter.circle_stroke(c, radius, Stroke::new(1.2, Color32::WHITE));
+            let arm = radius * 1.6 + 6.0;
+            for d in [egui::vec2(arm, 0.0), egui::vec2(0.0, arm)] {
+                painter.line_segment([c - d, c + d], Stroke::new(2.5, Color32::from_black_alpha(160)));
+                painter.line_segment([c - d, c + d], Stroke::new(1.0, Color32::WHITE));
+            }
         }
 
         let hit_r = radius.max(6.0);
@@ -744,20 +1042,69 @@ impl CountTask {
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| i)
         };
-        if response.dragged() && self.view.zoom > 1.0 {
+        let placing = self.placing.is_some();
+        let on_placed = |p: egui::Pos2| {
+            self.placing
+                .as_ref()
+                .and_then(|pl| pl.at)
+                .is_some_and(|a| to_screen(card.to_card(a.0 as f32, a.1 as f32)).distance(p) <= radius.max(10.0))
+        };
+        if moving || (response.dragged() && self.view.zoom > 1.0) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if placing && response.hover_pos().is_some_and(on_placed) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        } else if placing && response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         } else if response.hover_pos().and_then(hole_at).is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         } else if response.hovered() && self.view.zoom > 1.0 {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
         let mut hole_pick = self.selected_hole;
+        let mut remove_hole = None;
         if response.clicked() {
-            let hit = response.interact_pointer_pos().and_then(hole_at);
-            hole_pick = if hit == self.selected_hole { None } else { hit };
+            if let Some(pl) = self.placing.as_mut() {
+                // Placing: the click puts the hole there (again: moves it there).
+                if let Some(p) = response.interact_pointer_pos() {
+                    pl.at = Some(to_mm(p));
+                }
+            } else {
+                let hit = response.interact_pointer_pos().and_then(hole_at);
+                hole_pick = if hit == self.selected_hole { None } else { hit };
+            }
         }
+        let no_focus = ui.memory(|m| m.focused().is_none());
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            hole_pick = None;
+            if self.placing.is_some() {
+                self.placing = None;
+            } else {
+                hole_pick = None;
+            }
+        }
+        // Placing: the arrow keys move the hole 0.05 mm, with Shift 0.5 mm.
+        if no_focus
+            && let Some(pl) = self.placing.as_mut()
+            && let Some(at) = pl.at.as_mut()
+        {
+            let (dx, dy, shift) = ui.input(|i| {
+                let k = |key| i.key_pressed(key) as i32 as f64;
+                (
+                    k(egui::Key::ArrowRight) - k(egui::Key::ArrowLeft),
+                    k(egui::Key::ArrowUp) - k(egui::Key::ArrowDown),
+                    i.modifiers.shift,
+                )
+            });
+            let step = if shift { 0.5 } else { 0.05 };
+            at.0 += dx * step;
+            at.1 += dy * step;
+        }
+        // Delete (or Backspace) removes the selected hole.
+        if no_focus
+            && self.placing.is_none()
+            && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+            && let Some(i) = hole_pick.filter(|&i| holes.get(i).is_some_and(|h| h.by != By::Removed))
+        {
+            remove_hole = Some(i);
         }
 
         // Zoom bottom right, the photo's fade top right (as on the main card).
@@ -792,6 +1139,7 @@ impl CountTask {
             let close: Vec<(usize, crate::card::Higher)> = holes
                 .iter()
                 .enumerate()
+                .filter(|(_, h)| h.by != By::Removed)
                 .filter_map(|(i, h)| Some((i, card.higher(h.at.0 as f32, h.at.1 as f32)?)))
                 .filter(|(_, h)| h.gap_mm <= margin_mm)
                 .collect();
@@ -845,8 +1193,17 @@ impl CountTask {
                             ui.label(format!("x {:+.2} mm · y {:+.2} mm", h.at.0, h.at.1));
                             let off = h.at.0.hypot(h.at.1);
                             ui.label(RichText::new(format!("{off:.2} mm from the centre")).weak());
-                            if h.overlap {
-                                ui.label(RichText::new("Overlaps another hole: less certain.").small());
+                            match h.by {
+                                By::Added => {
+                                    ui.label(RichText::new("Added by hand").small().weak());
+                                }
+                                By::Removed => {
+                                    ui.label(RichText::new("Removed by hand: not counted").small());
+                                }
+                                By::Found if h.overlap => {
+                                    ui.label(RichText::new("Overlaps another hole: less certain.").small());
+                                }
+                                By::Found => {}
                             }
                             if let Some(hi) = card
                                 .higher(h.at.0 as f32, h.at.1 as f32)
@@ -861,6 +1218,9 @@ impl CountTask {
             }
         }
         self.selected_hole = hole_pick;
+        if let Some(i) = remove_hole {
+            self.edit(HoleEdit::Remove(i), card);
+        }
     }
 }
 
@@ -898,6 +1258,7 @@ fn worker(dir: PathBuf, jobs: mpsc::Receiver<(u32, PhotoJob)>, news: mpsc::Sende
 mod tests {
     use super::*;
     use cardphoto::holes::Placement;
+    use egui_kittest::kittest::Queryable;
 
     /// A synthetic photo (dropped, as a file) through the worker: every hole found where it
     /// is on the card, scored as the card scores it; the photo on the card's grid saved and
@@ -970,6 +1331,176 @@ mod tests {
         .line(false);
         assert_eq!(line, format!("Card 1: {want}, 6 holes"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Holes changed by hand (the window driven as the shooter would, a counted card with a
+    /// false hole and a missed one): the false one removed by its ×, restored, removed again;
+    /// the missed one added (a click, a drag, an arrow key, Confirm), scored and marked; the
+    /// added one deleted by the Delete key; Escape stops adding. The totals and the phone's
+    /// line follow. `UI_SHOTS=<dir>` saves an image of each step.
+    #[test]
+    fn holes_changed_by_hand() {
+        let card: &'static Card = Box::leak(Box::new(crate::card::air_pistol()));
+        let found = [(0.5, 0.3), (-12.0, 4.0), (30.0, -30.0), (60.0, 60.0)];
+        let holes = found
+            .iter()
+            .map(|&at| Hole {
+                at,
+                score: card.score(at.0 as f32, at.1 as f32),
+                overlap: false,
+                by: By::Found,
+            })
+            .collect::<Vec<_>>();
+        let mut count = Count {
+            holes,
+            warnings: Vec::new(),
+            details: String::new(),
+            grid: Err("a test card, no photo".into()),
+        };
+        sort_holes(&mut count.holes);
+        let rings0 = count.rings();
+        let (jobs, _rx) = mpsc::channel();
+        let (_tx, news) = mpsc::channel();
+        let task = CountTask {
+            server: Err("no server in the test".into()),
+            url: None,
+            qr: None,
+            status: String::new(),
+            show_link: false,
+            cards: vec![Counted { n: 1, state: State::Done(Box::new(count)) }],
+            next_n: 2,
+            selected: Some(1),
+            follow: false,
+            jobs,
+            news,
+            texture: None,
+            card_texture: CardTexture::default(),
+            view: CardView::default(),
+            fade: 0.6,
+            selected_hole: None,
+            placing: None,
+            card_rect: egui::Rect::NOTHING,
+            lines: Vec::new(),
+            error: None,
+        };
+        let env = move || CountEnv {
+            card,
+            decimal: false,
+            zoom_controls: true,
+            close_call_mm: Some(0.5),
+            photos_dir: None,
+        };
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_ui_state(
+                move |ui, t: &mut CountTask| {
+                    crate::install_fonts(ui.ctx());
+                    t.poll(&env());
+                    t.ui(ui, &env());
+                },
+                task,
+            );
+        let shots_dir = std::env::var_os("UI_SHOTS").map(std::path::PathBuf::from);
+        let step = |h: &mut egui_kittest::Harness<CountTask>, name: &str| {
+            h.run_steps(4);
+            if let Some(dir) = &shots_dir {
+                h.render().expect("render").save(dir.join(format!("count-{name}.png"))).unwrap();
+            }
+        };
+        step(&mut h, "0-start");
+        let d = |t: &CountTask| match &t.cards[0].state {
+            State::Done(d) => d.holes.clone(),
+            _ => panic!("not counted"),
+        };
+        let rings = |t: &CountTask| match &t.cards[0].state {
+            State::Done(c) => (c.rings(), c.n_holes()),
+            _ => panic!(),
+        };
+        assert_eq!(rings(h.state()), (rings0, 4));
+        let false_score = card.score(60.0, 60.0);
+        // The false hole, the worst, is the last row: its × (the card list's × comes first).
+        let crosses = h.get_all_by_label("×").count();
+        assert_eq!(crosses, 1 + 4);
+        h.get_all_by_label("×").last().unwrap().click();
+        step(&mut h, "1-removed");
+        assert_eq!(d(h.state()).last().unwrap().by, By::Removed);
+        assert_eq!(rings(h.state()), (rings0 - u32::from(false_score.ring), 3));
+        assert!(h.state().lines[0].ends_with(", 3 holes"), "{:?}", h.state().lines);
+        h.get_by_label("Restore").click();
+        h.run_steps(3);
+        assert_eq!(rings(h.state()), (rings0, 4));
+        h.get_all_by_label("×").last().unwrap().click();
+        h.run_steps(3);
+        let base = rings(h.state()).0;
+
+        // The missed hole at (-20, 15): placed by a click near it, dragged, nudged, confirmed.
+        h.get_by_label("Add a hole…").click();
+        h.run_steps(3);
+        assert!(h.state().placing.is_some());
+        let at = |t: &CountTask, x: f32, y: f32| {
+            let r = t.card_rect;
+            r.min + card.to_card(x, y) * (r.width() / card.size_mm().x)
+        };
+        let click = |h: &mut egui_kittest::Harness<CountTask>, p: egui::Pos2| {
+            h.hover_at(p);
+            h.run_steps(1);
+            h.drag_at(p);
+            h.run_steps(1);
+            h.drop_at(p);
+            h.run_steps(2);
+        };
+        let p = at(h.state(), -21.0, 15.0);
+        click(&mut h, p);
+        let placed = h.state().placing.as_ref().unwrap().at.unwrap();
+        let mm_per_pt = card.size_mm().x as f64 / h.state().card_rect.width() as f64;
+        assert!((placed.0 + 21.0).abs() < mm_per_pt && (placed.1 - 15.0).abs() < mm_per_pt, "{placed:?}");
+        // Dragged from the ring 1 mm right: it follows the pointer, the card stays.
+        let (from, to) = (at(h.state(), placed.0 as f32, placed.1 as f32), at(h.state(), placed.0 as f32 + 1.0, placed.1 as f32));
+        h.hover_at(from);
+        h.run_steps(1);
+        h.drag_at(from);
+        h.run_steps(1);
+        for k in 1..=10 {
+            h.hover_at(from + (to - from) * (k as f32 / 10.0));
+            h.run_steps(1);
+        }
+        h.drop_at(to);
+        h.run_steps(2);
+        let dragged = h.state().placing.as_ref().unwrap().at.unwrap();
+        assert!((dragged.0 - placed.0 - 1.0).abs() < 2.0 * mm_per_pt, "{dragged:?}");
+        assert!(h.state().view.zoom == 1.0);
+        // Up 0.05 mm by the arrow key (the cards don't flip while adding).
+        h.key_press(egui::Key::ArrowUp);
+        h.run_steps(2);
+        let nudged = h.state().placing.as_ref().unwrap().at.unwrap();
+        assert!((nudged.1 - dragged.1 - 0.05).abs() < 1e-9, "{nudged:?}");
+        assert_eq!(h.state().selected, Some(1));
+        step(&mut h, "2-placing");
+        h.get_by_label("Confirm").click();
+        step(&mut h, "3-added");
+        assert!(h.state().placing.is_none());
+        let added: Vec<Hole> = d(h.state()).into_iter().filter(|h| h.by == By::Added).collect();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].at, nudged);
+        let score = card.score(nudged.0 as f32, nudged.1 as f32);
+        assert_eq!(added[0].score, score);
+        assert_eq!(rings(h.state()), (base + u32::from(score.ring), 4));
+        assert!(h.state().lines[0].ends_with(", 4 holes"), "{:?}", h.state().lines);
+        h.get_by_label("by hand");
+        // It is selected: Delete takes it away (an added hole goes, not "removed").
+        let sel = h.state().selected_hole.unwrap();
+        assert_eq!(d(h.state())[sel].by, By::Added);
+        h.key_press(egui::Key::Delete);
+        h.run_steps(3);
+        assert!(d(h.state()).iter().all(|h| h.by != By::Added));
+        assert_eq!(rings(h.state()), (base, 3));
+
+        // Escape stops adding.
+        h.get_by_label("Add a hole…").click();
+        h.run_steps(2);
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        assert!(h.state().placing.is_none());
     }
 }
 
