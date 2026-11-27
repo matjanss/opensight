@@ -2652,6 +2652,10 @@ impl SensorApp {
             // No photo: #, the score, and a note, all aligned left (a scroll bar on the right
             // then hides nothing).
             egui::Grid::new("series_plain").num_columns(3).spacing([14.0, 4.0]).show(ui, |ui| {
+                ui.label(RichText::new("#").small().weak());
+                ui.label(RichText::new("OpenSights").small().weak()).on_hover_text("The sensor's score.");
+                ui.label("");
+                ui.end_row();
                 for i in (0..=self.series.len()).rev() {
                     for (_, hit) in self.unscored.iter().rev().filter(|(after, _)| *after == i) {
                         let key = resolve::key(hit);
