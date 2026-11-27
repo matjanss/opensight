@@ -214,7 +214,7 @@ Android phone and an iPhone if at hand. A firewall may block port 8710 (Windows 
 
 Builds (`src/photo.rs`, the window in `main.rs`):
 
-- **"Card photo"** under the series (next to "Clear series"; also with no shots yet, for a
+- **"Take photo"** under the series (next to "Clear series"; also with no shots yet, for a
   test card) opens the photo window: the old originals cleaned up, the server started, the
   QR code, the link, the server's news ("waiting", "the phone opened the page",
   "received", a refusal's reason), "New link". A photo file dropped on the window goes the
@@ -475,8 +475,9 @@ A card photo that has nothing to do with the series, only to count the card (the
 wish, 2026-11-26): its holes found, scored on the printed card, and the total. Nothing is
 sent to the sensor and the series isn't touched.
 
-- **The window:** "Count card" (a small target) in the status bar opens "Count cards", with
-  or without a sensor. Left the card (the photo under the printed card, the Card–Photo fade,
+- **The window:** "Count cards" at the top of the main window's side column (count mode;
+  until 2026-11-27 its own window, from "Count card" in the status bar), with or without a
+  sensor; "Start over" clears the cards and makes a new link. Left the card (the photo under the printed card, the Card–Photo fade,
   zoom and pan, the holes as rings; a hole clicked shows its score, x, y and distance from the
   centre); the close-call notice on the card, as on the main card. Right: the cards in the
   order they came ("Card 3: 92, 10 holes", "counting…", "waiting", "not counted, <why>. Take
@@ -537,6 +538,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-27 | C4, C7 | The interface cleanup (app TODO): count mode in the main window, the photo's results in "Card details"; run by Claude: `cargo test` (the app 60, 3 ignored; the new UI test `app_modes` with a demo photo of the demo series), clippy, the test's images looked at | **Pass** (the user's look is due). Shoot mode: the mode buttons, the series with "Clear series" and "Take photo"; with the photo: #, OpenSights, Paper, Off in the main table (paper 56 = sensor 56), "Card details" opening the window with 0.150 mm rms (6 of 6), the full table and the shots per ring; "Remove photo" closes it. Count mode in the same window and back; without a sensor the connection's card and counting still there. |
 | 2026-11-27 | C7 | Holes by hand in the count window; run by Claude: `cargo test` (the app 59, 3 ignored; the new UI test `holes_changed_by_hand`), clippy, the test's images looked at | **Pass** (the user's look is due). The false hole removed: 4 → 3 holes, the total less its score, the phone's line "…, 3 holes"; restored and removed again; the missed hole placed within a point of the click, dragged 1 mm (it followed the pointer, the card stayed), nudged 0.05 mm up, confirmed: scored 7 by the card, marked "by hand", the totals up by 7; deleted by Delete; Escape stops adding. |
 | 2026-11-26 | C7 | The user: the window and the phone page, with the fix below | **Pass** (the user's report: "works fine"). Merged to `main`. |
 | 2026-11-26 | C7 | Counting cards drawn turned by random angles (the user's 9 photos of 2026-11-26), and the numbers never deciding the way up; run by Claude: every real photo (the 9 and the 59 earlier) through the count's path against the committed code, the saved card images looked at, `cargo test` | **Pass.** The cause: the card's outline was found on none of the photos (paper on a light table, the lens's fit bending the edges beyond the rings), so the angle was whatever the ring fit gave (seen 1–36° off a right angle), and the quarter-turn match sampled the numbers' places on those arbitrary axes. Now the axes come from the printed numbers (C1, found on all 68 photos, all 8 bands agreeing) and the quarter turn from the digits cropped and scaled alike (C4): decided on all 68, margins 0.22–0.38 (need 0.1; the demo 0.51, was 0.18). **Every saved card image upright**, looked at (the serial top right, the ISSF mark bottom left, the maker bottom right), scans included. Synthetic registration within 0.012–0.014 mm (C1's outline 0.013–0.016). Holes against the committed code: 241 of 242 matched on the 59, radius change median 0.002 mm, 95 % 0.022 mm; card 1's hole below the 5 in one photo 0.24 mm, now nearer its median over 12 photos; card 2's close-call hole (on the −x 7) ±0.081 mm over its 10 photos, was ±0.066 (tilted photos; from straight above 24.08 mm both). The counts as in C7 but card 2's IMG_3463: 30, was 29 (its close-call hole 24.002 → 23.983 mm, across the 8's edge at 24.0 mm). Found on the way: the number patch in the expected card (C5) assumed the four copies at their places; real cards print the horizontal axis's 0.6 mm off, which split a hole on the 3 into two: each copy is now aligned first. On the 9: the counts 10, 22, 28, 11, 9, 8, 44, 29, 29; a false hole on ring 1's line on card 4 gone, one on card 6 (77.25 mm) still there (see C5, not solved). `cargo test` passes (cardphoto 3 + 2 + 10 + 4 + 10 + 7, the app 49), clippy clean. |

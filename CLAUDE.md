@@ -416,12 +416,15 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   angle from the homography and the expected error; over 10° the app warns but uses the photo.
   `photo.rs` processes a photo on a thread (registration, holes against the series' shots,
   the photo resampled onto the card's grid through the placement, `<photo>.result.json`).
-  `main.rs`: "Card photo" under the series opens the photo window (QR, status, drop a file);
+  `main.rs`: "Take photo" under the series opens the photo window (QR, status, drop a file);
   it closes once a photo is processed (an error keeps it open). The results go into the
-  series panel: a table (#, OpenSights, Paper, both red where they differ, shot x, y, hole −
-  shot, off), the rms line and warnings above it, the photo's details folded, and "Keep the
-  photo", "Take another photo" (the window again, a new link), "Open the folder", "Remove
-  from the card" below it; the side column widens to `SIDE_WIDTH_PHOTO`. The card view stays
+  series panel: a table (#, OpenSights, Paper, both red where they differ, off), and below it
+  "Keep the photo", "Card details" (⚠ when there are warnings), "Remove photo", "Clear
+  series", "Take another photo" (the window again, a new link), "Open the folder", all
+  buttons; the side column widens to `SIDE_WIDTH_PHOTO`. "Card details" opens its own window
+  (`details_body`): the rms line, the warnings (`photo_notes`), the photo's details, the
+  table with every column (`series_list(.., full)`: also shot x, y and hole − shot), and the
+  shots per ring. The card view stays
   in the sensor's frame (the shots never turn):
   the photo where the real card hung, the app's card drawn there too (`photo::CardPose`, the
   print's way up from its numbers), a Card–Photo fade bar (top right), the holes as rings.
@@ -429,12 +432,15 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   through the pose). Clicking a scored row of the series list opens that shot's popup on
   the card (`selected_shot`, as clicking the shot; again closes it).
   `OPENSIGHTS_DEMO_PHOTO=1` adds a synthetic photo of the series (`photo::demo_photo`).
-- **Counting cards (`count.rs`, CARDPHOTO.md C7):** "Count card" in the status bar opens its own
-  window, with or without a sensor: a card photo apart from the series, only scored. One
+- **Counting cards (`count.rs`, CARDPHOTO.md C7):** count mode of the main window ("Count
+  cards" at the top of the side column, `Mode`), with or without a sensor: a card photo apart
+  from the series, only scored. The `CountTask` starts at the first switch and keeps going
+  in shoot mode (polled every frame) until the app closes; "Start over" (confirmed) clears
+  the cards and makes a new link. One
   session link (`UploadServer::offer_session`) takes up to 20 photos; the phone's page keeps
   "Upload another card" and polls `/p/<token>/cards` for the app's line per card and the
   total. A worker thread counts them in turn (`photo::process` without shots, the photo on the
-  card's grid saved as `<photo>.grid.png`, only the shown card's in memory). The window: the
+  card's grid saved as `<photo>.grid.png`, only the shown card's in memory). The view: the
   card (photo, fade, zoom, holes as rings, close calls), the cards with × and the total, the
   shown card's holes best first. Holes by hand (2026-11-27): "Add a hole…" (a click, a drag,
   arrow keys, Confirm; marked "by hand"), × per row (an added hole goes, a found one is
@@ -447,9 +453,13 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   `calib::fit` (`calibrate.py` ported; the record rounded as it prints it). The template is
   `assets/templates/grid-4x4.json`. A report goes next to the event logs.
 - `main.rs`: the egui UI.
-  - **The main window, while connected:** the target card with the series' shots, and the
-    series list with a shots-per-score chart below it (bars per ring, or points per tenth
-    when decimal; painted by hand in `score_chart`).
+  - **The main window:** the target card, and beside it the side column with the mode
+    buttons on top (`mode_bar`, like tabs: "Shoot series", "Count cards"; `Mode`).
+    Shoot mode (`target_screen`, `shoot_column`): the series' shots on the card, the last
+    shot and the series list; without a sensor, the connection's card instead (`main_body`).
+    Count mode (`count_screen`): `CountTask::ui` with the mode buttons on its side column.
+    The shots-per-score chart (bars per ring, or points per tenth when decimal; painted by
+    hand in `score_chart`) is in the card details only. The UI test `app_modes`.
   - **On the card:**
     - the newest shot is in the UI's only colour; clicking a shot opens a small info
       popup; clicking overlapping shots lists them, newest first, and the one picked opens

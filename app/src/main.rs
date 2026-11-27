@@ -708,8 +708,13 @@ struct SensorApp {
     /// The processed photo of the current series: under the shots, and its ground truth.
     card_photo: Option<CardPhoto>,
     photo_error: Option<String>,
-    /// The count window (`CARDPHOTO.md` C7), while open: cards counted apart from the series.
+    /// The main window's mode: shooting a series, or counting cards.
+    mode: Mode,
+    /// Counting cards (`CARDPHOTO.md` C7), from the first switch to count mode: cards
+    /// counted apart from the series.
     count: Option<count::CountTask>,
+    /// The card details window (the card photo's results in full), while open.
+    details_open: bool,
     /// The card view: 0 the printed card, 1 the photo.
     photo_fade: f32,
     /// (boot, seq) of the shot whose info popup is open on the card.
@@ -800,7 +805,9 @@ impl SensorApp {
             photo_job: None,
             card_photo: None,
             photo_error: None,
+            mode: Mode::Shoot,
             count: None,
+            details_open: false,
             photo_fade: 0.0,
             selected_shot: None,
             overlap: None,
@@ -1206,20 +1213,23 @@ impl eframe::App for SensorApp {
 
         // The demo also without Bluetooth (the UI tests on CI).
         let on_target = (matches!(self.link, Link::Connected { .. }) && self.fatal.is_none()) || self.demo_hits;
-        egui::CentralPanel::default().show(ui, |ui| {
-            if on_target {
-                self.target_screen(ui);
-                return;
-            }
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                centered_column(ui, |ui| {
-                    ui.add_space(20.0);
-                    title(ui, "OpenSights", "Electronic target prototype");
-                    ui.add_space(14.0);
-                    self.main_body(ui);
-                    ui.add_space(16.0);
-                });
-            });
+        if self.mode == Mode::Count && self.count.is_none() {
+            self.open_count(ui.ctx());
+        }
+        // The count keeps going in shoot mode: photos from the phone, the phone's lines.
+        let env = count::CountEnv {
+            card: &self.card,
+            decimal: self.decimal_scoring && self.card.decimal,
+            zoom_controls: self.show_zoom_controls,
+            close_call_mm: self.show_close_calls.then_some(self.close_call_mm),
+            photos_dir: Self::photos_dir(),
+        };
+        if let Some(task) = &mut self.count {
+            task.poll(&env);
+        }
+        egui::CentralPanel::default().show(ui, |ui| match self.mode {
+            Mode::Shoot => self.target_screen(ui, on_target),
+            Mode::Count => self.count_screen(ui),
         });
 
         let ctx = ui.ctx().clone();
@@ -1311,35 +1321,31 @@ impl eframe::App for SensorApp {
             );
         }
 
-        if let Some(task) = &mut self.count {
-            let env = count::CountEnv {
-                card: &self.card,
-                decimal: self.decimal_scoring && self.card.decimal,
-                zoom_controls: self.show_zoom_controls,
-                close_call_mm: self.show_close_calls.then_some(self.close_call_mm),
-                photos_dir: Self::photos_dir(),
-            };
-            task.poll(&env);
-            let mut close = false;
+        if self.card_photo.is_none() {
+            self.details_open = false;
+        }
+        if self.details_open {
             ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("count"),
+                egui::ViewportId::from_hash_of("details"),
                 with_app_icon(
                     egui::ViewportBuilder::default()
-                        .with_title("OpenSights · Count cards")
-                        .with_inner_size([1180.0, 800.0])
-                        .with_min_inner_size([420.0, 480.0]),
+                        .with_title("OpenSights · Card details")
+                        .with_inner_size([720.0, 780.0])
+                        .with_min_inner_size([420.0, 400.0]),
                 ),
                 |ui, _| {
-                    close = ui.input(|i| i.viewport().close_requested());
+                    if ui.input(|i| i.viewport().close_requested()) {
+                        self.details_open = false;
+                    }
                     egui::CentralPanel::default().show(ui, |ui| {
-                        ui.add_space(8.0);
-                        task.ui(ui, &env);
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ui.add_space(12.0);
+                            self.details_body(ui);
+                            ui.add_space(16.0);
+                        });
                     });
                 },
             );
-            if close {
-                self.count = None; // stops the server and the worker
-            }
         }
 
         if self.dark_mode != was_dark {
@@ -1388,9 +1394,6 @@ impl SensorApp {
                 if gear.clicked() {
                     self.open_settings(ui.ctx());
                 }
-                if count_button(ui).clicked() {
-                    self.open_count(ui.ctx());
-                }
                 ui.label(
                     RichText::new(format!("Protocol v{}", protocol::PROTOCOL_VERSION))
                         .small()
@@ -1422,9 +1425,27 @@ impl SensorApp {
         }
     }
 
-    /// Main window while connected: the target card with the shots, and the series beside
-    /// it (below it in a narrow window).
-    fn target_screen(&mut self, ui: &mut Ui) {
+    /// Count mode: the count's card and its side column, the mode buttons on top.
+    fn count_screen(&mut self, ui: &mut Ui) {
+        ui.add_space(8.0);
+        self.message_notice(ui, false);
+        let env = count::CountEnv {
+            card: &self.card,
+            decimal: self.decimal_scoring && self.card.decimal,
+            zoom_controls: self.show_zoom_controls,
+            close_call_mm: self.show_close_calls.then_some(self.close_call_mm),
+            photos_dir: Self::photos_dir(),
+        };
+        let mode = &mut self.mode;
+        match &mut self.count {
+            Some(task) => task.ui(ui, &env, |ui| mode_bar(ui, mode)),
+            None => mode_bar(ui, mode), // no folder for the photos: the message says so
+        }
+    }
+
+    /// Shoot mode: the target card with the shots, and beside it (below it in a narrow
+    /// window) the mode buttons and the series; without a sensor, the connection instead.
+    fn target_screen(&mut self, ui: &mut Ui, on_target: bool) {
         ui.add_space(8.0);
         self.message_notice(ui, false);
         let avail = ui.available_size();
@@ -1433,7 +1454,7 @@ impl SensorApp {
             let aspect = self.card.size_mm().y / self.card.size_mm().x;
             // The card as big as the height allows; the side column takes the rest of the
             // width, and the series card in it the rest of the height.
-            let side_min = if self.card_photo.is_some() { SIDE_WIDTH_PHOTO } else { SIDE_WIDTH };
+            let side_min = if self.card_photo.is_some() && on_target { SIDE_WIDTH_PHOTO } else { SIDE_WIDTH };
             let card_w = (avail.x - side_min - gap).min(avail.y / aspect).max(160.0);
             let side_w = (avail.x - card_w - gap).max(side_min);
             ui.horizontal_top(|ui| {
@@ -1442,7 +1463,7 @@ impl SensorApp {
                 ui.vertical(|ui| {
                     ui.set_width(side_w);
                     ui.set_height(avail.y);
-                    self.series_column(ui);
+                    self.shoot_column(ui, on_target);
                 });
             });
         } else {
@@ -1456,11 +1477,26 @@ impl SensorApp {
                 let rest = (avail.y - card_h - 6.0 - ui.spacing().item_spacing.y).max(STACKED_SERIES_MIN);
                 ui.allocate_ui(egui::vec2(width, rest), |ui| {
                     ui.set_height(rest);
-                    self.series_column(ui);
+                    self.shoot_column(ui, on_target);
                 });
             });
         }
-        self.resolve_window(ui.ctx());
+        if on_target {
+            self.resolve_window(ui.ctx());
+        }
+    }
+
+    /// The side column in shoot mode: the mode buttons, then the series, or without a
+    /// sensor what the connection is doing.
+    fn shoot_column(&mut self, ui: &mut Ui, on_target: bool) {
+        mode_bar(ui, &mut self.mode);
+        if on_target {
+            self.series_column(ui);
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("connection")
+                .show(ui, |ui| self.main_body(ui));
+        }
     }
 
     /// The resolve window: an unscored hit (a hole, a missed shot) placed on the card, the
@@ -2276,38 +2312,18 @@ impl SensorApp {
             });
         });
 
-        // The series card fills the height the chart below it leaves.
-        let chart = !self.series.is_empty();
-        let series_h = if chart {
-            (ui.available_height() - CHART_CARD_H - ui.spacing().item_spacing.y).max(200.0)
-        } else {
-            ui.available_height()
-        };
+        // The series card fills the rest of the column.
+        let series_h = ui.available_height();
         let mut clear = false;
         let mut photo = false;
-        let (mut another, mut forget) = (false, false);
+        let (mut another, mut forget, mut details) = (false, false, false);
         let mut keep = self.card_photo.as_ref().is_some_and(|cp| cp.p.photo.meta.keep);
         let mut select: Option<(u32, u32)> = None;
         let width = ui.available_width();
         // With a card photo of this series: each shot's score on the paper, its hole gauged
         // against the printed rings (Some(None): no hole found; None: a shot after the
         // photo). A hit resolved by hand was judged on the paper: its score is the paper's.
-        let paper: Option<Vec<Option<Option<Score>>>> = self
-            .card_photo
-            .as_ref()
-            .filter(|cp| !cp.p.shots.is_empty())
-            .map(|cp| {
-                self.series
-                    .iter()
-                    .map(|(s, score)| {
-                        if !s.scored() {
-                            return Some(Some(*score));
-                        }
-                        cp.check(resolve::key(s))
-                            .map(|c| c.paper.map(|q| self.card.score(q.0 as f32, q.1 as f32)))
-                    })
-                    .collect()
-            });
+        let paper = self.paper_scores();
         ui.allocate_ui(egui::vec2(width, series_h), |ui| {
             ui.set_height(series_h);
             card(ui, &format!("Series · {}", self.card.name), |ui| {
@@ -2359,6 +2375,7 @@ impl SensorApp {
                     ui.label(RichText::new(detail).weak());
                 });
                 if self.series.is_empty() && self.unscored.is_empty() && self.card_photo.is_none() {
+                    ui.add_space(4.0);
                     photo = photo_button(ui);
                     ui.allocate_space(ui.available_size()); // fill the column anyway
                     return;
@@ -2368,69 +2385,64 @@ impl SensorApp {
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                     ui.horizontal_wrapped(|ui| {
                         clear = ui
-                            .add(egui::Button::new("Clear series").frame(false))
+                            .button("Clear series")
                             .on_hover_text("Start a new series. Also clears the sensor's stored shots.")
                             .clicked();
                         if let Some(cp) = &self.card_photo {
-                            another = ui.add(egui::Button::new("Take another photo").frame(false)).clicked();
-                            if ui.add(egui::Button::new("Open the folder").frame(false)).clicked()
+                            another = ui.button("Take another photo").clicked();
+                            if ui.button("Open the folder").clicked()
                                 && let Some(dir) = cp.p.photo.image.parent()
                             {
                                 open_folder(dir);
                             }
-                            forget = ui
-                                .add(egui::Button::new("Remove from the card").frame(false))
-                                .on_hover_text("Takes the photo off the card and the series (the file stays).")
-                                .clicked();
                         } else {
                             photo = photo_button(ui);
                         }
                     });
-                    if self.card_photo.is_some() {
+                    if let Some(cp) = &self.card_photo {
+                        ui.horizontal_wrapped(|ui| {
+                            let notes = photo_notes(cp, &self.series).len();
+                            let label = if notes > 0 { "Card details ⚠" } else { "Card details" };
+                            let tip = if notes > 0 {
+                                format!(
+                                    "The photo's results in full: the sensor against the holes, the shots per ring, \
+                                     and {notes} warning{}.",
+                                    if notes == 1 { "" } else { "s" }
+                                )
+                            } else {
+                                "The photo's results in full: the sensor against the holes, the shots per ring.".into()
+                            };
+                            details = ui.button(label).on_hover_text(tip).clicked();
+                            forget = ui
+                                .button("Remove photo")
+                                .on_hover_text("Takes the photo off the card and the series (the file stays).")
+                                .clicked();
+                        });
                         ui.checkbox(&mut keep, "Keep the photo for evaluation (else removed after 30 days)");
                     }
                     ui.separator();
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                        if let Some(cp) = &self.card_photo {
-                            photo_summary(ui, cp, &self.series);
-                            ui.separator();
-                        }
                         egui::ScrollArea::vertical()
                             .id_salt("series")
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                select = self.series_list(ui, paper.as_deref(), decimal);
+                                select = self.series_list(ui, paper.as_deref(), decimal, false);
                             });
                     });
                 });
             });
         });
-        if chart {
-            let title = if decimal {
-                "Shots per score"
-            } else {
-                "Shots per ring"
-            };
-            card(ui, title, |ui| {
-                let scores: Vec<Score> = self.series.iter().map(|(_, s)| *s).collect();
-                score_chart(ui, &scores, decimal);
-            });
-        }
         if let Some(key) = select {
-            // A row clicked: its popup on the card (clicking it again closes it); an
-            // unscored hit's opens the resolve window.
-            if self.unscored.iter().any(|(_, s)| resolve::key(s) == key) {
-                self.selected_shot = None;
-                self.resolving = Some(Resolving::new(key, false));
-            } else if self.selected_shot == Some(key) {
-                self.selected_shot = None;
-            } else {
-                self.selected_shot = Some(key);
-                let i = self.series.iter().position(|(s, _)| (s.boot, s.seq) == key);
-                if i.is_some_and(|i| i >= self.replay.visible(self.series.len())) {
-                    self.replay.stop(); // not replayed yet: show all shots to show this one
-                }
+            self.row_clicked(key);
+        }
+        if details {
+            if self.details_open {
+                ui.ctx().send_viewport_cmd_to(
+                    egui::ViewportId::from_hash_of("details"),
+                    egui::ViewportCommand::Focus,
+                );
             }
+            self.details_open = true;
         }
         if let Some(cp) = &mut self.card_photo
             && keep != cp.p.photo.meta.keep
@@ -2461,12 +2473,96 @@ impl SensorApp {
         }
     }
 
+    /// A row of the series list clicked: its popup on the card (clicking it again closes
+    /// it); an unscored hit's opens the resolve window.
+    fn row_clicked(&mut self, key: Key) {
+        if self.unscored.iter().any(|(_, s)| resolve::key(s) == key) {
+            self.selected_shot = None;
+            self.resolving = Some(Resolving::new(key, false));
+        } else if self.selected_shot == Some(key) {
+            self.selected_shot = None;
+        } else {
+            self.selected_shot = Some(key);
+            let i = self.series.iter().position(|(s, _)| (s.boot, s.seq) == key);
+            if i.is_some_and(|i| i >= self.replay.visible(self.series.len())) {
+                self.replay.stop(); // not replayed yet: show all shots to show this one
+            }
+        }
+    }
+
+    /// With a card photo of this series: each shot's score on the paper, its hole gauged
+    /// against the printed rings (Some(None): no hole found; None: a shot after the photo).
+    /// A hit resolved by hand was judged on the paper: its score is the paper's.
+    fn paper_scores(&self) -> Option<Vec<Option<Option<Score>>>> {
+        self.card_photo
+            .as_ref()
+            .filter(|cp| !cp.p.shots.is_empty())
+            .map(|cp| {
+                self.series
+                    .iter()
+                    .map(|(s, score)| {
+                        if !s.scored() {
+                            return Some(Some(*score));
+                        }
+                        cp.check(resolve::key(s))
+                            .map(|c| c.paper.map(|q| self.card.score(q.0 as f32, q.1 as f32)))
+                    })
+                    .collect()
+            })
+    }
+
+    /// The card details window: the card photo's results in full (the sensor against the
+    /// holes, the warnings, the photo's details), the series table with every column, and
+    /// the shots per ring.
+    fn details_body(&mut self, ui: &mut Ui) {
+        let decimal = self.decimal_scoring && self.card.decimal;
+        let Some(cp) = &self.card_photo else {
+            return;
+        };
+        centered_column(ui, |ui| {
+            title(ui, "Card details", &format!("Series · {}", self.card.name));
+        });
+        ui.add_space(10.0);
+        let paper = self.paper_scores();
+        let mut select = None;
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(680.0);
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                card(ui, "Card photo", |ui| photo_summary(ui, cp, &self.series));
+                card(ui, "The sensor against the paper", |ui| {
+                    egui::ScrollArea::horizontal().id_salt("details_table").show(ui, |ui| {
+                        select = self.series_list(ui, paper.as_deref(), decimal, true);
+                    });
+                });
+                if !self.series.is_empty() {
+                    let title = if decimal { "Shots per score" } else { "Shots per ring" };
+                    card(ui, title, |ui| {
+                        ui.allocate_ui(egui::vec2(ui.available_width(), CHART_H), |ui| {
+                            let scores: Vec<Score> = self.series.iter().map(|(_, s)| *s).collect();
+                            score_chart(ui, &scores, decimal);
+                        });
+                    });
+                }
+            });
+        });
+        if let Some(key) = select {
+            self.row_clicked(key);
+        }
+    }
+
     /// The series, newest first, a hit with no score after the scored shot it followed.
     /// Without a card photo: # and the score. With one: #, the OpenSights score, the paper's
-    /// (both red where they differ), and the ground truth per shot. A scored row is
+    /// (both red where they differ), and how far the sensor was off; `full` (the card
+    /// details) adds the shot's x, y and the hole − shot per axis. A scored row is
     /// clickable: returns the shot clicked, (boot, seq). So is an unscored hit's row (it
     /// opens the resolve window); a hit resolved by hand is marked "by hand".
-    fn series_list(&self, ui: &mut Ui, paper: Option<&[Option<Option<Score>>]>, decimal: bool) -> Option<(u32, u32)> {
+    fn series_list(
+        &self,
+        ui: &mut Ui,
+        paper: Option<&[Option<Option<Score>>]>,
+        decimal: bool,
+        full: bool,
+    ) -> Option<(u32, u32)> {
         let mut clicked = None;
         let red = ui.visuals().error_fg_color;
         let text = |s: &Score, strong: bool| {
@@ -2525,8 +2621,8 @@ impl SensorApp {
             }
             return clicked;
         };
-        egui::Grid::new("series_table")
-            .num_columns(6)
+        egui::Grid::new(("series_table", full))
+            .num_columns(if full { 6 } else { 4 })
             .spacing([14.0, 4.0])
             .show(ui, |ui| {
                 let head = |ui: &mut Ui, t: &str, tip: &str| {
@@ -2538,9 +2634,11 @@ impl SensorApp {
                 head(ui, "#", "");
                 head(ui, "OpenSights", "The sensor's score.");
                 head(ui, "Paper", "The score of the shot's hole in the card photo, gauged against the printed rings.");
-                head(ui, "Shot x, y (mm)", "Where the sensor put the shot.");
-                head(ui, "Hole − shot (mm)", "The hole in the photo minus the sensor's position: the sensor's error.");
-                head(ui, "Off (mm)", "How far the sensor was off.");
+                if full {
+                    head(ui, "Shot x, y (mm)", "Where the sensor put the shot.");
+                    head(ui, "Hole − shot (mm)", "The hole in the photo minus the sensor's position: the sensor's error.");
+                }
+                head(ui, "Off (mm)", "How far the sensor was off: the hole in the photo against the sensor's position.");
                 ui.end_row();
                 for i in (0..=self.series.len()).rev() {
                     for (_, hit) in self.unscored.iter().rev().filter(|(after, _)| *after == i) {
@@ -2548,7 +2646,7 @@ impl SensorApp {
                         let bg = ui.painter().add(egui::Shape::Noop);
                         let mut row = ui.label(RichText::new("·").weak()).rect;
                         row = row.union(ui.label(RichText::new(unscored_label(hit)).weak().italics()).rect);
-                        for _ in 0..4 {
+                        for _ in 0..if full { 4 } else { 2 } {
                             row = row.union(ui.label("").rect);
                         }
                         if row_click(ui, row, bg, key, resolving == Some(key), RESOLVE_TIP, &hit_name(hit, i)) {
@@ -2573,33 +2671,38 @@ impl SensorApp {
                         None => cell(ui, RichText::new("·").weak()),
                     }
                     let check = self.card_photo.as_ref().and_then(|cp| cp.check(key));
+                    // The cells after the scores: a note spans them (it takes the first,
+                    // the rest stay empty).
+                    let rest = if full { 3 } else { 1 };
+                    let note = |ui: &mut Ui, t: RichText, cell: &mut dyn FnMut(&mut Ui, RichText)| {
+                        cell(ui, t);
+                        for _ in 1..rest {
+                            cell(ui, RichText::new(""));
+                        }
+                    };
                     match check {
                         _ if !shot.scored() => {
                             // Resolved by hand: no measurement to check.
                             let h = by_hand(key).unwrap_or("by hand");
-                            cell(ui, RichText::new(h).weak().italics());
-                            cell(ui, RichText::new(""));
-                            cell(ui, RichText::new(""));
+                            note(ui, RichText::new(h).weak().italics(), &mut cell);
                         }
-                        Some(c) => {
-                            cell(ui, RichText::new(format!("{:+.2}, {:+.2}", c.shot.0, c.shot.1)));
-                            match c.diff {
-                                Some(d) => {
+                        Some(c) => match c.diff {
+                            Some(d) => {
+                                if full {
+                                    cell(ui, RichText::new(format!("{:+.2}, {:+.2}", c.shot.0, c.shot.1)));
                                     cell(ui, RichText::new(format!("{:+.3}, {:+.3}", d.0, d.1)));
-                                    cell(ui, RichText::new(format!("{:.3}", d.0.hypot(d.1))).strong());
                                 }
-                                None => {
-                                    cell(ui, RichText::new("no hole found").weak().italics());
-                                    cell(ui, RichText::new(""));
-                                }
+                                cell(ui, RichText::new(format!("{:.3}", d.0.hypot(d.1))).strong());
                             }
-                        }
-                        None => {
-                            // A shot after the photo.
-                            cell(ui, RichText::new("after the photo").weak().italics());
-                            cell(ui, RichText::new(""));
-                            cell(ui, RichText::new(""));
-                        }
+                            None if full => {
+                                cell(ui, RichText::new(format!("{:+.2}, {:+.2}", c.shot.0, c.shot.1)));
+                                cell(ui, RichText::new("no hole found").weak().italics());
+                                cell(ui, RichText::new(""));
+                            }
+                            None => note(ui, RichText::new("no hole found").weak().italics(), &mut cell),
+                        },
+                        // A shot after the photo.
+                        None => note(ui, RichText::new("after the photo").weak().italics(), &mut cell),
                     }
                     if row_click(ui, row, bg, key, self.selected_shot == Some(key), SHOW_TIP, &format!("Shot {}", i + 1)) {
                         clicked = Some(key);
@@ -2619,7 +2722,6 @@ impl SensorApp {
             });
             return;
         }
-        self.message_notice(ui, false);
         match &self.link {
             Link::Connected { .. } => {} // shown by target_screen
             Link::Connecting { name } => connecting_card(ui, name),
@@ -3486,7 +3588,8 @@ fn card(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
 }
 
 /// Height of the chart card under the series card (the chart itself gets what's left of it).
-const CHART_CARD_H: f32 = 210.0;
+/// The score chart's height in the card details.
+const CHART_H: f32 = 170.0;
 
 /// A "nice" step (1, 2 or 5 × 10ⁿ) that splits `range` into at most `max_steps` steps.
 fn nice_step(range: f32, max_steps: usize) -> f32 {
@@ -4295,6 +4398,36 @@ fn calibration_text(st: &protocol::Status, cal: &protocol::Calibration) -> Strin
 
 /// The link's state before the status bar's text: filled when connected, a ring with a dot
 /// while connecting, a ring when idle. Painted: the bundled fonts have no "●" or "◌".
+/// The main window's mode, chosen at the top of the side column.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Mode {
+    /// Shooting a series on the sensor (and its card photo).
+    Shoot,
+    /// Counting cards from photos, apart from the series (`count.rs`).
+    Count,
+}
+
+/// The mode buttons, like tabs, at the top of the side column.
+fn mode_bar(ui: &mut Ui, mode: &mut Mode) {
+    ui.horizontal(|ui| {
+        for (m, label, tip) in [
+            (Mode::Shoot, "Shoot series", "The sensor's shots, scored as they come, and the series' card photo"),
+            (Mode::Count, "Count cards", "A card's holes and score from a photo, apart from the series"),
+        ] {
+            let text = RichText::new(label).size(15.0);
+            let text = if *mode == m { text.strong() } else { text };
+            if ui
+                .add(egui::Button::selectable(*mode == m, text).min_size(egui::vec2(0.0, 28.0)))
+                .on_hover_text(tip)
+                .clicked()
+            {
+                *mode = m;
+            }
+        }
+    });
+    ui.add_space(4.0);
+}
+
 fn link_dot(ui: &mut Ui, link: &Link) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
     let (c, r) = (rect.center(), 4.5);
@@ -4527,14 +4660,11 @@ impl SensorApp {
         self.photo_task = Some(task);
     }
 
-    /// Opens the count window (or brings it to the front).
+    /// Starts counting (count mode's first switch): the server and the worker.
     fn open_count(&mut self, ctx: &egui::Context) {
-        if self.count.is_some() {
-            ctx.send_viewport_cmd_to(egui::ViewportId::from_hash_of("count"), egui::ViewportCommand::Focus);
-            return;
-        }
         let Some(dir) = Self::photos_dir() else {
             self.message = Some("No folder for the photos on this system.".into());
+            self.mode = Mode::Shoot;
             return;
         };
         let _ = upload::clean_up(&dir, upload::now_unix());
@@ -4749,15 +4879,15 @@ fn row_click(
     r.clicked()
 }
 
-/// The card photo's result above the series table: the sensor against the holes, warnings,
-/// and the photo's details folded away.
+/// The card photo's result, in the card details: the sensor against the holes, the
+/// warnings, and the photo's details.
 fn photo_summary(ui: &mut Ui, cp: &CardPhoto, series: &[(protocol::Shot, Score)]) {
     let p = &cp.p;
     // A shot's number in the series now.
     let number = |key: Key| series.iter().position(|(s, _)| resolve::key(s) == key).map(|i| i + 1);
     if let Some(rms) = p.rms_mm {
         let found = p.shots.iter().filter(|s| s.diff.is_some()).count();
-        let mut line = format!("Card photo: {rms:.3} mm rms, the sensor against the holes, {found} of {} shots", p.shots.len());
+        let mut line = format!("{rms:.3} mm rms, the sensor against the holes, {found} of {} shots", p.shots.len());
         if let Some((i, d)) = p.worst() {
             match cp.keys.get(i).and_then(|&k| number(k)) {
                 Some(n) => line.push_str(&format!(" · worst {d:.3} mm (shot {n})")),
@@ -4767,53 +4897,54 @@ fn photo_summary(ui: &mut Ui, cp: &CardPhoto, series: &[(protocol::Shot, Score)]
         ui.add(egui::Label::new(RichText::new(line).strong()).wrap());
     } else {
         let n = p.holes.len();
-        ui.label(format!("Card photo: no shots in the series, {n} hole{} found.", if n == 1 { "" } else { "s" }));
+        ui.label(format!("No shots in the series, {n} hole{} found.", if n == 1 { "" } else { "s" }));
     }
+    for w in photo_notes(cp, series) {
+        ui.add(egui::Label::new(format!("⚠ {w}")).wrap());
+    }
+    ui.add_space(4.0);
+    let mut details = format!(
+        "{:.1} px per mm; the rings fit to {:.3} mm rms ({} of {} edge points); lens k1 {:+.3}. \
+         Taken {:.0}° from straight above: the holes expected to within about {:.2} mm (rms).",
+        p.px_per_mm, p.reg_rms_mm, p.reg_points.0, p.reg_points.1, p.k1, p.camera_deg, p.expected_mm
+    );
+    if let Some(pl) = &p.placement {
+        let c = p.pose.centre;
+        details.push_str(&format!(
+            " The card in the holder: its centre at {:+.2}, {:+.2} mm from the sensor's, turned {:+.2}°{}; \
+             the app's card is drawn there, the shots where the sensor put them (scored from the sensor's \
+             centre; the Paper column gauges the holes on the print).",
+            c.0,
+            c.1,
+            p.pose.angle_deg(),
+            if p.scaled {
+                format!(", printed at {:.4} of the sensor's scale", 1.0 / pl.scale)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    details.push_str(&format!(" Processed in {:.1} s.", p.seconds));
+    ui.add(egui::Label::new(RichText::new(details).small().weak()).wrap());
+}
+
+/// The card photo's warnings, and one when the series changed since the photo.
+fn photo_notes(cp: &CardPhoto, series: &[(protocol::Shot, Score)]) -> Vec<String> {
     let measured: Vec<Key> = series
         .iter()
         .filter(|(s, _)| s.scored())
         .map(|(s, _)| resolve::key(s))
         .collect();
+    let mut notes = Vec::new();
     if cp.keys != measured {
-        ui.add(
-            egui::Label::new(format!(
-                "⚠ Processed with {} of the sensor's shots; the series has {} now. Take another photo.",
-                cp.keys.len(),
-                measured.len()
-            ))
-            .wrap(),
-        );
+        notes.push(format!(
+            "Processed with {} of the sensor's shots; the series has {} now. Take another photo.",
+            cp.keys.len(),
+            measured.len()
+        ));
     }
-    for w in p.warnings() {
-        ui.add(egui::Label::new(format!("⚠ {w}")).wrap());
-    }
-    egui::CollapsingHeader::new(RichText::new("The photo's details").small().weak())
-        .id_salt("photo_details")
-        .show(ui, |ui| {
-            let mut details = format!(
-                "{:.1} px per mm; the rings fit to {:.3} mm rms ({} of {} edge points); lens k1 {:+.3}. \
-                 Taken {:.0}° from straight above: the holes expected to within about {:.2} mm (rms).",
-                p.px_per_mm, p.reg_rms_mm, p.reg_points.0, p.reg_points.1, p.k1, p.camera_deg, p.expected_mm
-            );
-            if let Some(pl) = &p.placement {
-                let c = p.pose.centre;
-                details.push_str(&format!(
-                    " The card in the holder: its centre at {:+.2}, {:+.2} mm from the sensor's, turned {:+.2}°{}; \
-                     the app's card is drawn there, the shots where the sensor put them (scored from the sensor's \
-                     centre; the Paper column gauges the holes on the print).",
-                    c.0,
-                    c.1,
-                    p.pose.angle_deg(),
-                    if p.scaled {
-                        format!(", printed at {:.4} of the sensor's scale", 1.0 / pl.scale)
-                    } else {
-                        String::new()
-                    }
-                ));
-            }
-            details.push_str(&format!(" Processed in {:.1} s.", p.seconds));
-            ui.add(egui::Label::new(RichText::new(details).small().weak()).wrap());
-        });
+    notes.extend(cp.p.warnings());
+    notes
 }
 
 /// A texture on a quadrilateral (corners from its top left, clockwise): the printed card,
@@ -4833,33 +4964,9 @@ fn paint_quad(painter: &egui::Painter, tex: egui::TextureId, corners: [egui::Pos
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// "Count card" with a small target, in the status bar: opens the count window.
-fn count_button(ui: &mut Ui) -> egui::Response {
-    let font = TextStyle::Button.resolve(ui.style());
-    let galley = ui
-        .painter()
-        .layout_no_wrap("Count card".into(), font, Color32::PLACEHOLDER);
-    let (icon, gap, pad) = (16.0, 6.0, egui::vec2(6.0, 2.0));
-    let size = egui::vec2(icon + gap + galley.size().x, galley.size().y.max(icon)) + 2.0 * pad;
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let visuals = ui.visuals();
-    let color = visuals.widgets.style(&response).fg_stroke.color;
-    let painter = ui.painter();
-    if response.hovered() {
-        painter.rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
-    }
-    let c = egui::pos2(rect.left() + pad.x + icon / 2.0, rect.center().y);
-    painter.circle_stroke(c, 7.0, Stroke::new(1.2, color));
-    painter.circle_stroke(c, 4.2, Stroke::new(1.2, color));
-    painter.circle_filled(c, 1.8, color);
-    let text_at = egui::pos2(c.x + icon / 2.0 + gap, rect.center().y - galley.size().y / 2.0);
-    painter.galley(text_at, galley, color);
-    response.on_hover_text("Count a card from a photo: its holes and its score, apart from the series.")
-}
-
-/// "Card photo", under the series.
+/// "Take photo", under the series: opens the card photo window.
 fn photo_button(ui: &mut Ui) -> bool {
-    ui.add(egui::Button::new("Card photo").frame(false))
+    ui.button("Take photo")
         .on_hover_text("A photo of the shot card from the phone: the holes against the shots.")
         .clicked()
 }
@@ -4959,6 +5066,109 @@ fn open_folder(dir: &std::path::Path) {
 mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
+
+    /// The main window's modes (app TODO "Interface cleanup"): the mode buttons on top of
+    /// the side column; shoot mode's buttons, without and with a card photo (the shorter
+    /// table, Card details with every column and the shots per ring, Remove photo); count
+    /// mode in the same window and back; without a sensor, the connection in shoot mode
+    /// and counting still there. `UI_SHOTS=<dir>` saves an image of each step.
+    #[test]
+    fn app_modes() {
+        let dir = std::env::temp_dir().join(format!("opensights-modes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let count_dir = dir.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1300.0, 900.0))
+            .build_eframe(move |cc| {
+                install_fonts(&cc.egui_ctx);
+                let link = (tokio::sync::mpsc::unbounded_channel().0, mpsc::channel().1);
+                let mut app = SensorApp::with_link(cc, link).demo_series();
+                app.event_log = None;
+                // Counting in the test's folder, not the app's.
+                app.count = Some(count::CountTask::open(&cc.egui_ctx, count_dir));
+                app
+            });
+        let shots_dir = std::env::var_os("UI_SHOTS").map(std::path::PathBuf::from);
+        let step = |h: &mut egui_kittest::Harness<SensorApp>, name: &str| {
+            h.run_steps(4);
+            if let Some(dir) = &shots_dir {
+                h.render().expect("render").save(dir.join(format!("modes-{name}.png"))).unwrap();
+            }
+        };
+        let has = |h: &egui_kittest::Harness<SensorApp>, l: &str| h.query_by_label(l).is_some();
+
+        // Shoot mode, no photo.
+        step(&mut h, "1-shoot");
+        assert_eq!(h.state().mode, Mode::Shoot);
+        for l in ["Shoot series", "Count cards", "LAST SHOT", "Clear series", "Take photo"] {
+            assert!(has(&h, l), "{l}");
+        }
+        for l in ["Count card", "SHOTS PER RING", "Card details"] {
+            assert!(!has(&h, l), "{l}");
+        }
+
+        // A card photo of the series, processed as the app does.
+        let shots: Vec<(f64, f64)> = h
+            .state()
+            .series
+            .iter()
+            .filter(|(s, _)| s.scored())
+            .map(|(s, _)| (f64::from(s.x_mm()), f64::from(s.y_mm())))
+            .collect();
+        let card = card::air_pistol();
+        let bytes = photo::demo_photo(&card, &shots, 0.1, 7).unwrap();
+        let stored = upload::store(&dir, "modes", &bytes, upload::now_unix()).unwrap();
+        let p = photo::process(stored, &card, &shots).unwrap();
+        let keys = h.state().measured_keys();
+        h.state_mut().card_photo = Some(CardPhoto { p, texture: None, keys });
+        step(&mut h, "2-photo");
+        for l in ["Card details", "Remove photo", "Take another photo", "Open the folder", "Paper", "Off (mm)"] {
+            assert!(has(&h, l), "{l}");
+        }
+        for l in ["Take photo", "Shot x, y (mm)", "Hole − shot (mm)", "SHOTS PER RING"] {
+            assert!(!has(&h, l), "{l}");
+        }
+
+        // Card details: the photo's results, the full table, the shots per ring.
+        h.get_by_label("Card details").click();
+        step(&mut h, "3-details");
+        assert!(h.state().details_open);
+        for l in ["Shot x, y (mm)", "Hole − shot (mm)", "SHOTS PER RING", "CARD PHOTO"] {
+            assert!(has(&h, l), "{l}");
+        }
+        h.get_by_label("Remove photo").click();
+        step(&mut h, "4-removed");
+        assert!(h.state().card_photo.is_none());
+        assert!(!h.state().details_open);
+        assert!(!has(&h, "Shot x, y (mm)"));
+        assert!(has(&h, "Take photo"));
+
+        // Count mode, in the same window.
+        h.get_by_label("Count cards").click();
+        step(&mut h, "5-count");
+        assert_eq!(h.state().mode, Mode::Count);
+        for l in ["Shoot series", "CARDS", "No cards yet."] {
+            assert!(has(&h, l), "{l}");
+        }
+        for l in ["Clear series", "LAST SHOT"] {
+            assert!(!has(&h, l), "{l}");
+        }
+        h.get_by_label("Shoot series").click();
+        step(&mut h, "6-back");
+        assert_eq!(h.state().mode, Mode::Shoot);
+        assert!(has(&h, "Clear series"));
+
+        // Without a sensor: the connection in shoot mode, counting still there.
+        h.state_mut().demo_hits = false;
+        step(&mut h, "7-no-sensor");
+        assert!(has(&h, "NO SENSOR CONNECTED"));
+        assert!(!has(&h, "Clear series"));
+        h.get_by_label("Count cards").click();
+        step(&mut h, "8-count-no-sensor");
+        assert!(has(&h, "No cards yet."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The settings editor (app TODO) against a sensor played by the test: opened, three
     /// fields changed, written whole (the rest as read); the sensor's settings come back and

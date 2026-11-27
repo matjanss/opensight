@@ -1,9 +1,9 @@
 //! Counting cards (`CARDPHOTO.md` C7): a card photo apart from any series, only to score
-//! the card. Its own window: one link for the phone takes photo after photo (up to
+//! the card. Count mode in the main window: one link for the phone takes photo after photo (up to
 //! `COUNT_MAX`), a worker thread counts them in turn (the holes found without shots, each
-//! scored on the printed card), and the window shows each card's photo with its holes as
+//! scored on the printed card), and the app shows each card's photo with its holes as
 //! rings, its score, and the total over the cards. The photos are stored as card photos are
-//! (`photos/`, removed after 30 days); the window keeps only the card it shows in memory.
+//! (`photos/`, removed after 30 days); the count keeps only the card it shows in memory.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -14,10 +14,10 @@ use crate::card::{Card, CardTexture, Score};
 use crate::{
     BAR_BUTTON, BAR_PAD, CardView, LAST_SHOT_COLOR, PhotoJob, ZOOM_LABEL, card as panel, dashed_circle,
     fade_control, notice, open_folder, paint_quad, photo, qr_code, review_detail, review_notice, score_chart,
-    title, upload, zoom_controls,
+    upload, zoom_controls,
 };
 
-/// The most cards a window holds.
+/// The most cards a count holds.
 pub const COUNT_MAX: usize = 20;
 /// The series name the photos are stored under.
 const SERIES: &str = "count";
@@ -25,7 +25,7 @@ const SERIES: &str = "count";
 const STACK_BELOW: f32 = 760.0;
 const SIDE_WIDTH: f32 = 360.0;
 
-/// What the window needs from the app's settings.
+/// What count mode needs from the app's settings.
 pub struct CountEnv<'a> {
     pub card: &'a Card,
     /// Decimal scores (the setting, on a card that has them).
@@ -224,7 +224,7 @@ enum HoleEdit {
     Restore(usize),
 }
 
-/// What the worker tells the window.
+/// What the worker tells the count.
 enum News {
     Started(u32),
     Done(
@@ -233,7 +233,7 @@ enum News {
     ),
 }
 
-/// The count window, while open.
+/// The count, from the first switch to count mode until the app closes.
 pub struct CountTask {
     server: Result<upload::UploadServer, String>,
     url: Option<String>,
@@ -260,6 +260,8 @@ pub struct CountTask {
     /// The lines the phone was given last.
     lines: Vec<String>,
     error: Option<String>,
+    /// "Start over" clicked once: the second click (on "Remove all") clears the cards.
+    confirm_start_over: bool,
 }
 
 impl CountTask {
@@ -302,6 +304,7 @@ impl CountTask {
             placing: None,
             card_rect: egui::Rect::NOTHING,
             lines: Vec::new(),
+            confirm_start_over: false,
             error: None,
         }
     }
@@ -445,6 +448,24 @@ impl CountTask {
         }
     }
 
+    /// All cards gone, a new link for the phone (the old one stops). Photos the worker is
+    /// still counting are dropped when they come back (their card is gone).
+    fn start_over(&mut self) {
+        self.cards.clear();
+        self.select(None);
+        self.follow = true;
+        self.texture = None;
+        self.error = None;
+        self.show_link = true;
+        if let Ok(s) = &self.server {
+            let url = s.offer_session(SERIES, COUNT_MAX);
+            self.qr = upload::qr(&url).ok();
+            self.url = Some(url);
+            self.status = "Waiting for the phone…".into();
+        }
+        self.lines.clear();
+    }
+
     fn remove(&mut self, n: u32) {
         self.cards.retain(|c| c.n != n);
         if let Ok(s) = &self.server {
@@ -459,8 +480,9 @@ impl CountTask {
         }
     }
 
-    /// The window's contents.
-    pub fn ui(&mut self, ui: &mut Ui, env: &CountEnv) {
+    /// Count mode in the main window: the card, and the side column with `top` above the
+    /// list (the app's mode buttons).
+    pub fn ui(&mut self, ui: &mut Ui, env: &CountEnv, top: impl FnOnce(&mut Ui)) {
         // Photo files dropped on the window: counted like the phone's, within the limit.
         let dropped: Vec<Vec<u8>> = ui.input(|i| {
             i.raw
@@ -478,7 +500,7 @@ impl CountTask {
                 self.add(PhotoJob::Bytes(b));
             } else {
                 self.error = Some(format!(
-                    "The window holds {COUNT_MAX} cards, its most. Remove one, or close the window and start again."
+                    "A count holds {COUNT_MAX} cards, its most. Remove one, or start over."
                 ));
             }
         }
@@ -513,6 +535,7 @@ impl CountTask {
                 self.card_view(ui, card_w, env);
                 ui.vertical(|ui| {
                     ui.set_width(side_w);
+                    top(ui);
                     egui::ScrollArea::vertical()
                         .id_salt("count_side")
                         .auto_shrink([false, false])
@@ -526,6 +549,7 @@ impl CountTask {
                     let width = ui.available_width();
                     self.card_view(ui, width, env);
                     ui.add_space(6.0);
+                    top(ui);
                     self.side(ui, env);
                 });
         }
@@ -533,12 +557,6 @@ impl CountTask {
 
     /// The list of cards, the total, the link, and the shown card's holes.
     fn side(&mut self, ui: &mut Ui, env: &CountEnv) {
-        title(
-            ui,
-            "Count cards",
-            "A card's holes and score from a photo, apart from the series",
-        );
-        ui.add_space(10.0);
         if let Some(e) = self.error.clone()
             && notice(ui, &e)
         {
@@ -546,6 +564,7 @@ impl CountTask {
         }
         let decimal = env.decimal;
         let (mut pick, mut remove, mut toggle_link) = (None, None, false);
+        let (mut start_over, mut confirm) = (false, self.confirm_start_over);
         panel(ui, "Cards", |ui| {
             if self.cards.is_empty() {
                 ui.label(RichText::new("No cards yet.").weak());
@@ -623,8 +642,28 @@ impl CountTask {
                 {
                     open_folder(dir);
                 }
+                if !self.cards.is_empty() && !confirm {
+                    confirm = ui
+                        .add(egui::Button::new("Start over").frame(false))
+                        .on_hover_text("Remove all the cards and start a new count (the photo files stay)")
+                        .clicked();
+                }
             });
+            if confirm && !self.cards.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("Remove all {}?", plural(self.cards.len(), "card", "cards")));
+                    start_over = ui.button("Remove all").clicked();
+                    if ui.button("Keep them").clicked() {
+                        confirm = false;
+                    }
+                });
+            }
         });
+        self.confirm_start_over = confirm && !start_over;
+        if start_over {
+            self.start_over();
+            return;
+        }
         if self.show_link || self.cards.is_empty() {
             panel(ui, "From the phone", |ui| {
                 match &self.server {
@@ -1228,7 +1267,7 @@ impl CountTask {
 /// holes found and placed on the printed card, the photo on the card's grid saved beside it.
 fn worker(dir: PathBuf, jobs: mpsc::Receiver<(u32, PhotoJob)>, news: mpsc::Sender<News>, ctx: egui::Context) {
     let card = crate::card::air_pistol();
-    // Ends when the window closes (the sender dropped).
+    // Ends when the app closes (the sender dropped).
     while let Ok((n, job)) = jobs.recv() {
         if news.send(News::Started(n)).is_err() {
             return;
@@ -1381,6 +1420,7 @@ mod tests {
             placing: None,
             card_rect: egui::Rect::NOTHING,
             lines: Vec::new(),
+            confirm_start_over: false,
             error: None,
         };
         let env = move || CountEnv {
@@ -1396,7 +1436,7 @@ mod tests {
                 move |ui, t: &mut CountTask| {
                     crate::install_fonts(ui.ctx());
                     t.poll(&env());
-                    t.ui(ui, &env());
+                    t.ui(ui, &env(), |_| {});
                 },
                 task,
             );

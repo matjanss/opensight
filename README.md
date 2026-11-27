@@ -51,12 +51,13 @@ rust-analyzer picks up `app/`.
   the phone straight above it. The photo's metadata (location and the like) is removed;
   photos are kept 30 days unless marked to keep. Work in progress, see
   [app/CARDPHOTO.md](app/CARDPHOTO.md).
-- **Count card** (in the status bar, with or without a sensor): scores paper cards from
+- **Count cards** (the mode buttons at the top of the right column switch between
+  **Shoot series** and **Count cards**; with or without a sensor): scores paper cards from
   photos, apart from the series. Scan the code once, then photograph card after card ("Upload
   another card", up to 20); the app counts them in turn and shows each card's holes and score,
   and the total, on the phone too. A hole the count missed can be added by hand (**Add a
   hole…**, click it on the card, Confirm), and one it found wrongly removed (× in its row,
-  or Delete); a removed hole can be restored.
+  or Delete); a removed hole can be restored. **Start over** clears the cards.
 - Settings also show the heartbeat (the sensor's `millis()`, every 2 s). The blue LED
   only shows the sensor's status: pairing mode, a PIN reset, a shot.
 - The sensor has a name (`OpenSights-xyz` at first) that you can change from the app.
