@@ -24,6 +24,16 @@ status and settings are in (step 5c).
   (`assets/templates/grid-4x4.json`); choosing another template file, and the sparks per
   point, in the window.
 
+## Cards
+
+- **More card types, defined in their JSON** (2026-11-27). The registration's model of the card
+  (`cardphoto/src/card.rs`, the pistol card hard-coded) should come from the card's JSON, with
+  the app's drawing made from the same description: each ring line's radius (to its outer
+  edge, ISSF), its width, dark on white or light in the black, and which lines share an offset
+  (`line_groups`: lines printed alike share one; by default all). Other cards bring other
+  features: the air rifle's 10 is a 0.5 mm dot, some cards have no black disc edge to anchor
+  on. With the second card type.
+
 ## Shots
 
 - **Undo shot / too many shots on a card.** Normally a card takes x shots, then a new

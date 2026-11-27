@@ -40,17 +40,23 @@ fn run(name: &str, p: &Params) -> (Registration, f64) {
     let reg = register(&img, &issf_air_pistol()).unwrap_or_else(|e| panic!("{name}: {e}"));
     let (worst, k) = worst_error(&reg, &truth);
     println!(
-        "{name}: worst {worst:.4} mm (quarter turn {k}), rms {:.4} mm, {} of {} points kept, axes {:?}, d {:+.3} / {:+.3} mm, k1 {:+.4} (true {:+.4}), contrast {:.2}-{:.2}",
+        "{name}: worst {worst:.4} mm (quarter turn {k}), rms {:.4} mm, {} of {} points kept, axes {:?}, line offset {:+.3?} mm, k1 {:+.4} (true {:+.4}), contrast {:.2}-{:.2}",
         reg.rms_mm,
         reg.kept,
         reg.points,
         reg.axes,
-        reg.d_dark,
-        reg.d_light,
+        reg.offsets,
         reg.map.lens.k1,
         p.k1,
         reg.contrast.ink,
         reg.contrast.paper
+    );
+    // The app's card draws each 0.2 mm line with its outer edge on the stated radius, as
+    // printed cards do: its centre 0.1 mm inside.
+    assert!(
+        (reg.offsets[0] + 0.1).abs() < 0.01,
+        "{name}: line offset {:?}",
+        reg.offsets
     );
     (reg, worst)
 }

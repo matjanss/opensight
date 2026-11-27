@@ -131,6 +131,10 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   holes, `cardphoto/src/gauge.rs`) per file (`C5_NOHOLES=1`, `C5_CAL=<mm>`, `C5_RECT=<dir>`
   for the photos on the card's grid). The user's photos are in
   `~/dev/opensights-photos/` (one folder per card; not in git).
+- **Each ring's line after the registration:** `cargo run --release -p cardphoto --example
+  ringcheck -- <photo>...` in `app/`: per file the fit's line offset and, per ring, where its
+  line lies against its stated radius (about −0.1 mm for every line on a good fit: the
+  diameter is to the line's outer edge, CARDPHOTO.md).
 - **The calibration crate:** `cargo test` in `app/` also runs `calib/` (the workspace's
   default members): the solver against `firmware/test/vectors`, the fit against
   `calibrate.py`'s self-test (`calib/tests/data`, made by `calibrate.py --selftest

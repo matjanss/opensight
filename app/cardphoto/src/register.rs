@@ -5,13 +5,14 @@
 //! in the app, settle the quarter turn).
 //!
 //! Each edge point's residual: its distance from the centre on the card (through the mapping)
-//! minus its circle's radius, plus an offset per kind of printed line (where on the line the
-//! stated diameter sits). The disc's edge has none: it is the reference. The print's scale
+//! minus its circle's radius, plus its line's offset (where on the line the stated diameter
+//! sits; one per group of lines printed alike, `CardModel::line_groups`). The disc's edge has
+//! none: it is the reference. The print's scale
 //! is not fitted: a photo has no absolute scale, so the rings set it (their ISSF size).
 
 use nalgebra::{DMatrix, DVector, Matrix3};
 
-use crate::card::{CardModel, Kind};
+use crate::card::CardModel;
 use crate::detect::{Contrast, RingPoint, coarse, contrast, numbers_rotation, outline_rotation, ring_points};
 use crate::{Gray, Lens, Mapping};
 
@@ -19,9 +20,9 @@ use crate::{Gray, Lens, Mapping};
 #[derive(Clone, Debug)]
 pub struct Registration {
     pub map: Mapping,
-    /// The offsets of the dark lines (on the white) and the light lines (in the black), mm.
-    pub d_dark: f64,
-    pub d_light: f64,
+    /// The line offsets, one per group (`CardModel::line_groups`), mm: where a line's centre
+    /// is against its stated radius (about −0.1 for a 0.2 mm line measured to its outer edge).
+    pub offsets: Vec<f64>,
     /// The rms residual of the edge points kept, mm on the card.
     pub rms_mm: f64,
     /// Edge points found, and kept (the others: holes, dust, print).
@@ -50,22 +51,23 @@ impl Registration {
     }
 }
 
-/// The parameters: h11 h12 h13 h21 h22 h23 h31 h32 (h33 = 1), k1, k2, d_dark, d_light.
-const NP: usize = 12;
+/// The parameters: h11 h12 h13 h21 h22 h23 h31 h32 (h33 = 1), k1, k2, then the line offsets
+/// (one per group).
+const NP_MAP: usize = 10;
 
-fn unpack(q: &[f64], lens0: &Lens) -> (Mapping, f64, f64) {
+fn unpack(q: &[f64], lens0: &Lens) -> (Mapping, Vec<f64>) {
     let h = Matrix3::new(q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], 1.0);
     let lens = Lens {
         k1: q[8],
         k2: q[9],
         ..*lens0
     };
-    (Mapping { h, lens }, q[10], q[11])
+    (Mapping { h, lens }, q[NP_MAP..].to_vec())
 }
 
-fn pack(map: &Mapping, d_dark: f64, d_light: f64) -> Vec<f64> {
+fn pack(map: &Mapping, offsets: &[f64]) -> Vec<f64> {
     let h = map.h / map.h[(2, 2)];
-    vec![
+    let mut q = vec![
         h[(0, 0)],
         h[(0, 1)],
         h[(0, 2)],
@@ -76,14 +78,14 @@ fn pack(map: &Mapping, d_dark: f64, d_light: f64) -> Vec<f64> {
         h[(2, 1)],
         map.lens.k1,
         map.lens.k2,
-        d_dark,
-        d_light,
-    ]
+    ];
+    q.extend_from_slice(offsets);
+    q
 }
 
 /// Each point's residual (mm), for parameters q.
 fn residuals(q: &[f64], lens0: &Lens, pts: &[RingPoint], model: &CardModel) -> Vec<f64> {
-    let (map, d_dark, d_light) = unpack(q, lens0);
+    let map = unpack(q, lens0).0;
     let Some(inv) = map.h.try_inverse() else {
         return vec![1e6; pts.len()];
     };
@@ -91,18 +93,14 @@ fn residuals(q: &[f64], lens0: &Lens, pts: &[RingPoint], model: &CardModel) -> V
         .map(|rp| {
             let f = model.features[rp.feature];
             let c = map.to_card_with(&inv, rp.p);
-            let off = match f.kind {
-                Kind::DarkLine => d_dark,
-                Kind::LightLine => d_light,
-                Kind::Edge => 0.0,
-            };
+            let off = f.group.map_or(0.0, |g| q[NP_MAP + g]);
             c.0.hypot(c.1) - (f.radius_mm + off)
         })
         .collect()
 }
 
 /// Weighted Levenberg-Marquardt from q0; weights per point (the robust reweighting). With
-/// `lens` false, the lens's k1 and k2 stay as they are.
+/// `lens` false, the lens's k1 and k2 stay as they are; so does a line offset no point uses.
 fn minimize(
     q0: &[f64],
     lens0: &Lens,
@@ -134,14 +132,22 @@ fn minimize(
             .map(|(r, w)| w * r * r)
             .sum()
     };
+    let np = q0.len();
+    // What stays as it is: the lens unless asked, and the offset of a group with no points.
+    let mut held: Vec<usize> = if lens { Vec::new() } else { vec![8, 9] };
+    held.extend(
+        (0..np - NP_MAP)
+            .filter(|g| !pts.iter().any(|p| model.features[p.feature].group == Some(*g)))
+            .map(|g| NP_MAP + g),
+    );
     let mut q = q0.to_vec();
     let mut c = cost(&q);
     let mut lambda = 1e-3;
     for _ in 0..100 {
         let r0 = residuals(&q, lens0, pts, model);
         let m = pts.len();
-        let mut jac = DMatrix::zeros(m, NP);
-        for p in 0..NP {
+        let mut jac = DMatrix::zeros(m, np);
+        for p in 0..np {
             let step = 1e-6 * scale(&q, p);
             let mut qp = q.clone();
             qp[p] += step;
@@ -155,18 +161,16 @@ fn minimize(
         let f = DVector::from_iterator(m, r0.iter().zip(w).map(|(r, w)| r * w.sqrt()));
         let mut a = jac.transpose() * &jac;
         let mut g = jac.transpose() * f;
-        if !lens {
-            for p in 8..10 {
-                a.row_mut(p).fill(0.0);
-                a.column_mut(p).fill(0.0);
-                a[(p, p)] = 1.0;
-                g[p] = 0.0;
-            }
+        for &p in &held {
+            a.row_mut(p).fill(0.0);
+            a.column_mut(p).fill(0.0);
+            a[(p, p)] = 1.0;
+            g[p] = 0.0;
         }
         let mut improved = false;
         for _ in 0..20 {
             let mut ad = a.clone();
-            for d in 0..NP {
+            for d in 0..np {
                 ad[(d, d)] += lambda * a[(d, d)].max(1e-30);
             }
             // The card's rotation about its centre is free (circles): the damping keeps it.
@@ -212,13 +216,13 @@ fn mad_sigma(r: &[f64]) -> f64 {
 /// as `map` has it.
 fn fit(
     map: &Mapping,
-    d: (f64, f64),
+    offsets: &[f64],
     pts: &[RingPoint],
     model: &CardModel,
     lens: bool,
 ) -> (Vec<f64>, Vec<f64>) {
     let lens0 = map.lens;
-    let mut q = pack(map, d.0, d.1);
+    let mut q = pack(map, offsets);
     let mut w = vec![1.0; pts.len()];
     for _ in 0..6 {
         q = minimize(&q, &lens0, pts, model, &w, lens);
@@ -248,7 +252,7 @@ pub fn register(img: &Gray, model: &CardModel) -> Result<Registration, String> {
         ));
     }
     let step = (0.2 / px_per_mm).min(0.05);
-    let mut d = (0.0, 0.0);
+    let mut offsets = vec![0.0; model.line_groups];
     let mut pts = Vec::new();
     let mut res = Vec::new();
     // From the disc outwards: the coarse mapping (from the disc alone) can be several mm off
@@ -279,10 +283,8 @@ pub fn register(img: &Gray, model: &CardModel) -> Result<Registration, String> {
                 pts.len()
             ));
         }
-        let (q, r) = fit(&map, d, &pts, &part, lens);
-        let (m, dd, dl) = unpack(&q, &map.lens);
-        map = m;
-        d = (dd, dl);
+        let (q, r) = fit(&map, &offsets, &pts, &part, lens);
+        (map, offsets) = unpack(&q, &map.lens);
         res = r;
     }
     let sigma = mad_sigma(&res);
@@ -311,8 +313,7 @@ pub fn register(img: &Gray, model: &CardModel) -> Result<Registration, String> {
     }
     Ok(Registration {
         map,
-        d_dark: d.0,
-        d_light: d.1,
+        offsets,
         rms_mm: rms,
         points: pts.len(),
         kept,

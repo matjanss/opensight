@@ -24,6 +24,11 @@ and reviews the results.
 - The built-in card: ISSF 10 m air pistol (`assets/cards/issf-10m-air-pistol.json`): 170 ×
   170 mm, centre (85, 85), rings 1–10 of diameter 155.5 to 11.5 mm in steps of 16 mm, the
   inner ten 5.0 mm; the black aiming area covers rings 7–10 (59.5 mm).
+- **Ring lines:** a ring's stated diameter is to its line's outer edge (ISSF), and printed cards
+  have it so: on a 600 dpi scan every line's centre is 0.09 mm inside its stated radius, dark
+  and light alike. The app's SVG draws each 0.2 mm line 0.1 mm inside its radius (until
+  2026-11-27 it drew them centred on it, so the photo's rings looked 0.1 mm smaller than the
+  app's: 4 % on the inner ten). Scoring uses the JSON's diameters, which were right.
 - **Card coordinates:** mm from the centre, x right, y up, as printed (the numbers upright).
   **Frame coordinates:** the sensor's (x right, y up as seen by the shooter). The two differ
   by the card's placement: a shift, a small angle and a quarter turn (0, 90, 180 or 270°).
@@ -41,8 +46,12 @@ Builds, in a library crate `app/cardphoto/` (pure Rust, workspace member, `cargo
    radius.
 4. **The fit:** image point = distort(H · card point). H is a homography (8 values), the
    distortion radial about the image centre (k1, k2); each circle's radius is its stated one
-   plus an offset per kind of line (d_dark for the lines on the white, d_light in the black:
-   where on the printed line the stated diameter sits; the disc's edge is the reference).
+   plus its line's offset (where on the printed line the stated diameter sits; the disc's
+   edge is the reference). Lines printed alike share one offset (`CardModel::line_groups`;
+   the pistol card: one for all its lines, about −0.1 mm: the stated diameter is to the
+   line's outer edge). Until 2026-11-27 the dark and light lines had one each, and the dark
+   lines' offset hid a misfit by moving rings 1–6 out together, up to 0.15 mm (see the
+   results).
    **The print's scale isn't fitted:** a photo has no absolute scale (a larger card looks like
    a nearer one), so the rings set it to their ISSF size, which is what scoring uses; paper
    that changed size between the shot and the photo shows in C2, as a scale between the shots
@@ -460,6 +469,12 @@ the one that was provided with a message that the error may be x mm").**
 - **Which way up:** solved in C7 (2026-11-26, see its results). The cause was not the real
   card's print: the outline was never found on a real photo, so the registration's axes were
   arbitrary and the numbers were looked for where they aren't.
+- **A radial wave in the photos** (2026-11-27): with one line offset, the rings of most phone
+  photos still lie ±0.03–0.05 mm off their circles in a pattern no mapping in the model
+  follows (rings 2–3 and 8–9 too far in, 4–5 too far out, the disc's edge up to 0.06 mm in).
+  The scans don't have it. A card not lying flat would do it (0.4 mm of bow at 250 mm from
+  the camera is 0.1 mm); a photo of a card under glass beside the same card loose would tell.
+  It is most of the holes' spread across photos (0.05–0.12 mm per hole).
 - **False holes on ring 1's line** (C7): on two of the counting photos of 2026-11-26 the
   unguided search reports a hole on the outermost ring line (77–78.5 mm) where the paper is
   whole; which photo it hits changes with the registration's axes. Not looked into yet.
@@ -540,6 +555,7 @@ Newest first.
 
 | Date | Step | Setup | Result |
 |---|---|---|---|
+| 2026-11-27 | C1, C4 | The photo's 10 and inner ten looked smaller than the app's card, and its rings in the black didn't match (the user). Run by Claude: every ring's line measured again after the registration (`examples/ringcheck.rs`, all 94 real photos and both scans), the counts of every real photo against `main` (`count::real`), each hole's distance from the centre across photos (`c5`), `cargo test` | **Found:** the app's SVG drew each ring line centred on its stated radius, the print has its outer edge there: on the scans every line's centre 0.09 mm inside (dark and light alike), so the photo's rings 0.1 mm inside the app's (inner ten 2.40 against 2.50 mm). And the fit's dark-line offset (−0.09 on the scans) ranged −0.09 to +0.03 on phone photos, moving rings 1–6 out together to hide a radial misfit. **Fixed:** the SVG's lines drawn 0.1 mm inside their radius; one offset for all the card's lines (`CardModel::line_groups`). **Pass.** The offset: −0.063 to −0.113 mm on the 94 photos, −0.090 and −0.092 on the scans, −0.103 on the synthetic photos (now a test: within 0.01 of −0.1); the synthetic registration's worst error 0.015–0.017 mm (was 0.013–0.016); rms up to 0.081 mm (all under the 0.12 warning). Every count as before, file by file (card 2's split 28/29/30 too). Holes in the white moved in by 0.09–0.15 mm on the photos with the dark-line offset furthest off (IMG_3455, today's 15:48), 0.03–0.05 mm on others, in the black 0.01–0.07 mm. Card 4's photos against its scan (3 holes): the mean difference +0.059 → +0.007 mm (per hole +0.162/+0.058/−0.043 → +0.108/+0.003/−0.090); each hole's spread across photos about as before (0.024–0.114 mm, some better, some worse): the radial wave (C5) is left. `cargo test` passes (cardphoto 10 + 4 + 10 + 7, calib 3 + 2, the app 63). |
 | 2026-11-27 | C1, C7 | Removing a hole from the card's popup; "New QR code"; the rings-fit warning; run by Claude: `cargo test` (the app 61, 3 ignored; `holes_changed_by_hand` extended), clippy | **Pass.** A click on a hole shows its popup with "Remove this hole" (or "Restore this hole"), as × in the list and Delete do. The warning "the rings fit with … mm rms" came above 0.03 mm, but real photos give 0.017–0.080 mm (0.02 from straight above, 0.05–0.08 at 20–33° of tilt, C5): it fired on every tilted photo, changed no number, and the tilt has its own warning. Now only above 0.12 mm (a gross misfit; the first C5 registration failures gave 0.10–0.19), worded with the usual range. |
 | 2026-11-27 | C3, C7 | "Finished" on the phone's pages; run by Claude: `cargo test` (the app 61, 3 ignored; the new test `finished_closes_the_link`), clippy | **Pass** for the server: on a session and a single link, GET of `/finished` refused (405), POST answers "Finished: …", the app gets `Finished`, then the page and a second "Finished" are 404. The app's side (the photo window closing, the count's "New QR code") and the page on a phone not yet tried: the user. |
 | 2026-11-27 | C4, C7 | The interface cleanup (app TODO): count mode in the main window, the photo's results in "Card details"; run by Claude: `cargo test` (the app 60, 3 ignored; the new UI test `app_modes` with a demo photo of the demo series), clippy, the test's images looked at | **Pass** (the user's look is due). Shoot mode: the mode buttons, the series with "Clear series" and "Take photo"; with the photo: #, OpenSights, Paper, Off in the main table (paper 56 = sensor 56), "Card details" opening the window with 0.150 mm rms (6 of 6), the full table and the shots per ring; "Remove photo" closes it. Count mode in the same window and back; without a sensor the connection's card and counting still there. |
