@@ -462,6 +462,34 @@ impl Settings {
     }
 }
 
+/// What is out of range in `s` (PROTOCOL.md "Settings", the firmware's `settingsValid`), or
+/// None. The mic span's largest is the sensor's own (its capture buffer): not checked here,
+/// the sensor drops a write over it.
+pub fn settings_problem(s: &Settings) -> Option<&'static str> {
+    let curtain_off = s.curtain_lo_ns == 0.0 && s.curtain_hi_ns == 0.0;
+    if !(s.res_limit_ns > 0.0 && s.res_limit_ns <= 100_000.0) {
+        Some("The residual limit must be over 0 and at most 100 000 ns.")
+    } else if !(-1..=4).contains(&s.max_lost) {
+        Some("Mics that may be lost: off, or 0 to 4.")
+    } else if !(s.area_mm == 0.0 || (10.0..=1000.0).contains(&s.area_mm)) {
+        Some("The area must be off, or ±10 to ±1000 mm.")
+    } else if !(s.together_ns == 0.0 || (s.together_ns > 0.0 && s.together_ns <= 100_000.0)) {
+        Some("The together limit must be off, or at most 100 µs.")
+    } else if !(s.pulse_max_ns == 0.0 || (s.pulse_max_ns > 0.0 && s.pulse_max_ns <= 100_000.0)) {
+        Some("The longest pulse must be off, or at most 100 µs.")
+    } else if !(curtain_off
+        || (s.curtain_lo_ns >= 0.0 && s.curtain_hi_ns > s.curtain_lo_ns && s.curtain_hi_ns <= 2_000_000.0))
+    {
+        Some("The curtain's window must end after it starts, and by 2000 µs.")
+    } else if s.span_mm < 50 {
+        Some("The mic span must be at least 50 mm.")
+    } else if !(1..=1000).contains(&s.deadtime_ms) {
+        Some("The dead time must be 1 to 1000 ms.")
+    } else {
+        None
+    }
+}
+
 pub const SETTINGS_LEN: usize = 36;
 
 pub fn decode_settings(bytes: &[u8]) -> Option<Settings> {
@@ -793,6 +821,37 @@ pub(crate) mod tests {
         let mut other = hex(SETTINGS_HEX);
         other[0] = 2;
         assert_eq!(decode_settings(&other), None);
+    }
+
+    /// The ranges, at their edges (PROTOCOL.md "Settings").
+    #[test]
+    fn settings_ranges() {
+        let ok = decode_settings(&hex(SETTINGS_HEX)).unwrap();
+        assert_eq!(settings_problem(&ok), None);
+        type Edge = (fn(&mut Settings), bool); // a change, and whether it stays valid
+        let edges: [Edge; 16] = [
+            (|s| s.res_limit_ns = 100_000.0, true),
+            (|s| s.res_limit_ns = 0.0, false),
+            (|s| s.max_lost = -1, true),
+            (|s| s.max_lost = 5, false),
+            (|s| s.area_mm = 0.0, true),
+            (|s| s.area_mm = 9.5, false),
+            (|s| s.area_mm = 1000.0, true),
+            (|s| s.together_ns = 100_001.0, false),
+            (|s| s.pulse_max_ns = 0.0, true),
+            (|s| s.pulse_max_ns = -1.0, false),
+            (|s| *s = s.with_curtain(None), true),
+            (|s| *s = s.with_curtain(Some((0.0, 2_000_000.0))), true),
+            (|s| *s = s.with_curtain(Some((50_000.0, 50_000.0))), false),
+            (|s| s.span_mm = 49, false),
+            (|s| s.deadtime_ms = 1000, true),
+            (|s| s.deadtime_ms = 0, false),
+        ];
+        for (i, (change, valid)) in edges.iter().enumerate() {
+            let mut s = ok.clone();
+            change(&mut s);
+            assert_eq!(settings_problem(&s).is_none(), *valid, "edge {i}: {s:?}");
+        }
     }
 
     /// The curtain switched off and on again: bytes 20–27 change, nothing else.

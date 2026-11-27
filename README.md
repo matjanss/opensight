@@ -34,6 +34,12 @@ rust-analyzer picks up `app/`.
   curtain's check on the sensor on or off. Off, the sound alone decides what counts as a
   shot (the curtain's lights are off too, and no shots through an existing hole are
   reported). On again, it uses the window last set (45–100 µs if none was).
+- Settings → Measurement → **Change the settings…** edits the sensor's measuring settings:
+  the solver's limits, the curtain's window, the mic span, the dead time and the channels.
+  Values out of range can't be written; the sensor's own check has the last word, and the
+  app says when it didn't take them.
+- Click on shots that overlap (a tight group, two shots through one hole) to get a list of
+  them all; pick one to see its details.
 - Calibrate from the app: Settings → Measurement → **Calibrate…** walks through the spark
   points of the calibration template (16 points, 10 sparks each), fits the microphones'
   positions and timing, shows the result, and writes it to the sensor. **Field check…** makes

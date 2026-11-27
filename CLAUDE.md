@@ -63,7 +63,7 @@ summary", https://claude.ai/code/artifact/a8aff581-45d0-41fc-8f4c-dd17fb9b4ac1 (
 | Host board (`hardware/host-board/`) | v0.3 ordered (2026-11-27): the J5 (BME280) and U4-supply changes on the board, the south half laid out again and the board routed again (2026-11-24, 76 × 132 mm, 0.4/0.6/0.8 mm tracks, DRC and ERC clean); firmware already on its pin map | Assemble by hand (U3, U4 socketed); MEASUREMENT 7-2 (step 1 tests 3 and 14 on the real board); its bench list (`TODO.md`) |
 | Frame and mechanics | 250 × 250 mm, PETG mic holders on an aluminium backbone (summary); enclosure open | 6 mics (PLAN D2): the top-right corner moved out along the diagonal by d = 25 mm, to (122.68, 122.68) (PLAN D1's update; principle in `hardware/frame/top-right-holder.svg`), plus bottom-middle and right-middle mics; the user designs and prints the holders. The firmware defaults, the simulator and `model.py` use it from 2026-11-24 (MEASUREMENT 7-0b) |
 | IR curtain | Designed (receiver on the host board, emitter board); firmware built and passing simulated (step 4b, on GPIO 13) | Its bench test (summary, PLAN phase 1.6), then the real gate |
-| App (`app/`) | v0.1.4, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay; protocol v3 (step 5c, merged to `main`): unscored holes and missed shots, the event log, a read-only Measurement section; the calibration wizard and the field check with the Rust fit (step 5d, merged to `main`); card photos C1–C4 (PLAN D13, merged to `main` 2026-11-24; the series panel with the photo's results, and the holes made fast, 41 shots 85 s → 1.2 s, merged 2026-11-24): registration, holes, the upload from the phone, the photo under the shots and the ground-truth panel, passing their synthetic and HTTP tests, the phone test and the user's look at the UI (2026-11-24); counting cards (C7, merged to `main` 2026-11-26): a card photo apart from the series, only scored, the card's axes from its printed numbers, passing on every real photo and the user's look; unscored hits resolved by hand (merged to `main` 2026-11-26): placed on the card, the same hole as a shot, or a miss, passing its unit and headless UI tests and the user's look; the IR curtain switch, and both run against a real sensor (MEASUREMENT 5f, merged to `main` 2026-11-27) | Card photos C5: the user's real photos (a clean card, then one with holes); a settings editor; the shot store in flash (PLAN D6) |
+| App (`app/`) | v0.1.4, desktop (Linux, Windows, macOS), BLE, 10 m air pistol card, scoring, series, replay; protocol v3 (step 5c, merged to `main`): unscored holes and missed shots, the event log, a read-only Measurement section; the calibration wizard and the field check with the Rust fit (step 5d, merged to `main`); card photos C1–C4 (PLAN D13, merged to `main` 2026-11-24; the series panel with the photo's results, and the holes made fast, 41 shots 85 s → 1.2 s, merged 2026-11-24): registration, holes, the upload from the phone, the photo under the shots and the ground-truth panel, passing their synthetic and HTTP tests, the phone test and the user's look at the UI (2026-11-24); counting cards (C7, merged to `main` 2026-11-26): a card photo apart from the series, only scored, the card's axes from its printed numbers, passing on every real photo and the user's look; unscored hits resolved by hand (merged to `main` 2026-11-26): placed on the card, the same hole as a shot, or a miss, passing its unit and headless UI tests and the user's look; the IR curtain switch, and both run against a real sensor (MEASUREMENT 5f, merged to `main` 2026-11-27); a click on overlapping shots lists them; the settings editor (5g, against the sensor; merged 2026-11-27) | Card photos C5: the user's real photos (a clean card, then one with holes); a settings editor; the shot store in flash (PLAN D6) |
 | Range server, MQTT, management, wasm viewer | Not started (wasm parked) | FUTURE_ARCHITECTURE step 2, PLAN phase 4 |
 
 ## Repository
@@ -394,13 +394,15 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   like shots, and reads the calibration and settings again when Status shows a new cfg ID.
   `eventlog.rs` writes them as the firmware's log lines (`cfg`, `rec`, `dip`, `MISSED`; C's
   `%.9g` and CRC-32, so the IDs match) to `logs/YYYY-MM-DD.log` in the app's data folder (a
-  setting, on by default). The sensor settings show them read-only ("Measurement"), but for
-  the IR curtain's switch ("A shot needs the IR curtain's confirmation", `curtain_switch`):
+  setting, on by default). The sensor settings show them in "Measurement", with the settings
+  editor ("Change the settings…", `settings_editor`: every Settings field, checked by
+  `protocol::settings_problem` as the firmware checks them but for the span's largest,
+  written whole; the UI test `settings_editor`) and the IR curtain's switch ("A shot needs the IR curtain's confirmation", `curtain_switch`):
   off writes Settings as last read with the window 0, 0 (the gate and IR_EN off), on writes
   the window last used (the sensor's own when on, kept in the app's storage; 45–100 µs if
-  none), and it shows the sensor's state until the new settings come back (a write the
-  sensor drops times out after 5 s with a message). The UI test `curtain_switch` plays the
-  sensor.
+  none), and it shows the sensor's state until the new settings come back. Both share one
+  pending write (`settings_pending`): a write the sensor drops times out after 5 s with a
+  message. The UI test `curtain_switch` plays the sensor.
 - **Card photos (PLAN D13, `CARDPHOTO.md`):** `upload.rs` runs a `tiny_http` server while
   the dialog is open (port 8710, a single-use token per link, shown as a QR code); the phone's
   page sends the photo as it is; `cardphoto::meta` drops EXIF/GPS/XMP from the file without

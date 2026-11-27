@@ -20,9 +20,6 @@ status and settings are in (step 5c).
   what "correct the scores" means for a shot whose paper score differs (take the paper's?
   keep both?), several unscored hits against several unclaimed holes (which goes where),
   and whether the series counts as finished only once every hit is resolved.
-- **Settings editor.** The sensor's settings (span, dead time, validity limits, the curtain's
-  window) are shown read-only, but for the curtain's switch (MEASUREMENT 5f); the protocol
-  can write them all (Settings, `Command::WriteSettings`).
 - **Calibration templates.** The wizard has the 4 × 4 grid built in
   (`assets/templates/grid-4x4.json`); choosing another template file, and the sparks per
   point, in the window.

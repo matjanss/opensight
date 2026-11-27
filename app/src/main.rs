@@ -55,9 +55,9 @@ const KEY_CURTAIN_WINDOW: &str = "curtain_window_ns";
 
 /// The curtain's window when switched on and none was used before (PLAN D9: 45–100 µs).
 const CURTAIN_DEFAULT_NS: (f32, f32) = (45_000.0, 100_000.0);
-/// How long the switch waits for the sensor's new settings: it drops a write it can't take
-/// (out of range) without an error.
-const CURTAIN_WAIT: Duration = Duration::from_secs(5);
+/// How long a settings write waits for the sensor's new settings: it drops a write it can't
+/// take (out of range) without an error.
+const SETTINGS_WAIT: Duration = Duration::from_secs(5);
 
 /// The window and taskbar icon (assets/icon/). None if the PNG can't be read: the
 /// window then gets the system's default icon.
@@ -687,8 +687,11 @@ struct SensorApp {
     /// The curtain's window last used (ns), to switch it back on with: the sensor's own when
     /// it is on, else remembered (app TODO, the curtain switch).
     curtain_window: (f32, f32),
-    /// The switch written, waiting for the sensor's settings to show it: (on, since).
-    curtain_pending: Option<(bool, Instant)>,
+    /// Settings written (the curtain switch, the editor), waiting for the sensor's to come
+    /// back the same: (written, as they were before, since).
+    settings_pending: Option<(protocol::Settings, protocol::Settings, Instant)>,
+    /// The settings editor, while open: (the sensor's settings it started from, the draft).
+    settings_draft: Option<(protocol::Settings, protocol::Settings)>,
     event_counts: EventCounts,
     /// Every event written to a log file (`eventlog`), as the firmware's serial log lines.
     save_events: bool,
@@ -783,7 +786,8 @@ impl SensorApp {
                 .and_then(|s| s.get_string(KEY_CURTAIN_WINDOW))
                 .and_then(|v| parse_window(&v))
                 .unwrap_or(CURTAIN_DEFAULT_NS),
-            curtain_pending: None,
+            settings_pending: None,
+            settings_draft: None,
             event_counts: EventCounts::default(),
             save_events: storage
                 .and_then(|s| s.get_string(KEY_SAVE_EVENTS))
@@ -1015,7 +1019,8 @@ impl SensorApp {
                     self.event_counts = EventCounts::default();
                     self.status = None;
                     self.config = None;
-                    self.curtain_pending = None;
+                    self.settings_pending = None;
+                    self.settings_draft = None;
                     self.cal = None;
                     self.log_note(&format!("connected to {name} ({id})"));
                     self.pin_input.clear();
@@ -1034,7 +1039,8 @@ impl SensorApp {
                         task.lost();
                     }
                     self.link = Link::Idle;
-                    self.curtain_pending = None;
+                    self.settings_pending = None;
+                    self.settings_draft = None;
                     self.heartbeat = None;
                     self.heartbeat_at = None;
                     self.auto_retry_at = Instant::now() + AUTO_RETRY;
@@ -1083,8 +1089,15 @@ impl SensorApp {
                     if let Some(w) = set.curtain() {
                         self.curtain_window = w;
                     }
-                    if self.curtain_pending.is_some_and(|(on, _)| on == set.curtain().is_some()) {
-                        self.curtain_pending = None;
+                    if self.settings_pending.as_ref().is_some_and(|(w, _, _)| *w == set) {
+                        self.settings_pending = None;
+                    }
+                    // The editor follows the sensor unless it holds changes of its own.
+                    if let Some((base, draft)) = &mut self.settings_draft
+                        && (*draft == *base || *draft == set)
+                    {
+                        *base = set.clone();
+                        *draft = set.clone();
                     }
                     self.config = Some((cal, set));
                 }
@@ -1108,7 +1121,7 @@ impl SensorApp {
                 }
                 Event::PasskeyCancelled => self.passkey_prompt = None,
                 Event::Error(e) => {
-                    self.curtain_pending = None;
+                    self.settings_pending = None;
                     self.message = Some(e);
                 }
             }
@@ -1179,6 +1192,7 @@ impl SensorApp {
 impl eframe::App for SensorApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.handle_events();
+        self.settings_timeout();
         self.auto_connect();
         let was_dark = self.dark_mode;
 
@@ -1330,6 +1344,9 @@ impl eframe::App for SensorApp {
 
         if self.dark_mode != was_dark {
             ctx.set_theme(theme_pref(self.dark_mode));
+        }
+        if self.settings_pending.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(250)); // its timeout
         }
         // Keeps "updated 3 s ago" ticking; BLE events repaint on their own.
         if matches!(self.link, Link::Connected { .. }) {
@@ -2783,19 +2800,10 @@ impl SensorApp {
     /// Whether a shot needs the IR curtain's confirmation (PLAN D9, app TODO). Off writes the
     /// window 0, 0 (the gate and the emitter off), on the last window used; the rest of the
     /// settings as read. It shows the sensor's state, not the click's, until the sensor's new
-    /// settings come back (or `CURTAIN_WAIT` passes: the sensor dropped the write).
+    /// settings come back (or `SETTINGS_WAIT` passes: the sensor dropped the write).
     fn curtain_switch(&mut self, ui: &mut Ui, set: &protocol::Settings) {
         let on = set.curtain().is_some();
-        if let Some((want, since)) = self.curtain_pending
-            && since.elapsed() > CURTAIN_WAIT
-        {
-            self.curtain_pending = None;
-            self.message = Some(format!(
-                "The sensor didn't take the change: the IR curtain is still {}.",
-                if want { "off" } else { "on" }
-            ));
-        }
-        let waiting = self.curtain_pending.is_some();
+        let waiting = self.settings_pending.is_some();
         let mut checked = on;
         let (lo, hi) = self.curtain_window;
         let tip = format!(
@@ -2808,26 +2816,186 @@ impl SensorApp {
         ui.horizontal(|ui| {
             let r = ui
                 .add_enabled(
-                    !waiting && self.cal.is_none(),
+                    !waiting && self.cal.is_none() && self.settings_draft.is_none(),
                     egui::Checkbox::new(&mut checked, "A shot needs the IR curtain's confirmation"),
                 )
                 .on_hover_text(tip)
-                .on_disabled_hover_text("Not while switching, or while calibrating.");
-            if waiting {
+                .on_disabled_hover_text("Not while writing settings, while calibrating, or while the settings are open below.");
+            if waiting && self.settings_draft.is_none() {
                 ui.spinner();
                 ui.label(RichText::new("Switching…").weak());
-                ui.ctx().request_repaint_after(Duration::from_millis(250));
             }
             if r.changed() {
                 let window = checked.then_some(self.curtain_window);
-                self.send(Command::WriteSettings(Box::new(set.with_curtain(window))));
-                self.curtain_pending = Some((checked, Instant::now()));
+                self.write_settings(set.with_curtain(window), set.clone());
             }
         });
     }
 
+    /// Writes the settings (whole) and waits for the sensor's to come back the same.
+    fn write_settings(&mut self, set: protocol::Settings, before: protocol::Settings) {
+        self.send(Command::WriteSettings(Box::new(set.clone())));
+        self.settings_pending = Some((set, before, Instant::now()));
+    }
+
+    /// A write the sensor didn't take (it drops one out of its range without an error): after
+    /// `SETTINGS_WAIT`, say so.
+    fn settings_timeout(&mut self) {
+        let Some((want, before, since)) = &self.settings_pending else {
+            return;
+        };
+        if since.elapsed() <= SETTINGS_WAIT {
+            return;
+        }
+        let only_curtain = want.with_curtain(before.curtain()) == *before;
+        self.message = Some(if only_curtain {
+            format!(
+                "The sensor didn't take the change: the IR curtain is still {}.",
+                if before.curtain().is_some() { "on" } else { "off" }
+            )
+        } else {
+            "The sensor didn't take the new settings: a value out of its range (the largest mic \
+             span is the sensor's own), or the channels changed while its simulator or self-test \
+             runs. Its settings are as before."
+                .into()
+        });
+        self.settings_pending = None;
+    }
+
+    /// The settings editor (app TODO): every field of the Settings message, checked as the
+    /// sensor checks them (but the span's largest), written whole.
+    fn settings_editor(&mut self, ui: &mut Ui, set: &protocol::Settings) {
+        let busy = self.settings_pending.is_some() || self.cal.is_some();
+        let curtain_default = self.curtain_window;
+        let Some((base, d)) = &mut self.settings_draft else {
+            if ui
+                .add_enabled(!busy, egui::Button::new("Change the settings…"))
+                .on_hover_text("The solver's limits, the curtain's window, the mic span, the dead time and the channels.")
+                .clicked()
+            {
+                self.settings_draft = Some((set.clone(), set.clone()));
+            }
+            return;
+        };
+        enum Act {
+            None,
+            Write,
+            Undo,
+            Close,
+        }
+        let mut act = Act::None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::Grid::new("settings_editor").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                ui.label("Drop-one");
+                ui.checkbox(&mut d.drop_one, "Over the limit, try each mic left out")
+                    .on_hover_text("The best fit with one mic left out, if the fit over all is over the residual limit.");
+                ui.end_row();
+                ui.label("Residual limit");
+                ui.add(egui::DragValue::new(&mut d.res_limit_ns).range(1.0..=100_000.0).speed(10.0).suffix(" ns"));
+                ui.end_row();
+                ui.label("Mics that may be lost");
+                let lost = |v: i8| if v < 0 { "off".to_string() } else { v.to_string() };
+                egui::ComboBox::from_id_salt("settings_lost").selected_text(lost(d.max_lost)).show_ui(ui, |ui| {
+                    for v in -1..=4i8 {
+                        ui.selectable_value(&mut d.max_lost, v, lost(v));
+                    }
+                });
+                ui.end_row();
+                ui.label("Area");
+                optional_field(ui, "settings_area", &mut d.area_mm, 1.0, 10.0..=1000.0, 105.0, "±", " mm");
+                ui.end_row();
+                ui.label("Together");
+                optional_field(ui, "settings_together", &mut d.together_ns, 1000.0, 0.1..=100.0, 20.0, "", " µs");
+                ui.end_row();
+                ui.label("Longest pulse");
+                optional_field(ui, "settings_pulse", &mut d.pulse_max_ns, 1000.0, 0.1..=100.0, 10.0, "", " µs");
+                ui.end_row();
+                ui.label("IR curtain window");
+                ui.horizontal(|ui| {
+                    let mut on = d.curtain_hi_ns > 0.0;
+                    if ui.checkbox(&mut on, "").on_hover_text("A shot needs a dip in this window after it.").changed() {
+                        *d = d.with_curtain(on.then_some(curtain_default));
+                    }
+                    if on {
+                        let (mut lo, mut hi) = (d.curtain_lo_ns / 1000.0, d.curtain_hi_ns / 1000.0);
+                        let a = ui.add(egui::DragValue::new(&mut lo).range(0.0..=2000.0).speed(1.0).suffix(" µs"));
+                        ui.label("to");
+                        let b = ui.add(egui::DragValue::new(&mut hi).range(0.0..=2000.0).speed(1.0).suffix(" µs"));
+                        if a.changed() || b.changed() {
+                            d.curtain_lo_ns = lo * 1000.0;
+                            d.curtain_hi_ns = hi * 1000.0;
+                        }
+                    } else {
+                        ui.label(RichText::new("off").weak());
+                    }
+                });
+                ui.end_row();
+                ui.label("Mic span");
+                ui.add(egui::DragValue::new(&mut d.span_mm).range(50..=2000).speed(5.0).suffix(" mm"))
+                    .on_hover_text("The largest distance between two mics: it sets how long an event's window is.");
+                ui.end_row();
+                ui.label("Dead time");
+                ui.add(egui::DragValue::new(&mut d.deadtime_ms).range(1..=1000).suffix(" ms"))
+                    .on_hover_text("No new event for this long after one.");
+                ui.end_row();
+                ui.label("Channels");
+                ui.vertical(|ui| {
+                    for row in 0..2 {
+                        ui.horizontal(|ui| {
+                            for c in row * 4..row * 4 + 4 {
+                                let mut on = d.mask & (1 << c) != 0;
+                                if ui.checkbox(&mut on, format!("CH{}", c + 1)).changed() {
+                                    d.mask ^= 1 << c;
+                                }
+                            }
+                        });
+                    }
+                });
+                ui.end_row();
+            });
+            let problem = protocol::settings_problem(d);
+            let changed = *d != *set;
+            if let Some(p) = problem {
+                ui.label(RichText::new(format!("⚠ {p}")).strong());
+            } else if *base != *set && *d != *set {
+                ui.label(RichText::new("The sensor's settings changed meanwhile: Undo changes takes them.").weak());
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(changed && problem.is_none() && !busy, egui::Button::new("Write to the sensor"))
+                    .clicked()
+                {
+                    act = Act::Write;
+                }
+                if ui.add_enabled(changed && !busy, egui::Button::new("Undo changes")).clicked() {
+                    act = Act::Undo;
+                }
+                if ui.add_enabled(!busy, egui::Button::new("Close")).clicked() {
+                    act = Act::Close;
+                }
+                if self.settings_pending.is_some() {
+                    ui.spinner();
+                    ui.label(RichText::new("Writing…").weak());
+                }
+            });
+        });
+        match act {
+            Act::Write => {
+                let draft = d.clone();
+                self.write_settings(draft, set.clone());
+            }
+            Act::Undo => {
+                *base = set.clone();
+                *d = set.clone();
+            }
+            Act::Close => self.settings_draft = None,
+            Act::None => {}
+        }
+    }
+
     /// Protocol v3: the calibration, the settings, the air, what the events said, and the
-    /// event log; the curtain switch. (The rest of the settings: serial for now.)
+    /// event log; the curtain switch and the settings editor.
     fn measurement_card(&mut self, ui: &mut Ui) {
         section(ui, "Measurement", |ui| {
             let weak = |ui: &mut Ui, t: String| {
@@ -2867,6 +3035,7 @@ impl SensorApp {
             }
             if let Some(set) = curtain {
                 self.curtain_switch(ui, &set);
+                self.settings_editor(ui, &set);
             }
             ui.label(self.event_counts.text());
             let ready = self.status.is_some() && self.config.is_some() && self.cal.is_none();
@@ -4145,6 +4314,40 @@ fn link_dot(ui: &mut Ui, link: &Link) {
     }
 }
 
+/// An optional setting (0: off): a checkbox, and the value when on. `unit`: stored per shown
+/// (1000 for ns shown as µs); `default`: shown, when switched on.
+#[allow(clippy::too_many_arguments)]
+fn optional_field(
+    ui: &mut Ui,
+    id: &str,
+    v: &mut f32,
+    unit: f32,
+    range: std::ops::RangeInclusive<f32>,
+    default: f32,
+    prefix: &str,
+    suffix: &str,
+) {
+    ui.push_id(id, |ui| {
+        ui.horizontal(|ui| {
+            let mut on = *v > 0.0;
+            if ui.checkbox(&mut on, "").changed() {
+                *v = if on { default * unit } else { 0.0 };
+            }
+            if on {
+                let mut shown = *v / unit;
+                if ui
+                    .add(egui::DragValue::new(&mut shown).range(range).speed(0.5).prefix(prefix).suffix(suffix))
+                    .changed()
+                {
+                    *v = shown * unit;
+                }
+            } else {
+                ui.label(RichText::new("off").weak());
+            }
+        });
+    });
+}
+
 /// "lo,hi" in ns, as saved; a usable window only (0 ≤ lo < hi).
 fn parse_window(v: &str) -> Option<(f32, f32)> {
     let (lo, hi) = v.split_once(',')?;
@@ -4757,6 +4960,117 @@ mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
 
+    /// The settings editor (app TODO) against a sensor played by the test: opened, three
+    /// fields changed, written whole (the rest as read); the sensor's settings come back and
+    /// the editor follows; an invalid window can't be written; Undo; a span the sensor drops
+    /// times out with a message; Close. `UI_SHOTS=<dir>` saves an image of each step.
+    #[test]
+    fn settings_editor() {
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ev_tx, ev_rx) = mpsc::channel();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 1400.0))
+            .build_eframe(move |cc| {
+                install_fonts(&cc.egui_ctx);
+                let mut app = SensorApp::with_link(cc, (cmd_tx, ev_rx));
+                app.event_log = None;
+                app.settings_open = true;
+                app
+            });
+        let shots_dir = std::env::var_os("UI_SHOTS").map(std::path::PathBuf::from);
+        let step = |h: &mut egui_kittest::Harness<SensorApp>, name: &str| {
+            h.run_steps(4);
+            if let Some(dir) = &shots_dir {
+                h.render().expect("render").save(dir.join(format!("settings-{name}.png"))).unwrap();
+            }
+        };
+        let example = protocol::tests::example;
+        let read = protocol::decode_settings(&example(protocol::tests::SETTINGS_HEX)).unwrap();
+        let cal = protocol::decode_calibration(&example(protocol::tests::CALIBRATION_HEX)).unwrap();
+        let status = protocol::decode_status(&example(protocol::tests::STATUS_HEX)).unwrap();
+        ev_tx
+            .send(Event::Connected {
+                id: "test".into(),
+                name: "Test".into(),
+                heartbeat: None,
+                pin_supported: true,
+                shots_supported: true,
+            })
+            .unwrap();
+        ev_tx.send(Event::Status(status)).unwrap();
+        ev_tx.send(Event::Config(cal.clone(), read.clone())).unwrap();
+        step(&mut h, "0-read");
+        let written = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Command>| {
+            let mut out = None;
+            while let Ok(c) = rx.try_recv() {
+                if let Command::WriteSettings(s) = c {
+                    assert!(out.is_none(), "written twice");
+                    out = Some(*s);
+                }
+            }
+            out
+        };
+        let click = |h: &mut egui_kittest::Harness<SensorApp>, label: &str| {
+            h.get_by_label(label).scroll_to_me();
+            h.run_steps(3);
+            h.get_by_label(label).click();
+            h.run_steps(3);
+        };
+
+        // Open; the curtain switch waits while the editor is open.
+        click(&mut h, "Change the settings…");
+        assert!(h.state().settings_draft.is_some());
+        // Drop-one off by its checkbox; the dead time and the area as typed.
+        click(&mut h, "Over the limit, try each mic left out");
+        {
+            let d = &mut h.state_mut().settings_draft.as_mut().unwrap().1;
+            d.deadtime_ms = 40;
+            d.area_mm = 100.0;
+        }
+        step(&mut h, "1-changed");
+        click(&mut h, "Write to the sensor");
+        let mut want = read.clone();
+        want.drop_one = false;
+        want.deadtime_ms = 40;
+        want.area_mm = 100.0;
+        assert_eq!(written(&mut cmd_rx).expect("written"), want);
+        assert!(h.state().settings_pending.is_some());
+        step(&mut h, "2-writing");
+        // The sensor takes them: no longer waiting, the editor on the new settings.
+        ev_tx.send(Event::Config(cal.clone(), want.clone())).unwrap();
+        step(&mut h, "3-taken");
+        assert!(h.state().settings_pending.is_none());
+        assert_eq!(h.state().settings_draft, Some((want.clone(), want.clone())));
+
+        // An invalid window: the problem shown, nothing written.
+        h.state_mut().settings_draft.as_mut().unwrap().1 = want.with_curtain(Some((90_000.0, 50_000.0)));
+        step(&mut h, "4-invalid");
+        h.get_by_label_contains("The curtain's window must end after it starts");
+        click(&mut h, "Write to the sensor");
+        assert!(written(&mut cmd_rx).is_none());
+        // Undo: back to the sensor's.
+        click(&mut h, "Undo changes");
+        assert_eq!(h.state().settings_draft.as_ref().unwrap().1, want);
+
+        // A span over the sensor's largest: written, dropped by the sensor, a message after
+        // SETTINGS_WAIT.
+        h.state_mut().settings_draft.as_mut().unwrap().1.span_mm = 1500;
+        h.run_steps(2);
+        click(&mut h, "Write to the sensor");
+        assert_eq!(written(&mut cmd_rx).map(|s| s.span_mm), Some(1500));
+        if let Some(p) = &mut h.state_mut().settings_pending {
+            p.2 = Instant::now() - SETTINGS_WAIT - Duration::from_millis(1);
+        }
+        step(&mut h, "5-dropped");
+        assert!(h.state().settings_pending.is_none());
+        let msg = h.state().message.clone().unwrap_or_default();
+        assert!(msg.contains("didn't take the new settings"), "{msg}");
+        // The draft keeps its change (to fix or undo); Close.
+        assert_eq!(h.state().settings_draft.as_ref().unwrap().1.span_mm, 1500);
+        click(&mut h, "Close");
+        assert!(h.state().settings_draft.is_none());
+    }
+
     /// Overlapping shots (app TODO): a click on three shots in one place (shot 4, the hole
     /// resolved as its same hole, and the other hole placed 0.05 mm away) lists them newest
     /// first; picking one opens its popup; a click on a lone shot opens its popup directly;
@@ -4931,18 +5245,61 @@ mod tests {
         // The switch: off, then on again at the window last used.
         click_switch(&mut h);
         shot(&mut h, "1-switching");
-        assert!(h.state().curtain_pending.is_some());
+        assert!(h.state().settings_pending.is_some());
         wait(&mut h, 10.0, "the curtain off on the sensor", &|app: &SensorApp| {
-            curtain(app).is_none() && app.curtain_pending.is_none()
+            curtain(app).is_none() && app.settings_pending.is_none()
         });
         assert_eq!(h.state().config.as_ref().unwrap().1, read.with_curtain(None), "only the window changed");
         shot(&mut h, "2-off");
         click_switch(&mut h);
         wait(&mut h, 10.0, "the curtain on again at 50-90 us", &|app: &SensorApp| {
-            curtain(app) == Some((50_000.0, 90_000.0)) && app.curtain_pending.is_none()
+            curtain(app) == Some((50_000.0, 90_000.0)) && app.settings_pending.is_none()
         });
         assert_eq!(h.state().config.as_ref().unwrap().1, read, "back to the settings as read");
         assert!(h.state().message.is_none(), "{:?}", h.state().message);
+
+        // The settings editor: the dead time and the area changed and written, taken; a span
+        // over the sensor's largest, dropped by the sensor (the message after 5 s); then the
+        // settings as read written back.
+        let click_label = |h: &mut egui_kittest::Harness<SensorApp>, l: &str| {
+            h.get_by_label(l).scroll_to_me();
+            h.run_steps(3);
+            h.get_by_label(l).click();
+            h.run_steps(3);
+        };
+        click_label(&mut h, "Change the settings…");
+        {
+            let d = &mut h.state_mut().settings_draft.as_mut().expect("the editor").1;
+            d.deadtime_ms = 40;
+            d.area_mm = 100.0;
+        }
+        h.run_steps(2);
+        click_label(&mut h, "Write to the sensor");
+        let mut want = read.clone();
+        want.deadtime_ms = 40;
+        want.area_mm = 100.0;
+        let w = want.clone();
+        wait(&mut h, 10.0, "the editor's settings taken (dead time 40 ms, area 100 mm)", &|app: &SensorApp| {
+            app.config.as_ref().is_some_and(|(_, s)| *s == w) && app.settings_pending.is_none()
+        });
+        h.state_mut().settings_draft.as_mut().unwrap().1.span_mm = 5000;
+        h.run_steps(2);
+        click_label(&mut h, "Write to the sensor");
+        wait(&mut h, 10.0, "a span of 5000 mm dropped by the sensor, said so", &|app: &SensorApp| {
+            app.settings_pending.is_none()
+                && app.message.as_deref().is_some_and(|m| m.contains("didn't take the new settings"))
+        });
+        assert_eq!(h.state().config.as_ref().unwrap().1, want, "unchanged by the dropped write");
+        h.state_mut().message = None;
+        h.state_mut().settings_draft.as_mut().unwrap().1 = read.clone();
+        h.run_steps(2);
+        click_label(&mut h, "Write to the sensor");
+        let r = read.clone();
+        wait(&mut h, 10.0, "the settings as read written back", &|app: &SensorApp| {
+            app.config.as_ref().is_some_and(|(_, s)| *s == r) && app.settings_pending.is_none()
+        });
+        click_label(&mut h, "Close");
+        shot(&mut h, "2b-settings");
 
         // 5f-4: two holes (a dip, no sound), two shots; then, the curtain off by the switch, two
         // shots each with a second one 2.5 ms later: MISSED while the first is still read out,
@@ -4955,7 +5312,7 @@ mod tests {
         wait(&mut h, 20.0, "2 shots scored", &|app: &SensorApp| app.series.len() == 2);
         settle(&mut h, 1.5);
         click_switch(&mut h);
-        wait(&mut h, 10.0, "the curtain off", &|app: &SensorApp| curtain(app).is_none() && app.curtain_pending.is_none());
+        wait(&mut h, 10.0, "the curtain off", &|app: &SensorApp| curtain(app).is_none() && app.settings_pending.is_none());
         serial(&["sim dip off", "deadtime 1", "sim fault double 2500", "sim at -20 30 3"]);
         wait(&mut h, 20.0, "3 shots, their 3 second shots measured or missed", &|app: &SensorApp| {
             app.series.len() + kinds(app, protocol::Kind::Missed) == 8
@@ -5029,7 +5386,14 @@ mod tests {
         shot(&mut h, "5-same");
         h.get_by_label("Confirm").click();
         h.run_steps(3);
-        assert_eq!(h.state().manual.get(&hole2), Some(&How::Same(resolve::key(&target))));
+        // Both shots at (10, 10) lie within a few hundredths of a mm: the click picks the
+        // nearer, either is right.
+        let same = match h.state().manual.get(&hole2) {
+            Some(&How::Same(k)) => k,
+            other => panic!("not the same hole: {other:?}"),
+        };
+        let s = h.state().series.iter().find(|(s, _)| resolve::key(s) == same).unwrap().0;
+        assert!((s.x_mm() - target.x_mm()).hypot(s.y_mm() - target.y_mm()) < 0.1, "{s:?}");
         shot(&mut h, "6-resolved");
         let before: Vec<(Key, Score)> = h.state().series.iter().map(|(s, sc)| (resolve::key(s), *sc)).collect();
         let unscored_before: Vec<Key> = h.state().unscored.iter().map(|(_, s)| resolve::key(s)).collect();
@@ -5146,7 +5510,7 @@ mod tests {
         step(&mut h, "1-switching");
         let off = written(&mut cmd_rx).expect("written");
         assert_eq!(off, set.with_curtain(None));
-        assert!(h.state().curtain_pending.is_some_and(|(on, _)| !on));
+        assert!(h.state().settings_pending.as_ref().is_some_and(|(w, _, _)| w.curtain().is_none()));
         click(&mut h); // disabled while waiting: nothing written
         step(&mut h, "1b-still");
         assert!(written(&mut cmd_rx).is_none());
@@ -5154,7 +5518,7 @@ mod tests {
         // The sensor takes it: its settings come back off.
         ev_tx.send(Event::Config(cal.clone(), off.clone())).unwrap();
         step(&mut h, "2-off");
-        assert!(h.state().curtain_pending.is_none());
+        assert!(h.state().settings_pending.is_none());
         assert_eq!(h.state().curtain_window, (50_000.0, 90_000.0));
 
         // On again: the last window, nothing else changed.
@@ -5162,10 +5526,12 @@ mod tests {
         step(&mut h, "3-on");
         assert_eq!(written(&mut cmd_rx).expect("written"), set);
 
-        // The sensor drops that write: the switch gives up after CURTAIN_WAIT, says so.
-        h.state_mut().curtain_pending = Some((true, Instant::now() - CURTAIN_WAIT - Duration::from_millis(1)));
+        // The sensor drops that write: the switch gives up after SETTINGS_WAIT, says so.
+        if let Some(p) = &mut h.state_mut().settings_pending {
+            p.2 = Instant::now() - SETTINGS_WAIT - Duration::from_millis(1);
+        }
         step(&mut h, "4-dropped");
-        assert!(h.state().curtain_pending.is_none());
+        assert!(h.state().settings_pending.is_none());
         let msg = h.state().message.clone().unwrap_or_default();
         assert!(msg.contains("didn't take the change") && msg.contains("still off"), "{msg}");
         let _ = std::fs::remove_dir_all(&logs);
