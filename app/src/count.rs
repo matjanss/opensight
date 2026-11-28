@@ -269,6 +269,8 @@ pub struct CountTask {
     error: Option<String>,
     /// "Start over" clicked once: the second click (on "Remove all") clears the cards.
     confirm_start_over: bool,
+    /// The file dialog ("Choose photos…"), while open.
+    pick: crate::pick::FilePick,
 }
 
 impl CountTask {
@@ -317,6 +319,7 @@ impl CountTask {
             lines: Vec::new(),
             confirm_start_over: false,
             error: None,
+            pick: Default::default(),
         }
     }
 
@@ -529,14 +532,21 @@ impl CountTask {
     /// Count mode in the main window: the card, and the side column with `top` above the
     /// list (the app's mode buttons).
     pub fn ui(&mut self, ui: &mut Ui, env: &CountEnv, top: impl FnOnce(&mut Ui)) {
-        // Photo files dropped on the window: counted like the phone's, within the limit.
-        let dropped: Vec<Vec<u8>> = ui.input(|i| {
+        // Photo files dropped on the window or chosen in the file dialog: counted like the
+        // phone's, within the limit.
+        let mut dropped: Vec<Vec<u8>> = ui.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
                 .filter_map(|f| f.bytes().ok())
                 .collect()
         });
+        for f in self.pick.take() {
+            match f {
+                Ok(b) => dropped.push(b),
+                Err(e) => self.error = Some(format!("Couldn't read {e}")),
+            }
+        }
         for b in dropped {
             let room = match &self.server {
                 Ok(s) => s.take_slot(),
@@ -610,6 +620,7 @@ impl CountTask {
         }
         let decimal = env.decimal;
         let (mut pick, mut remove, mut toggle_link) = (None, None, false);
+        let mut choose_here = false;
         let (mut start_over, mut confirm) = (false, self.confirm_start_over);
         panel(ui, "Cards", |ui| {
             if self.cards.is_empty() {
@@ -680,6 +691,14 @@ impl CountTask {
                 };
                 if !self.cards.is_empty() && !self.phone_done {
                     toggle_link = ui.add(egui::Button::new(label).frame(false)).clicked();
+                    // The panel with "Choose photos…" is hidden with the code: the files
+                    // stay one click away (on Wayland the only way from this computer).
+                    if !self.show_link {
+                        choose_here = ui
+                            .add_enabled(!self.pick.open(), egui::Button::new("Choose photos…").frame(false))
+                            .on_hover_text("Photo files on this computer")
+                            .clicked();
+                    }
                 }
                 if let Some(dir) = &env.photos_dir
                     && ui
@@ -711,6 +730,7 @@ impl CountTask {
             return;
         }
         let mut new_link = false;
+        let mut choose = choose_here;
         if self.phone_done {
             panel(ui, "From the phone", |ui| {
                 ui.add(egui::Label::new("The phone pressed \"Finished\": the link is closed.").wrap());
@@ -718,7 +738,7 @@ impl CountTask {
                     .button("New QR code")
                     .on_hover_text("Start the link again, for more cards from the phone")
                     .clicked();
-                ui.label(RichText::new("Or drop photo files on this window.").weak());
+                choose = crate::pick::choose_button(ui, self.pick.open(), "Choose photos…", "or drop them on this window");
             });
         } else if self.show_link || self.cards.is_empty() {
             panel(ui, "From the phone", |ui| {
@@ -745,7 +765,7 @@ impl CountTask {
                     }
                 }
                 ui.add_space(4.0);
-                ui.label(RichText::new("Or drop photo files on this window.").weak());
+                choose = crate::pick::choose_button(ui, self.pick.open(), "Choose photos…", "or drop them on this window");
             });
         }
         if !self.status.is_empty() {
@@ -756,6 +776,9 @@ impl CountTask {
         }
         if new_link {
             self.new_link();
+        }
+        if choose {
+            self.pick.start(ui.ctx(), "Card photos to count", true);
         }
         if let Some(n) = pick {
             self.follow = false;
@@ -1497,6 +1520,7 @@ mod tests {
             lines: Vec::new(),
             confirm_start_over: false,
             error: None,
+            pick: Default::default(),
         };
         let env = move || CountEnv {
             card,
@@ -1737,4 +1761,3 @@ mod real {
         }
     }
 }
-

@@ -22,6 +22,9 @@ qrcode = { version = "0.15.0", default-features = false }
 getrandom = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 nalgebra = "0.33"
+# The system's file dialog (photo files): on Linux through the desktop portal, which also
+# works on Wayland, where winit gets no dropped files.
+rfd = "0.15.4"
 
 # UI tests: the app driven headless (clicks, keys), rendered to images (src/main.rs tests).
 [dev-dependencies]

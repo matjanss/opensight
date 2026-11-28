@@ -8,6 +8,7 @@ mod card;
 mod count;
 mod eventlog;
 mod photo;
+mod pick;
 mod protocol;
 mod resolve;
 mod upload;
@@ -770,6 +771,8 @@ struct SensorApp {
     photo_task: Option<PhotoTask>,
     /// A photo being processed, and the sensor's shots it was taken with.
     photo_job: Option<PhotoJobRx>,
+    /// The file dialog ("Choose a photo…" in the photo window), while open.
+    photo_pick: pick::FilePick,
     /// The processed photo of the current series: under the shots, and its ground truth.
     card_photo: Option<CardPhoto>,
     photo_error: Option<String>,
@@ -870,6 +873,7 @@ impl SensorApp {
             cal_report: None,
             photo_task: None,
             photo_job: None,
+            photo_pick: Default::default(),
             card_photo: None,
             photo_error: None,
             mode: Mode::Shoot,
@@ -4898,7 +4902,14 @@ impl SensorApp {
                 .filter_map(|f| f.bytes().ok())
                 .collect()
         });
-        if let Some(b) = dropped.into_iter().next() {
+        let mut chosen: Option<Vec<u8>> = None;
+        for f in self.photo_pick.take() {
+            match f {
+                Ok(b) => chosen = chosen.or(Some(b)),
+                Err(e) => self.photo_error = Some(format!("Couldn't read {e}")),
+            }
+        }
+        if let Some(b) = dropped.into_iter().next().or(chosen) {
             self.process_photo(PhotoJob::Bytes(b), ui.ctx());
         }
         if let Some(e) = self.photo_error.clone()
@@ -4906,7 +4917,7 @@ impl SensorApp {
         {
             self.photo_error = None;
         }
-        let (mut new_link, mut demo) = (false, false);
+        let (mut new_link, mut demo, mut choose) = (false, false, false);
         let no_photo = self.card_photo.is_none() && self.photo_job.is_none();
         if let Some(t) = &self.photo_task
             && (t.show_link || no_photo)
@@ -4940,7 +4951,7 @@ impl SensorApp {
                     }
                 }
                 ui.add_space(4.0);
-                ui.label(RichText::new("Or drop a photo file on this window.").weak());
+                choose = pick::choose_button(ui, self.photo_pick.open(), "Choose a photo…", "or drop it on this window");
                 if std::env::var_os("OPENSIGHTS_DEMO_PHOTO").is_some() {
                     demo = ui.button("Demo: a synthetic photo of this series").clicked();
                 }
@@ -4962,6 +4973,9 @@ impl SensorApp {
         }
         if demo {
             self.process_photo(PhotoJob::Demo, ui.ctx());
+        }
+        if choose {
+            self.photo_pick.start(ui.ctx(), "The card's photo", false);
         }
     }
 

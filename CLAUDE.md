@@ -95,7 +95,8 @@ firmware/                     PlatformIO, pinned: pioarduino 55.03.312-1 (Arduin
 app/                          Rust 2024, eframe/egui 0.37, btleplug, resvg
   src/                        main.rs (UI), ble.rs, agent.rs, card.rs, protocol.rs, eventlog.rs,
                               calwizard.rs, upload.rs (card photos from the phone), photo.rs,
-                              count.rs (counting cards), resolve.rs (unscored hits by hand)
+                              count.rs (counting cards), resolve.rs (unscored hits by hand),
+                              pick.rs (photo files from the system's file dialog)
   cardphoto/                  card photos (workspace member): registration from the rings,
                               the holes, synthetic photos (CARDPHOTO.md)
   calib/                      the calibration crate (workspace member): the target's solver
@@ -422,7 +423,8 @@ hardware/frame/               frame drawings: top-right-holder.svg (the moved co
   angle from the homography and the expected error; over 10° the app warns but uses the photo.
   `photo.rs` processes a photo on a thread (registration, holes against the series' shots,
   the photo resampled onto the card's grid through the placement, `<photo>.result.json`).
-  `main.rs`: "Take photo" under the series opens the photo window (QR, status, drop a file);
+  `main.rs`: "Take photo" under the series opens the photo window (QR, status, "Choose a photo…" or a file dropped; dropping
+  doesn't work on Wayland, `pick::drop_works`);
   it closes once a photo is processed (an error keeps it open). The results go into the
   series panel: a table (#, OpenSights, Paper, both red where they differ, off), and below it
   "Keep the photo", "Card details" (⚠ when there are warnings), "Remove photo", "Clear

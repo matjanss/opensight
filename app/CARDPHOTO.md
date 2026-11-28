@@ -234,8 +234,10 @@ Builds (`src/photo.rs`, the window in `main.rs`):
 - **"Take photo"** under the series (next to "Clear series"; also with no shots yet, for a
   test card) opens the photo window: the old originals cleaned up, the server started, the
   QR code, the link, the server's news ("waiting", "the phone opened the page",
-  "received", a refusal's reason), "New QR code". A photo file dropped on the window goes the
-  same way (stored, then processed). With `OPENSIGHTS_DEMO_PHOTO=1` set, a button makes a
+  "received", a refusal's reason), "New QR code". A photo file chosen with "Choose a photo…" (the system's file dialog,
+  `pick.rs`, `rfd`; on Linux the desktop portal) or dropped on the window goes the same way
+  (stored, then processed). Dropping doesn't work on Wayland (winit 0.30 gets no dropped
+  files there), so the hint to drop is shown only where it works. With `OPENSIGHTS_DEMO_PHOTO=1` set, a button makes a
   synthetic photo of the series (holes 0.1 mm off the shots at random, the card turned
   90.5° in the holder and shifted 0.8 mm) to try it all without a real card.
 - **The processing** on a thread of its own, against the series' shots as they are when
@@ -520,7 +522,8 @@ sent to the sensor and the series isn't touched.
   there."); removing a card gives its place back. "Finished" at the bottom (2026-11-27, on
   the single photo's page too) closes the link: the app stops the count's server (its side
   says so, with "New QR code"), or closes the photo window. Closed in the app: the
-  page says the session ended. Photo files dropped on the window count the same way. The tips
+  page says the session ended. Photo files chosen with "Choose photos…" (several at once) or dropped on the window
+  count the same way. The tips
   on both pages no longer ask for a grey or coloured surface.
 - **The counting:** one worker thread, one card at a time in the order they came (1–5 s
   each, the hole search on every core); `photo::process` without shots (the unguided gauge,
