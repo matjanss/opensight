@@ -22,6 +22,7 @@ The web/wasm viewer is parked.
 | Document | What it holds | Read it when |
 |---|---|---|
 | `PLAN.md` | Decisions D1–D12 (mic layout, model, who does what, calibration, firmware structure, messages, the air, curtain, frame limits, ground truth, the solver), open questions Q1–Q3, phases 0–5 with their tests | Always, before choosing what to work on |
+| `TESTPLAN.md` | The test and calibration plan, bench to range to field routine: per test what it checks, why, what to expect; gates, record sheets, fault table | Before bench work with the boards, and to plan range days |
 | `firmware/MEASUREMENT.md` | The measurement firmware's steps 1–6, each with its build list and bench test, the step status table, and every bench result (newest first) | Before any measurement work; update it in the same commit as the code |
 | `firmware/MODEL.md` | The measurement model: units, mics, arrival time, speed of sound, propagation, the solver and its outputs, drop-one, the log lines (`cfg`, `rec`), the test vector format | Before touching `lib/measure/` or `tools/model.py` (see the model rule) |
 | `FUTURE_ARCHITECTURE.md` | The target system: target, range server, viewers, management, network per lane, updates, its steps 1–4 | Before anything network, server, viewer or fleet |
